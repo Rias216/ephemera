@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -12,26 +13,6 @@ import (
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 )
-
-var knownModels = map[string][]string{
-	"openai": {
-		"gpt-4.1-mini",
-	},
-	"anthropic": {
-		"claude-opus-4-8",
-		"claude-sonnet-4-6",
-		"claude-haiku-4-5",
-	},
-}
-
-// KnownModelIDs returns curated model IDs used when a live catalog is not
-// reachable. Live provider results still take precedence.
-func KnownModelIDs(provider string) []string {
-	models := knownModels[strings.ToLower(strings.TrimSpace(provider))]
-	out := make([]string, len(models))
-	copy(out, models)
-	return out
-}
 
 // ListModels asks the active provider for its currently available model IDs.
 func ListModels(ctx context.Context, cfg config.Config) ([]string, error) {
@@ -44,6 +25,8 @@ func ListModels(ctx context.Context, cfg config.Config) ([]string, error) {
 			return nil, fmt.Errorf("OPENAI_API_KEY is not set")
 		}
 		return listOpenAICompatibleModels(ctx, "https://api.openai.com/v1", key)
+	case "codex":
+		return ListCodexModels()
 	case "anthropic":
 		key := firstNonEmpty(cfg.AnthropicKey, os.Getenv("ANTHROPIC_API_KEY"))
 		if key == "" {
@@ -79,42 +62,65 @@ func listOpenAICompatibleModels(ctx context.Context, baseURL, apiKey string) ([]
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(apiKey))
 	}
 
-	var body struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
+	var body json.RawMessage
 	if err := doJSON(req, &body); err != nil {
 		return nil, err
 	}
-	models := make([]string, 0, len(body.Data))
-	for _, item := range body.Data {
-		models = append(models, item.ID)
+	models, err := modelIDsFromPayload(body)
+	if err != nil {
+		return nil, fmt.Errorf("%s model catalog: %w", req.URL.Host, err)
 	}
 	return cleanModelIDs(models), nil
 }
 
 func listAnthropicModels(ctx context.Context, apiKey string) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.anthropic.com/v1/models", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("x-api-key", strings.TrimSpace(apiKey))
-	req.Header.Set("anthropic-version", "2023-06-01")
+	const endpoint = "https://api.anthropic.com/v1/models"
+	models := make([]string, 0, 32)
+	afterID := ""
+	for page := 0; page < 20; page++ {
+		parsed, err := url.Parse(endpoint)
+		if err != nil {
+			return nil, err
+		}
+		query := parsed.Query()
+		query.Set("limit", "1000")
+		if afterID != "" {
+			query.Set("after_id", afterID)
+		}
+		parsed.RawQuery = query.Encode()
 
-	var body struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("x-api-key", strings.TrimSpace(apiKey))
+		req.Header.Set("anthropic-version", "2023-06-01")
+
+		var body struct {
+			Data    []modelListItem `json:"data"`
+			HasMore bool            `json:"has_more"`
+			LastID  string          `json:"last_id"`
+		}
+		if err := doJSON(req, &body); err != nil {
+			return nil, err
+		}
+		for _, item := range body.Data {
+			models = append(models, item.value())
+		}
+		if !body.HasMore {
+			break
+		}
+		next := strings.TrimSpace(body.LastID)
+		if next == "" || next == afterID {
+			return nil, fmt.Errorf("Anthropic model catalog pagination did not advance")
+		}
+		afterID = next
 	}
-	if err := doJSON(req, &body); err != nil {
-		return nil, err
+	models = cleanModelIDs(models)
+	if len(models) == 0 {
+		return nil, fmt.Errorf("Anthropic model catalog contained no model IDs")
 	}
-	models := make([]string, 0, len(body.Data))
-	for _, item := range body.Data {
-		models = append(models, item.ID)
-	}
-	return cleanModelIDs(models), nil
+	return models, nil
 }
 
 func listOllamaModels(ctx context.Context, baseURL string) ([]string, error) {
@@ -128,18 +134,20 @@ func listOllamaModels(ctx context.Context, baseURL string) ([]string, error) {
 	}
 
 	var body struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
+		Models []modelListItem `json:"models"`
 	}
 	if err := doJSON(req, &body); err != nil {
 		return nil, err
 	}
 	models := make([]string, 0, len(body.Models))
 	for _, item := range body.Models {
-		models = append(models, item.Name)
+		models = append(models, item.value())
 	}
-	return cleanModelIDs(models), nil
+	models = cleanModelIDs(models)
+	if len(models) == 0 {
+		return nil, fmt.Errorf("Ollama returned an empty model catalog")
+	}
+	return models, nil
 }
 
 func doJSON(req *http.Request, out any) error {
@@ -149,9 +157,90 @@ func doJSON(req *http.Request, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s returned %s", req.URL.Host, resp.Status)
+		return providerHTTPError(req.URL.Host, resp)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("%s returned invalid JSON: %w", req.URL.Host, err)
+	}
+	return nil
+}
+
+type modelListItem struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Model string `json:"model"`
+}
+
+func (m modelListItem) value() string {
+	return firstNonEmpty(m.ID, m.Name, m.Model)
+}
+
+func modelIDsFromPayload(raw json.RawMessage) ([]string, error) {
+	var envelope struct {
+		Data   json.RawMessage `json:"data"`
+		Models json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err == nil {
+		for _, collection := range []json.RawMessage{envelope.Data, envelope.Models} {
+			if models := modelIDsFromCollection(collection); len(models) > 0 {
+				return models, nil
+			}
+		}
+	}
+	if models := modelIDsFromCollection(raw); len(models) > 0 {
+		return models, nil
+	}
+
+	return nil, fmt.Errorf("response contained no model IDs")
+}
+
+func modelIDsFromCollection(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var items []modelListItem
+	if err := json.Unmarshal(raw, &items); err == nil && len(items) > 0 {
+		models := make([]string, 0, len(items))
+		for _, item := range items {
+			models = append(models, item.value())
+		}
+		models = cleanModelIDs(models)
+		if len(models) > 0 {
+			return models
+		}
+	}
+
+	var stringsOnly []string
+	if err := json.Unmarshal(raw, &stringsOnly); err == nil {
+		stringsOnly = cleanModelIDs(stringsOnly)
+		if len(stringsOnly) > 0 {
+			return stringsOnly
+		}
+	}
+	return nil
+}
+
+func providerHTTPError(host string, resp *http.Response) error {
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<10))
+	message := strings.TrimSpace(string(data))
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+	if len(data) > 0 && json.Unmarshal(data, &body) == nil {
+		message = firstNonEmpty(body.Error.Message, body.Message, message)
+	}
+	if message == "" {
+		return fmt.Errorf("%s returned %s", host, resp.Status)
+	}
+	message = strings.Join(strings.Fields(message), " ")
+	if len(message) > 240 {
+		message = message[:237] + "..."
+	}
+	return fmt.Errorf("%s returned %s: %s", host, resp.Status, message)
 }
 
 func joinEndpoint(baseURL, path string) (string, error) {

@@ -21,6 +21,9 @@ func TestDefault(t *testing.T) {
 	if !ValidProvider("compatible") {
 		t.Fatal("compatible provider should be supported")
 	}
+	if !ValidProvider("codex") {
+		t.Fatal("codex provider should be supported")
+	}
 }
 
 func TestNormalizeRepairsPartialConfig(t *testing.T) {
@@ -32,7 +35,7 @@ func TestNormalizeRepairsPartialConfig(t *testing.T) {
 	if cfg.Model() != "custom-model" {
 		t.Fatalf("normalize overwrote selected model: %q", cfg.Model())
 	}
-	if cfg.Models["ollama"] == "" || cfg.Models["anthropic"] == "" || cfg.Models["compatible"] == "" {
+	if cfg.Models["ollama"] == "" || cfg.Models["codex"] == "" || cfg.Models["anthropic"] == "" || cfg.Models["compatible"] == "" {
 		t.Fatal("normalize did not restore missing provider models")
 	}
 	if cfg.MaxTokens <= 0 || cfg.ContextTokens <= 0 || cfg.OllamaURL == "" || cfg.CompatibleURL == "" {
@@ -40,14 +43,14 @@ func TestNormalizeRepairsPartialConfig(t *testing.T) {
 	}
 }
 
-func TestNormalizeMigratesRetiredOpenAIModelDefaults(t *testing.T) {
+func TestNormalizePreservesExplicitOpenAIModel(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{Provider: "openai", Models: map[string]string{"openai": "gpt-5.4"}}
+	cfg := Config{Provider: "openai", Models: map[string]string{"openai": "gpt-5.5"}}
 	cfg.normalize()
 
-	if got := cfg.Model(); got != Default().Models["openai"] {
-		t.Fatalf("retired OpenAI model normalized to %q, want %q", got, Default().Models["openai"])
+	if got := cfg.Model(); got != "gpt-5.5" {
+		t.Fatalf("explicit OpenAI model normalized to %q", got)
 	}
 }
 
@@ -58,6 +61,30 @@ func TestSetModelInitializesMap(t *testing.T) {
 	cfg.SetModel("gpt-test")
 	if got := cfg.Model(); got != "gpt-test" {
 		t.Fatalf("Model() = %q, want gpt-test", got)
+	}
+}
+
+func TestSaveDoesNotRewriteExplicitOpenAIModel(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+
+	cfg := Default()
+	cfg.Provider = "openai"
+	cfg.SetModel("gpt-5.5")
+
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Model(); got != "gpt-5.5" {
+		t.Fatalf("Save rewrote in-memory model to %q", got)
+	}
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Model(); got != "gpt-5.5" {
+		t.Fatalf("Load rewrote saved model to %q", got)
 	}
 }
 

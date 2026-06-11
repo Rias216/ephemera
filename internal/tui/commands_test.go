@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -46,6 +47,23 @@ func TestConnectModelStepPullsCatalogFromChosenProvider(t *testing.T) {
 	}
 }
 
+func TestModelSuggestionsExcludeUnavailableSavedSelection(t *testing.T) {
+	server := modelListServer(t, []string{"live-model"})
+	m := Model{cfg: config.Default()}
+	m.cfg.Provider = "compatible"
+	m.cfg.CompatibleName = "test-provider"
+	m.cfg.CompatibleURL = server.URL
+	m.cfg.SetModel("stale-model")
+
+	got := m.commandSuggestions("/model ")
+	if hasSuggestion(got, "/model stale-model") {
+		t.Fatalf("model suggestions included unavailable saved model: %#v", got)
+	}
+	if !hasSuggestion(got, "/model live-model") {
+		t.Fatalf("model suggestions missing live provider model: %#v", got)
+	}
+}
+
 func TestConnectPresetUsesCompatibleProviderAndBaseURL(t *testing.T) {
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
 
@@ -65,6 +83,23 @@ func TestConnectPresetUsesCompatibleProviderAndBaseURL(t *testing.T) {
 	}
 	if m.connect.Step != connectAPIKey {
 		t.Fatalf("step = %q, want API key", m.connect.Step)
+	}
+}
+
+func TestConnectCodexSkipsCredentialStep(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+
+	m.startConnect("chatgpt")
+
+	if m.connect == nil {
+		t.Fatal("connect flow unexpectedly finished")
+	}
+	if m.connect.Provider != "codex" {
+		t.Fatalf("provider = %q, want codex", m.connect.Provider)
+	}
+	if m.connect.Step != connectModel {
+		t.Fatalf("step = %q, want model", m.connect.Step)
 	}
 }
 
@@ -111,6 +146,25 @@ func TestConnectBlankCompatibleBaseURLUsesNamedPresetDefault(t *testing.T) {
 	}
 	if m.connect.Step != connectAPIKey {
 		t.Fatalf("step = %q, want API key", m.connect.Step)
+	}
+}
+
+func TestConnectRequiredCredentialDoesNotAdvance(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	m := Model{
+		cfg:     config.Default(),
+		styles:  theme.New("rose"),
+		connect: &connectFlow{Provider: "openai", Step: connectAPIKey},
+	}
+	m.input = textInputForTest("")
+
+	m.submitConnectStep()
+
+	if m.connect == nil || m.connect.Step != connectAPIKey {
+		t.Fatalf("connect advanced without required credential: %#v", m.connect)
+	}
+	if !strings.Contains(m.status, "required") {
+		t.Fatalf("status = %q, want required-key guidance", m.status)
 	}
 }
 
@@ -199,6 +253,13 @@ func TestKnifeFadeUsesSmoothPinkGradient(t *testing.T) {
 	}
 	if len(colors) < 8 {
 		t.Fatalf("knife fade produced only %d distinct shades; want a smooth gradient", len(colors))
+	}
+}
+
+func TestKnifeFadeGlimmerDoesNotUseBrightestPaletteStop(t *testing.T) {
+	peak := knifeFadeColor(roseGlow, 40, 40, 82, 0.2, 100, 0)
+	if theme.Hex(peak) == theme.Hex(roseGlow[len(roseGlow)-1]) {
+		t.Fatalf("glimmer peak is still the brightest palette stop: %s", theme.Hex(peak))
 	}
 }
 
@@ -399,15 +460,70 @@ func TestBudgetCommandUpdatesContextTokens(t *testing.T) {
 }
 
 func TestModelsCommandOpensInteractiveChooser(t *testing.T) {
+	server := modelListServer(t, []string{"live-model"})
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
-	m.cfg.Provider = "openai"
+	m.cfg.Provider = "compatible"
+	m.cfg.CompatibleName = "test-provider"
+	m.cfg.CompatibleURL = server.URL
 	_, _ = m.handleCommand("/models")
 
 	if m.input.Value() != "/model " {
 		t.Fatalf("input = %q, want /model chooser", m.input.Value())
 	}
-	if !hasSuggestion(m.suggestions, "gpt-4.1-mini") {
-		t.Fatalf("model chooser missing OpenAI/GPT fallback or current choices: %#v", m.suggestions)
+	if !hasSuggestion(m.suggestions, "live-model") {
+		t.Fatalf("model chooser missing live provider choice: %#v", m.suggestions)
+	}
+}
+
+func TestModelCommandAcceptsUnavailableTypedID(t *testing.T) {
+	server := modelListServer(t, []string{"live-model"})
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+	m.cfg.Provider = "compatible"
+	m.cfg.CompatibleName = "test-provider"
+	m.cfg.CompatibleURL = server.URL
+	m.cfg.SetModel("live-model")
+
+	_, _ = m.handleCommand("/model missing-model")
+
+	if got := m.cfg.Model(); got != "missing-model" {
+		t.Fatalf("model did not change to typed ID: %q", got)
+	}
+	if !strings.Contains(m.status, "not advertised") {
+		t.Fatalf("status = %q, want uncataloged-model warning", m.status)
+	}
+}
+
+func TestModelCommandAcceptsTypedIDWhenCatalogFails(t *testing.T) {
+	server := failingModelListServer(t, http.StatusBadGateway, `{"error":{"message":"catalog down"}}`)
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+	m.cfg.Provider = "compatible"
+	m.cfg.CompatibleName = "test-provider"
+	m.cfg.CompatibleURL = server.URL
+	m.cfg.SetModel("old-model")
+
+	_, _ = m.handleCommand("/model typed-model")
+
+	if got := m.cfg.Model(); got != "typed-model" {
+		t.Fatalf("model did not change to typed ID: %q", got)
+	}
+	if !strings.Contains(m.status, "unverified") {
+		t.Fatalf("status = %q, want unverified-model warning", m.status)
+	}
+}
+
+func TestCodexModelCommandRejectsUnavailableTypedID(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+	m.cfg.Provider = "codex"
+	m.cfg.SetModel("gpt-5.5")
+
+	_, _ = m.handleCommand("/model random-api-model")
+
+	if got := m.cfg.Model(); got != "gpt-5.5" {
+		t.Fatalf("codex model changed to unavailable ID: %q", got)
+	}
+	if !strings.Contains(m.status, "not available from Codex") {
+		t.Fatalf("status = %q, want Codex availability error", m.status)
 	}
 }
 
@@ -560,6 +676,20 @@ func modelListServer(t *testing.T, ids []string) *httptest.Server {
 	return server
 }
 
+func failingModelListServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Fatalf("unexpected model-list path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprint(w, body)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 func backgroundValue(value **string) string {
 	if value == nil || *value == nil {
 		return "<nil>"
@@ -574,6 +704,53 @@ func hasSuggestion(items []suggestion, value string) bool {
 		}
 	}
 	return false
+}
+
+func TestConnectProgressTabsSpanFullRail(t *testing.T) {
+	m := Model{
+		cfg:     config.Default(),
+		styles:  theme.New("rose"),
+		connect: &connectFlow{Step: connectProvider},
+	}
+
+	const width = 112
+	got := m.connectProgressRail(width)
+	if renderedWidth := lipgloss.Width(got); renderedWidth != width {
+		t.Fatalf("progress rail width = %d, want %d", renderedWidth, width)
+	}
+
+	plain := stripAllANSIEscapes(got)
+	if strings.Count(plain, "│") != 4 {
+		t.Fatalf("progress rail separators = %d, want 4: %q", strings.Count(plain, "│"), plain)
+	}
+	for _, label := range []string{"01 PROVIDER", "02 DETAILS", "03 AUTH", "04 MODEL", "05 REVIEW"} {
+		if !strings.Contains(plain, label) {
+			t.Fatalf("progress rail missing %q: %q", label, plain)
+		}
+	}
+
+	reviewByte := strings.Index(plain, "05 REVIEW")
+	if reviewByte < 0 {
+		t.Fatal("review tab not found")
+	}
+	reviewCell := utf8.RuneCountInString(plain[:reviewByte])
+	if reviewCell < width*4/5 {
+		t.Fatalf("review tab starts at cell %d, want it in final fifth of %d cells: %q", reviewCell, width, plain)
+	}
+}
+
+func stripAllANSIEscapes(value string) string {
+	var plain strings.Builder
+	for i := 0; i < len(value); {
+		if value[i] == '\x1b' {
+			i = ansiEscapeEnd(value, i)
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(value[i:])
+		plain.WriteRune(r)
+		i += size
+	}
+	return plain.String()
 }
 
 func TestCommandPaletteUsesRemainingSpaceForInspector(t *testing.T) {
@@ -607,32 +784,37 @@ func TestViewUsesFullTerminalHeightWithAndWithoutPalette(t *testing.T) {
 	}
 }
 
-func TestBackgroundTextureIsStaticAndVisible(t *testing.T) {
+func TestBackgroundFillIsStaticAndClean(t *testing.T) {
 	m := Model{styles: theme.New("rose")}
 	first := m.textureLine(100, 4, 17, m.styles.Panel)
 	second := m.textureLine(100, 4, 17, m.styles.Panel)
 	if first != second {
-		t.Fatal("background texture changed between identical renders")
+		t.Fatal("background fill changed between identical renders")
 	}
-	if !strings.ContainsAny(first, "·∙╱") {
-		t.Fatalf("texture line contains no visible texture marks: %q", first)
+	if strings.ContainsAny(first, "·∙╱╲/\\") {
+		t.Fatalf("background fill contains decorative artifacts: %q", first)
+	}
+	if lipgloss.Width(first) != 100 {
+		t.Fatalf("background fill width = %d, want 100", lipgloss.Width(first))
 	}
 }
 
 func TestConnectModelAdvancesToReviewBeforeActivating(t *testing.T) {
+	server := modelListServer(t, []string{"live-model"})
 	cfg := config.Default()
 	originalProvider := cfg.Provider
 	m := Model{
 		cfg:    cfg,
 		styles: theme.New("rose"),
 		connect: &connectFlow{
-			Provider: "openai",
-			APIKey:   "runtime-secret",
+			Provider: "compatible",
+			Name:     "test-provider",
+			BaseURL:  server.URL,
 			Step:     connectModel,
 			History:  []connectStep{connectProvider, connectAPIKey},
 		},
 	}
-	m.input = textInputForTest("gpt-4.1-mini")
+	m.input = textInputForTest("live-model")
 
 	m.submitConnectStep()
 
@@ -642,21 +824,73 @@ func TestConnectModelAdvancesToReviewBeforeActivating(t *testing.T) {
 	if m.cfg.Provider != originalProvider {
 		t.Fatalf("provider changed before review: %q -> %q", originalProvider, m.cfg.Provider)
 	}
-	if m.connect.Model != "gpt-4.1-mini" {
-		t.Fatalf("review model = %q, want gpt-4.1-mini", m.connect.Model)
+	if m.connect.Model != "live-model" {
+		t.Fatalf("review model = %q, want live-model", m.connect.Model)
+	}
+}
+
+func TestConnectModelAcceptsUnavailableTypedID(t *testing.T) {
+	server := modelListServer(t, []string{"live-model"})
+	m := Model{
+		cfg:    config.Default(),
+		styles: theme.New("rose"),
+		connect: &connectFlow{
+			Provider: "compatible",
+			Name:     "test-provider",
+			BaseURL:  server.URL,
+			Step:     connectModel,
+		},
+	}
+	m.input = textInputForTest("missing-model")
+
+	m.submitConnectStep()
+
+	if m.connect == nil || m.connect.Step != connectReview {
+		t.Fatalf("connect did not advance to review with typed model: %#v", m.connect)
+	}
+	if m.connect.Model != "missing-model" {
+		t.Fatalf("connect model = %q, want typed model", m.connect.Model)
+	}
+	if !strings.Contains(m.status, "not advertised") {
+		t.Fatalf("status = %q, want uncataloged-model warning", m.status)
+	}
+}
+
+func TestConnectCodexModelRejectsUnavailableTypedID(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	m := Model{
+		cfg:    config.Default(),
+		styles: theme.New("rose"),
+		connect: &connectFlow{
+			Provider: "codex",
+			Step:     connectModel,
+		},
+	}
+	m.input = textInputForTest("random-api-model")
+
+	m.submitConnectStep()
+
+	if m.connect == nil || m.connect.Step != connectModel {
+		t.Fatalf("connect advanced with unavailable Codex model: %#v", m.connect)
+	}
+	if !strings.Contains(m.status, "not available from Codex") {
+		t.Fatalf("status = %q, want Codex availability error", m.status)
 	}
 }
 
 func TestConnectReviewActivatesRoute(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("APPDATA", t.TempDir())
+	server := modelListServer(t, []string{"live-model"})
 	m := Model{
 		cfg:    config.Default(),
 		styles: theme.New("rose"),
 		connect: &connectFlow{
-			Provider: "openai",
+			Provider: "compatible",
+			Name:     "test-provider",
+			BaseURL:  server.URL,
 			APIKey:   "runtime-secret",
-			Model:    "gpt-4.1-mini",
+			Model:    "live-model",
 			Step:     connectReview,
 		},
 	}
@@ -667,10 +901,10 @@ func TestConnectReviewActivatesRoute(t *testing.T) {
 	if m.connect != nil {
 		t.Fatalf("connect flow still active after review: %#v", m.connect)
 	}
-	if m.cfg.Provider != "openai" || m.cfg.Model() != "gpt-4.1-mini" {
+	if m.cfg.Provider != "compatible" || m.cfg.Model() != "live-model" {
 		t.Fatalf("activated route = %s/%s", m.cfg.Provider, m.cfg.Model())
 	}
-	if m.cfg.OpenAIKey != "runtime-secret" {
+	if m.cfg.CompatibleKey != "runtime-secret" {
 		t.Fatal("runtime API key was not applied")
 	}
 }
@@ -734,10 +968,10 @@ func TestModelCacheKeyDoesNotRetainCredentialValue(t *testing.T) {
 	second := first
 	second.OpenAIKey = "secret-two"
 
-	if modelCacheKey(first) != modelCacheKey(second) {
-		t.Fatal("model cache key should depend on credential presence, not secret contents")
+	if modelCacheKey(first) == modelCacheKey(second) {
+		t.Fatal("model cache key should change when account credentials change")
 	}
-	if strings.Contains(modelCacheKey(first), "secret-one") {
+	if strings.Contains(modelCacheKey(first), "secret-one") || strings.Contains(modelCacheKey(second), "secret-two") {
 		t.Fatal("model cache key retained raw credential material")
 	}
 }

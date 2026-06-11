@@ -2,6 +2,9 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -32,6 +35,17 @@ type suggestion struct {
 	Label       string
 	Description string
 }
+
+type modelCatalogState struct {
+	Models    []string
+	Err       error
+	CheckedAt time.Time
+}
+
+const (
+	modelCatalogSuccessTTL = 2 * time.Minute
+	modelCatalogFailureTTL = 3 * time.Second
+)
 
 var commandSpecs = []commandSpec{
 	{
@@ -239,46 +253,73 @@ func (m *Model) commandChoiceSuggestions(spec commandSpec) []suggestion {
 }
 
 func (m *Model) modelSuggestionsForConfig(cfg config.Config) []suggestion {
-	key := modelCacheKey(cfg)
-	if m.modelSuggestionCache != nil {
-		if cached, ok := m.modelSuggestionCache[key]; ok {
-			return cached
-		}
-	} else {
-		m.modelSuggestionCache = map[string][]suggestion{}
+	catalog := m.modelCatalogForConfig(cfg, false)
+	if catalog.Err != nil {
+		return nil
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	models, err := llm.ListModels(ctx, cfg)
-	fallback := false
-	if err != nil || len(models) == 0 {
-		models = llm.KnownModelIDs(cfg.Provider)
-		fallback = true
-	}
-	out := make([]suggestion, 0, len(models)+1)
-	seen := map[string]struct{}{}
-	add := func(model, description string) {
-		model = strings.TrimSpace(model)
-		if model == "" {
-			return
+	out := make([]suggestion, 0, len(catalog.Models))
+	current := strings.TrimSpace(cfg.Model())
+	for _, model := range catalog.Models {
+		description := "available from provider"
+		if model == current {
+			description = "available · current selection"
 		}
-		if _, ok := seen[model]; ok {
-			return
-		}
-		seen[model] = struct{}{}
 		out = append(out, suggestion{Value: model, Label: model, Description: description})
 	}
-	add(cfg.Model(), "current selection")
-	description := "provider model"
-	if fallback {
-		description = "suggested " + cfg.Provider + " model"
-	}
-	for _, model := range models {
-		add(model, description)
-	}
-	m.modelSuggestionCache[key] = out
 	return out
+}
+
+func (m *Model) modelCatalogForConfig(cfg config.Config, force bool) modelCatalogState {
+	key := modelCacheKey(cfg)
+	if m.modelCatalogCache == nil {
+		m.modelCatalogCache = map[string]modelCatalogState{}
+	}
+	if !force {
+		if cached, ok := m.modelCatalogCache[key]; ok {
+			ttl := modelCatalogSuccessTTL
+			if cached.Err != nil {
+				ttl = modelCatalogFailureTTL
+			}
+			if time.Since(cached.CheckedAt) < ttl {
+				return cached
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	models, err := llm.ListModels(ctx, cfg)
+	state := modelCatalogState{Models: models, Err: err, CheckedAt: time.Now()}
+	if err == nil && len(models) == 0 {
+		state.Err = fmt.Errorf("provider returned an empty model catalog")
+	}
+	m.modelCatalogCache[key] = state
+	return state
+}
+
+func (m Model) cachedModelCatalogForConfig(cfg config.Config) (modelCatalogState, bool) {
+	if m.modelCatalogCache == nil {
+		return modelCatalogState{}, false
+	}
+	state, ok := m.modelCatalogCache[modelCacheKey(cfg)]
+	return state, ok
+}
+
+func (m *Model) modelAvailableForConfig(cfg config.Config, model string, force bool) (bool, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false, fmt.Errorf("model ID is empty")
+	}
+	catalog := m.modelCatalogForConfig(cfg, force)
+	if catalog.Err != nil {
+		return false, catalog.Err
+	}
+	for _, available := range catalog.Models {
+		if available == model {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func modelCacheKey(cfg config.Config) string {
@@ -287,18 +328,43 @@ func modelCacheKey(cfg config.Config) string {
 		cfg.OllamaURL,
 		cfg.CompatibleName,
 		cfg.CompatibleURL,
-		credentialPresence(cfg.OpenAIKey),
-		credentialPresence(cfg.AnthropicKey),
-		credentialPresence(cfg.CompatibleKey),
-		cfg.Model(),
+		credentialFingerprint(effectiveCatalogCredential(cfg)),
 	}, "\x00")
 }
 
-func credentialPresence(value string) string {
-	if strings.TrimSpace(value) == "" {
+func effectiveCatalogCredential(cfg config.Config) string {
+	switch cfg.Provider {
+	case "openai":
+		return firstPresent(cfg.OpenAIKey, os.Getenv("OPENAI_API_KEY"))
+	case "anthropic":
+		return firstPresent(cfg.AnthropicKey, os.Getenv("ANTHROPIC_API_KEY"))
+	case "compatible":
+		return firstPresent(
+			cfg.CompatibleKey,
+			os.Getenv(config.DefaultAPIKeyEnv(cfg.CompatibleName)),
+			os.Getenv("EPHEMERA_API_KEY"),
+		)
+	default:
+		return ""
+	}
+}
+
+func firstPresent(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func credentialFingerprint(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return "unset"
 	}
-	return "set"
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("sha256:%x", sum[:8])
 }
 
 func (m *Model) acceptCommandSuggestionForEnter() bool {

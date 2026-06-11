@@ -35,6 +35,8 @@ func New(cfg config.Config) (Provider, error) {
 	switch cfg.Provider {
 	case "openai":
 		return NewOpenAI(cfg.OpenAIKey), nil
+	case "codex":
+		return NewCodex(), nil
 	case "anthropic":
 		return NewAnthropic(cfg.AnthropicKey), nil
 	case "ollama":

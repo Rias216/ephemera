@@ -39,6 +39,7 @@ type Protocol string
 const (
 	ProtocolOllama           Protocol = "ollama"
 	ProtocolOpenAI           Protocol = "openai"
+	ProtocolCodex            Protocol = "codex"
 	ProtocolAnthropic        Protocol = "anthropic"
 	ProtocolOpenAICompatible Protocol = "openai-compatible"
 	NVIDIABaseURL                     = "https://integrate.api.nvidia.com/v1"
@@ -62,6 +63,7 @@ func Default() Config {
 		Models: map[string]string{
 			"ollama":     "qwen3:8b",
 			"openai":     "gpt-4.1-mini",
+			"codex":      "gpt-5.5",
 			"anthropic":  "claude-sonnet-4-6",
 			"compatible": "model-name",
 		},
@@ -77,12 +79,12 @@ func Default() Config {
 
 // ProviderNames returns all provider types understood by Ephemera.
 func ProviderNames() []string {
-	return []string{"ollama", "openai", "anthropic", "compatible"}
+	return []string{"ollama", "openai", "codex", "anthropic", "compatible"}
 }
 
 // ConnectNames returns provider and preset names accepted by /connect.
 func ConnectNames() []string {
-	return []string{"ollama", "openai", "anthropic", "compatible", "nvidia", "openrouter", "groq", "together", "lm-studio"}
+	return []string{"ollama", "openai", "codex", "chatgpt", "anthropic", "compatible", "nvidia", "openrouter", "groq", "together", "lm-studio"}
 }
 
 // Preset returns built-in connection metadata for known providers.
@@ -92,6 +94,8 @@ func Preset(name string) (Connection, bool) {
 		return Connection{Protocol: ProtocolOllama, BaseURL: "http://localhost:11434"}, true
 	case "openai":
 		return Connection{Protocol: ProtocolOpenAI, APIKeyEnv: "OPENAI_API_KEY"}, true
+	case "codex", "chatgpt":
+		return Connection{Protocol: ProtocolCodex}, true
 	case "anthropic":
 		return Connection{Protocol: ProtocolAnthropic, APIKeyEnv: "ANTHROPIC_API_KEY"}, true
 	case "nvidia":
@@ -219,9 +223,6 @@ func (c *Config) normalize() {
 			c.Models[provider] = model
 		}
 	}
-	if isRetiredOpenAIModel(c.Models["openai"]) {
-		c.Models["openai"] = defaults.Models["openai"]
-	}
 	if !c.Mode.Valid() {
 		c.Mode = defaults.Mode
 	}
@@ -243,9 +244,4 @@ func (c *Config) normalize() {
 	if strings.TrimSpace(c.CompatibleURL) == "" {
 		c.CompatibleURL = defaults.CompatibleURL
 	}
-}
-
-func isRetiredOpenAIModel(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.HasPrefix(model, "gpt-5.4") || strings.HasPrefix(model, "gpt-5.5")
 }

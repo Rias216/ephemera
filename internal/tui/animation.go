@@ -12,7 +12,7 @@ const (
 	// elapsed-time motion keeps the animation correct when frames are skipped.
 	AnimationFPS = 60
 
-	glimmerCellsPerSecond      = 19.5
+	glimmerCellsPerSecond      = 14.0
 	ambientCellsPerSecond      = 3.8
 	logoCellsPerSecond         = 9.5
 	contextGlintCellsPerSecond = 4.0

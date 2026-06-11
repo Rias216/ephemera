@@ -83,7 +83,11 @@ func (m *Model) submitConnectStep() {
 			m.status = "Invalid endpoint: " + err.Error()
 			return
 		}
-		m.connect.BaseURL = strings.TrimRight(value, "/")
+		value = strings.TrimRight(value, "/")
+		if m.connect.BaseURL != value {
+			m.connect.Model = ""
+		}
+		m.connect.BaseURL = value
 		if m.connect.Provider == "ollama" {
 			m.advanceConnect(connectModel)
 		} else {
@@ -91,15 +95,48 @@ func (m *Model) submitConnectStep() {
 		}
 
 	case connectAPIKey:
+		if m.connect.APIKey != value {
+			m.connect.Model = ""
+		}
 		m.connect.APIKey = value
+		if m.connectKeyRequired() && !m.connectHasCredential() {
+			m.status = "An API key is required for this provider. Enter one or set " + m.connectPrimaryCredentialEnv() + "."
+			return
+		}
 		m.advanceConnect(connectModel)
 
 	case connectModel:
 		if value == "" {
-			value = m.defaultConnectModel()
+			m.status = "Choose a model from the provider catalog below."
+			return
 		}
-		if value == "" {
-			m.status = "A model ID is required."
+		available, err := m.modelAvailableForConfig(m.connectModelListConfig(), value, false)
+		if err != nil {
+			if m.connect.Provider == "codex" {
+				m.status = "Codex model list unavailable: " + err.Error()
+				m.notice = "### Codex model not changed\n\nThe Codex model list could not be loaded:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nOpen Codex once to refresh its login and model cache, then retry `/connect codex`."
+				return
+			}
+			m.connect.Model = value
+			m.advanceConnect(connectReview)
+			m.prepareConnectInput()
+			m.rebuildSuggestions()
+			m.status = "Model accepted without catalog verification."
+			m.notice = "### Model not verified\n\nThe provider catalog could not be checked:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nThe typed model ID will be used anyway. If the provider rejects it, choose another model with `/models` or `/model <id>`."
+			return
+		}
+		if !available {
+			if m.connect.Provider == "codex" {
+				m.status = fmt.Sprintf("Model %q is not available from Codex.", value)
+				m.notice = "### Codex model blocked\n\n`" + escapeMarkdown(value) + "` is not in the Codex ChatGPT model list. Choose one of the listed Codex models so this route stays on subscription auth."
+				return
+			}
+			m.connect.Model = value
+			m.advanceConnect(connectReview)
+			m.prepareConnectInput()
+			m.rebuildSuggestions()
+			m.status = "Model accepted even though it was not advertised."
+			m.notice = "### Model not in catalog\n\n`" + escapeMarkdown(value) + "` was not advertised by this provider's catalog. It will still be used because some providers expose incomplete model lists."
 			return
 		}
 		m.connect.Model = value
@@ -124,6 +161,10 @@ func (m *Model) applyConnectProvider(value string) bool {
 	case "openai":
 		m.connect.Provider = "openai"
 		m.advanceConnect(connectAPIKey)
+		return true
+	case "codex", "chatgpt":
+		m.connect.Provider = "codex"
+		m.advanceConnect(connectModel)
 		return true
 	case "anthropic":
 		m.connect.Provider = "anthropic"
@@ -150,6 +191,9 @@ func (m *Model) applyConnectName(value string) {
 	name := strings.ToLower(strings.TrimSpace(value))
 	if name == "" {
 		name = "compatible"
+	}
+	if m.connect.Name != name {
+		m.connect.Model = ""
 	}
 	m.connect.Name = name
 	if preset, ok := config.Preset(name); ok && preset.Protocol == config.ProtocolOpenAICompatible && strings.TrimSpace(preset.BaseURL) != "" {
@@ -196,6 +240,32 @@ func (m *Model) finishConnect() {
 	if flow == nil {
 		return
 	}
+	available, err := m.modelAvailableForConfig(m.connectModelListConfig(), flow.Model, true)
+	if err != nil {
+		if flow.Provider == "codex" {
+			m.status = "Codex connection check failed: " + err.Error()
+			m.notice = "### Codex connection not activated\n\nThe Codex model list could not be verified:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nNo settings were changed."
+			return
+		}
+		m.notice = "### Connected with unverified model\n\nThe provider catalog could not be verified:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nThe route is active with the typed model ID. If generation fails, run `/models` or `/model <id>` to adjust it."
+	} else if !available {
+		if flow.Provider == "codex" {
+			m.status = fmt.Sprintf("Codex model %q is not available.", flow.Model)
+			m.notice = "### Codex connection not activated\n\n`" + escapeMarkdown(flow.Model) + "` is not in the Codex ChatGPT model list. No settings were changed."
+			return
+		}
+		m.notice = "### Connected with uncataloged model\n\n`" + escapeMarkdown(flow.Model) + "` was not advertised by this provider's catalog. The route is active because some providers expose incomplete model lists."
+	} else {
+		display := flow.Provider
+		if flow.Provider == "compatible" {
+			display = flow.Name
+		}
+		m.notice = fmt.Sprintf(
+			"### Connected\n\nProvider: `%s`  \nModel: `%s`\n\nThe connection is active. API keys entered here remain only in this process; use environment variables for persistence.",
+			display,
+			flow.Model,
+		)
+	}
 
 	m.cfg.Provider = flow.Provider
 	switch flow.Provider {
@@ -203,6 +273,7 @@ func (m *Model) finishConnect() {
 		m.cfg.OllamaURL = flow.BaseURL
 	case "openai":
 		m.cfg.OpenAIKey = flow.APIKey
+	case "codex":
 	case "anthropic":
 		m.cfg.AnthropicKey = flow.APIKey
 	case "compatible":
@@ -220,11 +291,6 @@ func (m *Model) finishConnect() {
 	if flow.Provider == "compatible" {
 		display = flow.Name
 	}
-	m.notice = fmt.Sprintf(
-		"### Connected\n\nProvider: `%s`  \nModel: `%s`\n\nThe connection is active. API keys entered here remain only in this process; use environment variables for persistence.",
-		display,
-		flow.Model,
-	)
 	m.status = fmt.Sprintf("Connected → %s · %s", display, flow.Model)
 	m.connect = nil
 	m.restorePromptInput()
@@ -273,6 +339,8 @@ func (m Model) connectPlaceholder() string {
 				return "API key [Enter uses OPENAI_API_KEY]"
 			}
 			return "OpenAI API key"
+		case "codex":
+			return "Codex ChatGPT login [uses ~/.codex/auth.json]"
 		case "anthropic":
 			if os.Getenv("ANTHROPIC_API_KEY") != "" {
 				return "API key [Enter uses ANTHROPIC_API_KEY]"
@@ -291,7 +359,7 @@ func (m Model) connectPlaceholder() string {
 			return "API key [optional for local servers]"
 		}
 	case connectModel:
-		return "Model ID [" + m.defaultConnectModel() + "]"
+		return "Select an available model from the provider catalog"
 	case connectReview:
 		return "Press Enter to activate · Shift+Tab returns to model"
 	default:
@@ -389,7 +457,7 @@ func (m Model) connectStepGuidance() string {
 	case connectAPIKey:
 		return "Enter an API key, or press Enter to use the detected environment variable when available. The value is never written to config.json."
 	case connectModel:
-		return "Select a discovered model or type an exact model ID. Provider catalogs are queried with a short timeout."
+		return "Choose an advertised model, or type a model ID manually when the provider catalog is incomplete."
 	case connectReview:
 		return "Review the route summary below. Press Enter to activate it, or Shift+Tab to revise the model."
 	default:
@@ -406,34 +474,31 @@ func (m Model) defaultCompatibleBaseURL() string {
 	return m.cfg.CompatibleURL
 }
 
-func (m Model) defaultConnectModel() string {
-	if m.connect == nil {
-		return ""
-	}
-	if model := strings.TrimSpace(m.cfg.Models[m.connect.Provider]); model != "" {
-		return model
-	}
-	return "model-name"
-}
-
 func (m *Model) openModelChooser() {
 	m.input.SetValue("/model ")
 	m.input.CursorEnd()
 	m.rebuildSuggestions()
+	catalog := m.modelCatalogForConfig(m.cfg, false)
 	provider := m.cfg.Provider
 	if provider == "compatible" && strings.TrimSpace(m.cfg.CompatibleName) != "" {
 		provider = m.cfg.CompatibleName
 	}
-	if len(m.suggestions) == 0 {
-		m.notice = "### Models\n\nNo model catalog is available for the active provider. Type `/model <model-id>` to set one manually."
-		m.status = "No model suggestions available."
+	if catalog.Err != nil {
+		m.notice = "### Models unavailable\n\nThe live catalog for `" + provider + "` could not be loaded:\n\n`" + escapeMarkdown(catalog.Err.Error()) + "`\n\nCheck the active endpoint and credentials, or type a model ID directly with `/model <id>`."
+		m.status = "Model catalog unavailable: " + catalog.Err.Error()
+		return
+	}
+	if len(catalog.Models) == 0 {
+		m.notice = "### Models unavailable\n\nThe provider returned an empty catalog. Type a model ID directly with `/model <id>` if you know one."
+		m.status = "Provider returned no available models."
 		return
 	}
 	m.notice = fmt.Sprintf(
-		"### Models\n\nChoose a model for `%s` from the palette below. Use **↑/↓** and **Enter** to activate the highlighted model, or **Tab** to only fill the input.",
+		"### Available models\n\n`%s` advertised **%d** model(s). Choose one from the live catalog below. Use **↑/↓** and **Enter** to activate the highlighted model, or **Tab** to only fill the input.",
 		provider,
+		len(catalog.Models),
 	)
-	m.status = fmt.Sprintf("Choose a model for %s.", provider)
+	m.status = fmt.Sprintf("Choose one of %d available models for %s.", len(catalog.Models), provider)
 }
 
 func (m *Model) connectModelListConfig() config.Config {
@@ -448,23 +513,14 @@ func (m *Model) connectModelListConfig() config.Config {
 			cfg.OllamaURL = m.connect.BaseURL
 		}
 	case "openai":
-		if strings.TrimSpace(m.connect.APIKey) != "" {
-			cfg.OpenAIKey = m.connect.APIKey
-		}
+		cfg.OpenAIKey = m.connect.APIKey
+	case "codex":
 	case "anthropic":
-		if strings.TrimSpace(m.connect.APIKey) != "" {
-			cfg.AnthropicKey = m.connect.APIKey
-		}
+		cfg.AnthropicKey = m.connect.APIKey
 	case "compatible":
-		if strings.TrimSpace(m.connect.Name) != "" {
-			cfg.CompatibleName = m.connect.Name
-		}
-		if strings.TrimSpace(m.connect.BaseURL) != "" {
-			cfg.CompatibleURL = m.connect.BaseURL
-		}
-		if strings.TrimSpace(m.connect.APIKey) != "" {
-			cfg.CompatibleKey = m.connect.APIKey
-		}
+		cfg.CompatibleName = m.connect.Name
+		cfg.CompatibleURL = m.connect.BaseURL
+		cfg.CompatibleKey = m.connect.APIKey
 	}
 	return cfg
 }
@@ -508,10 +564,6 @@ func (m *Model) connectSuggestions() []suggestion {
 		}
 	case connectModel:
 		values = m.modelSuggestionsForConfig(m.connectModelListConfig())
-		model := m.defaultConnectModel()
-		if model != "" && len(values) == 0 {
-			values = append(values, suggestion{Value: model, Label: model, Description: "current default model"})
-		}
 	}
 
 	if query == "" {
@@ -524,6 +576,46 @@ func (m *Model) connectSuggestions() []suggestion {
 		}
 	}
 	return filtered
+}
+
+func (m Model) connectKeyRequired() bool {
+	if m.connect == nil {
+		return false
+	}
+	switch m.connect.Provider {
+	case "openai", "anthropic":
+		return true
+	case "codex":
+		return false
+	case "compatible":
+		preset, ok := config.Preset(m.connect.Name)
+		return ok && preset.APIKeyEnv != "" && !strings.EqualFold(m.connect.Name, "lm-studio")
+	default:
+		return false
+	}
+}
+
+func (m Model) connectHasCredential() bool {
+	if m.connect == nil {
+		return false
+	}
+	if strings.TrimSpace(m.connect.APIKey) != "" {
+		return true
+	}
+	for _, env := range m.connectCredentialEnvs() {
+		if strings.TrimSpace(os.Getenv(env)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) connectPrimaryCredentialEnv() string {
+	envs := m.connectCredentialEnvs()
+	if len(envs) > 0 {
+		return envs[0]
+	}
+	return "the provider credential environment variable"
 }
 
 func validateEndpoint(value string) error {

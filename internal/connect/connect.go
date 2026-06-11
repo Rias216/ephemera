@@ -28,6 +28,7 @@ type Request struct {
 //	/connect nvidia <api-key|env> <model> [base-url]
 //	/connect <name> <api-key|env> <model> <openai-compatible-base-url>
 //	/connect ollama <model> [base-url]
+//	/connect codex <model>
 func Parse(args []string) (Request, error) {
 	if len(args) == 0 {
 		return Request{}, usageError()
@@ -52,6 +53,22 @@ func Parse(args []string) (Request, error) {
 		return Request{
 			Provider:   name,
 			Model:      strings.TrimSpace(args[1]),
+			Connection: connection,
+		}, nil
+	}
+
+	if name == "codex" || name == "chatgpt" {
+		if len(args) != 2 {
+			return Request{}, fmt.Errorf("usage: /connect codex <model>")
+		}
+		model := strings.TrimSpace(args[1])
+		if model == "" {
+			return Request{}, fmt.Errorf("model cannot be empty")
+		}
+		connection, _ := config.Preset("codex")
+		return Request{
+			Provider:   "codex",
+			Model:      model,
 			Connection: connection,
 		}, nil
 	}

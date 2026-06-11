@@ -34,6 +34,10 @@ func connectProfileFor(value string) connectProfile {
 		return connectProfile{
 			Name: name, Badge: "CLOUD", Summary: "native OpenAI API · OPENAI_API_KEY", Protocol: "OpenAI", Endpoint: "https://api.openai.com/v1", Auth: "API key", Env: "OPENAI_API_KEY",
 		}
+	case "codex", "chatgpt":
+		return connectProfile{
+			Name: "codex", Badge: "CHATGPT", Summary: "Codex ChatGPT login · no API billing key", Protocol: "OpenAI Responses", Endpoint: "~/.codex/auth.json", Auth: "Codex login",
+		}
 	case "anthropic":
 		return connectProfile{
 			Name: name, Badge: "CLOUD", Summary: "native Anthropic API · ANTHROPIC_API_KEY", Protocol: "Anthropic", Endpoint: "https://api.anthropic.com/v1", Auth: "API key", Env: "ANTHROPIC_API_KEY",
@@ -139,23 +143,45 @@ func (m Model) connectProgressRail(width int) string {
 	}
 
 	labels := []string{"01 PROVIDER", "02 DETAILS", "03 AUTH", "04 MODEL", "05 REVIEW"}
+	separatorWidth := len(labels) - 1
+	usable := max(len(labels), width-separatorWidth)
+	baseWidth := usable / len(labels)
+	extra := usable % len(labels)
+
 	var b strings.Builder
 	for i, label := range labels {
 		if i > 0 {
-			b.WriteString(lipgloss.NewStyle().Foreground(m.styles.Divider).Background(m.styles.PanelDeep).Render("  ━  "))
+			b.WriteString(lipgloss.NewStyle().Foreground(m.styles.Divider).Background(m.styles.PanelDeep).Render("│"))
+		}
+
+		tabWidth := baseWidth
+		if i < extra {
+			tabWidth++
 		}
 		foreground := m.styles.Faint
+		background := m.styles.PanelDeep
 		bold := false
 		switch {
 		case i+1 < step:
 			foreground = m.styles.Muted
+			background = m.styles.Panel
 		case i+1 == step:
 			foreground = m.styles.AccentBright
+			background = m.styles.PanelRaised
 			bold = true
 		}
-		b.WriteString(lipgloss.NewStyle().Bold(bold).Foreground(foreground).Background(m.styles.PanelDeep).Render(label))
+		b.WriteString(centerStyledText(label, tabWidth, foreground, background, bold))
 	}
 	return padStyledLine(b.String(), width, m.styles.PanelDeep)
+}
+
+func centerStyledText(value string, width int, foreground, background color.Color, bold bool) string {
+	value = clip(value, max(1, width))
+	remaining := max(0, width-lipgloss.Width(value))
+	left := remaining / 2
+	right := remaining - left
+	content := strings.Repeat(" ", left) + value + strings.Repeat(" ", right)
+	return lipgloss.NewStyle().Bold(bold).Foreground(foreground).Background(background).Render(content)
 }
 
 func (m Model) connectSelectionColumn(width, height int) []string {
@@ -170,7 +196,7 @@ func (m Model) connectSelectionColumn(width, height int) []string {
 	}
 	lines := []string{
 		m.paletteTextLine(title, width, m.styles.Primary, m.styles.Panel, true),
-		m.paletteTextLine("  ◆ "+name+"  ["+profile.Badge+"]", width, m.styles.AccentBright, m.styles.PanelRaised, true),
+		m.paletteTextLine("  ◆ "+name+"  ["+profile.Badge+"]", width, m.styles.AccentBright, m.styles.Panel, true),
 		m.paletteTextLine("  "+fallback(profile.Summary, "connection route"), width, m.styles.Muted, m.styles.Panel, false),
 		m.connectLabelValueLine("Endpoint", fallback(profile.Endpoint, "custom / pending"), width),
 		m.connectLabelValueLine("Auth", fallback(profile.Auth, "—"), width),
@@ -186,7 +212,7 @@ func (m Model) connectFieldColumn(width, height int) []string {
 	requirement := m.connectRequirement()
 	lines := []string{
 		m.paletteTextLine("  CURRENT FIELD", width, m.styles.Primary, m.styles.Panel, true),
-		m.paletteTextLine("  "+m.connectStepTitle()+"  ·  "+requirement, width, m.styles.AccentBright, m.styles.PanelRaised, true),
+		m.paletteTextLine("  "+m.connectStepTitle()+"  ·  "+requirement, width, m.styles.AccentBright, m.styles.Panel, true),
 	}
 	for _, line := range wrapPlain(m.connectStepGuidance(), max(8, width-4), max(1, height-4)) {
 		lines = append(lines, m.paletteTextLine("  "+line, width, m.styles.Muted, m.styles.Panel, false))
@@ -210,6 +236,7 @@ func (m Model) connectPreviewColumn(width, height int) []string {
 		m.connectLabelValueLine("Provider", m.connectPreviewName(), width),
 		m.connectLabelValueLine("Endpoint", m.connectEndpointPreview(), width),
 		m.connectLabelValueLine("Credentials", m.connectCredentialPreview(), width),
+		m.connectLabelValueLine("Catalog", m.connectCatalogPreview(), width),
 		m.connectLabelValueLine("Model", m.connectModelPreview(), width),
 	}
 	if len(lines) < height {
@@ -222,7 +249,7 @@ func (m Model) connectPreviewColumn(width, height int) []string {
 		lines = append(lines, m.paletteTextLine("  Nothing changes before review", width, m.styles.Faint, m.styles.Panel, false))
 	}
 	if m.connect != nil && m.connect.Step == connectReview && len(lines) < height {
-		lines = append(lines, m.paletteTextLine("  ENTER activates · Shift+Tab revises", width, m.styles.AccentBright, m.styles.PanelRaised, true))
+		lines = append(lines, m.paletteTextLine("  ENTER activates · Shift+Tab revises", width, m.styles.AccentBright, m.styles.Panel, true))
 	}
 	return m.fitDetailLines(lines, width, height, 263)
 }
@@ -306,6 +333,8 @@ func (m Model) connectEndpointPreview() string {
 	switch m.connect.Provider {
 	case "openai":
 		return "api.openai.com/v1"
+	case "codex":
+		return "~/.codex/auth.json"
 	case "anthropic":
 		return "api.anthropic.com/v1"
 	case "ollama":
@@ -324,6 +353,9 @@ func (m Model) connectCredentialPreview() string {
 	if strings.TrimSpace(m.connect.APIKey) != "" {
 		return "runtime key entered"
 	}
+	if m.connect.Step == connectAPIKey && strings.TrimSpace(m.input.Value()) != "" {
+		return "runtime key entered"
+	}
 	if m.connect.Step == connectProvider || m.connect.Step == connectName {
 		profile := connectProfileFor(m.connectPreviewName())
 		if profile.Auth == "not required" || profile.Auth == "usually none" {
@@ -335,6 +367,9 @@ func (m Model) connectCredentialPreview() string {
 		return profile.Auth
 	}
 	profile := connectProfileFor(m.connectDisplayName())
+	if profile.Auth == "Codex login" {
+		return "Codex ChatGPT login"
+	}
 	if profile.Badge == "LOCAL" && (profile.Name == "ollama" || profile.Name == "lm-studio") {
 		return "not required"
 	}
@@ -342,6 +377,9 @@ func (m Model) connectCredentialPreview() string {
 		if strings.TrimSpace(os.Getenv(env)) != "" {
 			return env + " detected"
 		}
+	}
+	if m.connectKeyOptional() {
+		return "optional / not entered"
 	}
 	if m.connect.Step == connectAPIKey {
 		return "waiting for key"
@@ -356,6 +394,8 @@ func (m Model) connectCredentialEnvs() []string {
 	switch m.connect.Provider {
 	case "openai":
 		return []string{"OPENAI_API_KEY"}
+	case "codex":
+		return nil
 	case "anthropic":
 		return []string{"ANTHROPIC_API_KEY"}
 	case "compatible":
@@ -373,13 +413,35 @@ func (m Model) connectModelPreview() string {
 	if m.connect == nil {
 		return "—"
 	}
+	if m.connect.Step == connectModel {
+		if value := strings.TrimSpace(m.input.Value()); value != "" {
+			return value
+		}
+		if m.completionIndex >= 0 && m.completionIndex < len(m.suggestions) {
+			return m.suggestions[m.completionIndex].Value
+		}
+	}
 	if strings.TrimSpace(m.connect.Model) != "" {
 		return m.connect.Model
 	}
-	if m.connect.Step == connectModel && m.completionIndex >= 0 && m.completionIndex < len(m.suggestions) {
-		return m.suggestions[m.completionIndex].Value
+	return "not selected"
+}
+
+func (m Model) connectCatalogPreview() string {
+	if m.connect == nil {
+		return "—"
 	}
-	return m.defaultConnectModel()
+	if m.connect.Step != connectModel && m.connect.Step != connectReview {
+		return "verification pending"
+	}
+	state, ok := m.cachedModelCatalogForConfig(m.connectModelListConfig())
+	if !ok {
+		return "loading"
+	}
+	if state.Err != nil {
+		return "unavailable · check route"
+	}
+	return fmt.Sprintf("verified · %d available", len(state.Models))
 }
 
 func (m Model) connectRequirement() string {
@@ -426,7 +488,15 @@ func (m Model) connectDefaultHint() string {
 		}
 		return "kept in memory only"
 	case connectModel:
-		return m.defaultConnectModel()
+		state, ok := m.cachedModelCatalogForConfig(m.connectModelListConfig())
+		switch {
+		case !ok:
+			return "catalog loads automatically"
+		case state.Err != nil:
+			return "fix endpoint or credentials"
+		default:
+			return fmt.Sprintf("%d provider-advertised models", len(state.Models))
+		}
 	case connectReview:
 		return "no changes until Enter"
 	default:
@@ -470,15 +540,31 @@ func (m Model) connectFieldState() (string, color.Color) {
 		case strings.Contains(preview, "entered"), strings.Contains(preview, "detected"), preview == "not required":
 			return "✓ " + strings.ToUpper(preview), m.styles.AccentSoft
 		case m.connectKeyOptional():
-			return "✓ OPTIONAL FOR THIS LOCAL ROUTE", m.styles.AccentSoft
+			return "✓ OPTIONAL FOR THIS ROUTE", m.styles.AccentSoft
 		default:
 			return "KEY NOT YET PROVIDED", m.styles.Warning
 		}
 	case connectModel:
-		if value != "" || m.defaultConnectModel() != "" || len(m.suggestions) > 0 {
-			return "✓ MODEL READY", m.styles.AccentSoft
+		state, ok := m.cachedModelCatalogForConfig(m.connectModelListConfig())
+		if !ok {
+			return "LOADING PROVIDER CATALOG", m.styles.Muted
 		}
-		return "MODEL ID REQUIRED", m.styles.Warning
+		if state.Err != nil {
+			return "! CATALOG UNAVAILABLE — CHECK ROUTE", m.styles.Warning
+		}
+		candidate := value
+		if candidate == "" && m.completionIndex >= 0 && m.completionIndex < len(m.suggestions) {
+			candidate = m.suggestions[m.completionIndex].Value
+		}
+		for _, model := range state.Models {
+			if candidate == model {
+				return "✓ AVAILABLE FROM PROVIDER", m.styles.AccentSoft
+			}
+		}
+		if candidate == "" {
+			return fmt.Sprintf("SELECT 1 OF %d AVAILABLE MODELS", len(state.Models)), m.styles.Warning
+		}
+		return "! NOT IN PROVIDER CATALOG", m.styles.Warning
 	case connectReview:
 		return "✓ READY TO ACTIVATE", m.styles.AccentBright
 	default:
@@ -490,12 +576,5 @@ func (m Model) connectKeyOptional() bool {
 	if m.connect == nil {
 		return false
 	}
-	if m.connect.Provider == "ollama" || strings.EqualFold(m.connect.Name, "lm-studio") {
-		return true
-	}
-	if m.connect.Provider != "compatible" {
-		return false
-	}
-	endpoint := strings.ToLower(m.connectEndpointPreview())
-	return strings.Contains(endpoint, "localhost") || strings.Contains(endpoint, "127.0.0.1") || strings.Contains(endpoint, "[::1]")
+	return !m.connectKeyRequired()
 }

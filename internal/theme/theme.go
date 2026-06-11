@@ -128,9 +128,9 @@ func build(primary, secondary, accentSoft, accentBright, text, muted, faint, bac
 		Input: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(primary).
-			Background(panelRaised).
+			Background(panel).
 			Padding(0, 1),
-		Prompt: lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panelRaised),
+		Prompt: lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panel),
 		Status: lipgloss.NewStyle().Foreground(muted),
 		Footer: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).

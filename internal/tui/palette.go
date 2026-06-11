@@ -14,7 +14,7 @@ func (m Model) renderSuggestions() string {
 		return ""
 	}
 
-	innerWidth := max(8, m.width-8)
+	innerWidth := max(8, m.width-6)
 	innerHeight := max(1, paletteHeight-panelBorderRows)
 	lines := make([]string, 0, innerHeight)
 	lines = append(lines, m.renderPaletteHeader(innerWidth))
@@ -36,11 +36,7 @@ func (m Model) renderSuggestions() string {
 			continue
 		}
 		if i == 0 && len(items) == 0 {
-			message := "No matching commands"
-			if m.connect != nil {
-				message = "No matching choices"
-			}
-			message += " · Ctrl+L clears this field"
+			message := m.emptySuggestionMessage()
 			lines = append(lines, m.paletteTextLine("  "+message, innerWidth, m.styles.Muted, m.styles.Panel, false))
 			continue
 		}
@@ -66,9 +62,29 @@ func (m Model) renderSuggestions() string {
 		BorderForeground(m.glowColor(2)).
 		Background(m.styles.Panel).
 		Padding(0, 1).
-		Width(max(1, m.width-4)).
+		Width(max(1, m.width-2)).
 		Render(strings.Join(lines, "\n"))
 	return m.localizedGradientBorder(rendered, 2)
+}
+
+func (m Model) emptySuggestionMessage() string {
+	if m.connect == nil {
+		return "No matching commands · Ctrl+L clears this field"
+	}
+	if m.connect.Step == connectModel {
+		state, ok := m.cachedModelCatalogForConfig(m.connectModelListConfig())
+		switch {
+		case !ok:
+			return "Loading the provider model catalog"
+		case state.Err != nil:
+			return "Catalog unavailable · check endpoint and credentials"
+		case strings.TrimSpace(m.input.Value()) != "":
+			return "No available model matches this text · Ctrl+L clears"
+		default:
+			return "Provider advertised no selectable models"
+		}
+	}
+	return "No matching choices · Ctrl+L clears this field"
 }
 
 func (m Model) renderPaletteHeader(width int) string {
@@ -111,7 +127,6 @@ func (m Model) renderSuggestionRow(item suggestion, index int, selected bool, wi
 	labelColor := m.styles.Text
 	marker := "  "
 	if selected {
-		background = m.styles.PanelRaised
 		markerColor = m.selectionGlow()
 		labelColor = m.styles.AccentBright
 		marker = "◆ "
@@ -145,7 +160,7 @@ func (m Model) renderSuggestionRow(item suggestion, index int, selected bool, wi
 		if selected {
 			badgeColor = m.styles.AccentSoft
 		}
-		badgeView = lipgloss.NewStyle().Foreground(badgeColor).Background(m.styles.PanelDeep).Render(badge)
+		badgeView = lipgloss.NewStyle().Foreground(badgeColor).Background(background).Render(badge)
 	}
 	gapView := lipgloss.NewStyle().Background(background).Render(strings.Repeat(" ", gap))
 	return markerView + indexView + labelView + descriptionView + gapView + badgeView
@@ -187,9 +202,6 @@ func (m Model) renderPaletteDetail(width, height int) []string {
 		return m.renderConnectDetail(width, height)
 	}
 	spec, item := m.paletteDetailSpec()
-	if width >= 104 && height >= 5 {
-		return m.renderThreeColumnDetail(spec, item, width, height)
-	}
 	if width >= 72 && height >= 4 {
 		return m.renderTwoColumnDetail(spec, item, width, height)
 	}
@@ -234,7 +246,7 @@ func (m Model) renderThreeColumnDetail(spec commandSpec, item suggestion, width,
 }
 
 func (m Model) renderTwoColumnDetail(spec commandSpec, item suggestion, width, height int) []string {
-	leftWidth := max(26, width*39/100)
+	leftWidth := max(30, width*46/100)
 	rightWidth := max(20, width-leftWidth-1)
 	leftWidth += width - leftWidth - rightWidth - 1
 	left := m.summaryColumn(spec, item, leftWidth, height)
@@ -265,7 +277,7 @@ func (m Model) renderCompactDetail(spec commandSpec, item suggestion, width, hei
 }
 
 func (m Model) summaryColumn(spec commandSpec, item suggestion, width, height int) []string {
-	lines := []string{m.paletteTextLine("⌁  "+spec.Name, width, m.styles.AccentBright, m.styles.Panel, true)}
+	lines := []string{m.paletteTextLine("  "+spec.Name, width, m.styles.AccentBright, m.styles.Panel, true)}
 	description := spec.Description
 	if item.Description != "" && item.Description != spec.Description {
 		description += " · " + item.Description
@@ -273,13 +285,10 @@ func (m Model) summaryColumn(spec commandSpec, item suggestion, width, height in
 	for _, line := range wrapPlain(description, max(8, width-2), 2) {
 		lines = append(lines, m.paletteTextLine("  "+line, width, m.styles.Muted, m.styles.Panel, false))
 	}
-	lines = append(lines, m.smallRule(width))
-	metadata := [][2]string{
-		{"Category", fallback(spec.Category, "CORE")},
-		{"Aliases", fallback(strings.Join(spec.Aliases, ", "), "—")},
-		{"Introduced", fallback(spec.Introduced, "v0.1.0")},
-		{"Shell", "built-in"},
-		{"Permission", fallback(spec.Permission, "local")},
+	lines = append(lines, m.paletteTextLine("", width, m.styles.Muted, m.styles.Panel, false))
+	metadata := [][2]string{{"Category", fallback(spec.Category, "CORE")}}
+	if len(spec.Aliases) > 0 {
+		metadata = append(metadata, [2]string{"Aliases", strings.Join(spec.Aliases, ", ")})
 	}
 	for _, pair := range metadata {
 		if len(lines) >= height {
@@ -296,7 +305,7 @@ func (m Model) summaryColumn(spec commandSpec, item suggestion, width, height in
 func (m Model) usageColumn(spec commandSpec, width, height int) []string {
 	lines := []string{m.paletteTextLine("  USAGE", width, m.styles.Primary, m.styles.Panel, true)}
 	usage := spec.Name + usageSuffix(spec.Usage)
-	lines = append(lines, m.paletteTextLine("  › "+usage, width, m.styles.AccentSoft, m.styles.PanelRaised, false))
+	lines = append(lines, m.paletteTextLine("  › "+usage, width, m.styles.AccentSoft, m.styles.Panel, false))
 	if len(lines) < height {
 		lines = append(lines, m.paletteTextLine("", width, m.styles.Muted, m.styles.Panel, false))
 	}
@@ -329,7 +338,7 @@ func (m Model) examplesColumn(spec commandSpec, width, height int) []string {
 		if width >= 28 && example.Description != "" {
 			raw += "  ·  " + example.Description
 		}
-		lines = append(lines, m.paletteTextLine(raw, width, m.styles.AccentSoft, m.styles.PanelRaised, false))
+		lines = append(lines, m.paletteTextLine(raw, width, m.styles.AccentSoft, m.styles.Panel, false))
 	}
 	if len(lines) < height {
 		lines = append(lines, m.paletteTextLine("  ◉ Tip: / reopens this palette", width, m.styles.Muted, m.styles.Panel, false))
@@ -340,7 +349,7 @@ func (m Model) examplesColumn(spec commandSpec, width, height int) []string {
 func (m Model) combinedUsageExamplesColumn(spec commandSpec, width, height int) []string {
 	lines := []string{
 		m.paletteTextLine("  USAGE", width, m.styles.Primary, m.styles.Panel, true),
-		m.paletteTextLine("  › "+spec.Name+usageSuffix(spec.Usage), width, m.styles.AccentSoft, m.styles.PanelRaised, false),
+		m.paletteTextLine("  › "+spec.Name+usageSuffix(spec.Usage), width, m.styles.AccentSoft, m.styles.Panel, false),
 	}
 	if len(lines) < height {
 		lines = append(lines, m.paletteTextLine("  EXAMPLES", width, m.styles.Primary, m.styles.Panel, true))

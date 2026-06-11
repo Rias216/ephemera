@@ -68,6 +68,24 @@ func TestParseOllama(t *testing.T) {
 	}
 }
 
+func TestParseCodexChatGPTAlias(t *testing.T) {
+	t.Parallel()
+
+	req, err := Parse([]string{"chatgpt", "gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Provider != "codex" {
+		t.Fatalf("provider = %q, want codex", req.Provider)
+	}
+	if req.Connection.Protocol != config.ProtocolCodex {
+		t.Fatalf("protocol = %q, want codex", req.Connection.Protocol)
+	}
+	if req.Model != "gpt-5.5" {
+		t.Fatalf("model = %q", req.Model)
+	}
+}
+
 func TestParseCustomProviderNeedsBaseURL(t *testing.T) {
 	t.Parallel()
 

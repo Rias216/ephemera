@@ -64,22 +64,22 @@ type Model struct {
 	input    textinput.Model
 	spinner  spinner.Model
 
-	width                int
-	height               int
-	focused              bool
-	animationGeneration  uint64
-	animationLastTick    time.Time
-	animationElapsed     time.Duration
-	paletteHeight        int
-	ready                bool
-	busy                 bool
-	status               string
-	notice               string
-	lastAssistant        string
-	suggestions          []suggestion
-	completionIndex      int
-	connect              *connectFlow
-	modelSuggestionCache map[string][]suggestion
+	width               int
+	height              int
+	focused             bool
+	animationGeneration uint64
+	animationLastTick   time.Time
+	animationElapsed    time.Duration
+	paletteHeight       int
+	ready               bool
+	busy                bool
+	status              string
+	notice              string
+	lastAssistant       string
+	suggestions         []suggestion
+	completionIndex     int
+	connect             *connectFlow
+	modelCatalogCache   map[string]modelCatalogState
 }
 
 // New creates a TUI model. When sessionName exists it is loaded; otherwise a
@@ -396,41 +396,44 @@ func (m Model) View() tea.View {
 
 	if m.ready && m.width >= 40 && m.height >= 16 {
 		metrics := m.layoutMetrics()
+		panelWidth := max(1, m.width-2)
+		innerWidth := max(8, m.width-6)
 		prompt := m.animatedPromptGlyph() + " " + m.styles.Prompt.Render(m.promptLabel())
 		inputValue := m.input.View()
 		composerMeta := m.renderComposerMeta()
 		inputLine := prompt + inputValue
-		if lipgloss.Width(inputLine)+lipgloss.Width(composerMeta)+2 <= m.width-8 {
-			inputLine += strings.Repeat(" ", max(1, m.width-8-lipgloss.Width(inputLine)-lipgloss.Width(composerMeta))) + composerMeta
+		if lipgloss.Width(inputLine)+lipgloss.Width(composerMeta)+2 <= innerWidth {
+			inputLine += strings.Repeat(" ", max(1, innerWidth-lipgloss.Width(inputLine)-lipgloss.Width(composerMeta))) + composerMeta
 		}
-		inputBox := m.insetBlock(m.renderPanel(m.styles.Input.Width(max(1, m.width-4)), 3, inputLine))
+		inputBox := m.insetBlock(m.renderPanel(m.styles.Input.Width(panelWidth), 3, inputLine))
 
 		header := m.renderHeader()
 		viewportPanel := m.insetBlock(m.renderPanel(
-			m.styles.Viewport.Width(max(1, m.width-4)).Height(metrics.viewportOuterHeight),
+			m.styles.Viewport.Width(panelWidth).Height(metrics.viewportOuterHeight),
 			1,
 			m.texturedViewport(),
 		))
 		footerPanel := m.insetBlock(m.renderPanel(
-			m.styles.Footer.Width(max(1, m.width-4)),
+			m.styles.Footer.Width(panelWidth),
 			4,
 			m.renderFooter(),
 		))
 
-		blocks := []string{header, m.gapLine(1), viewportPanel, m.gapLine(2), inputBox}
+		blocks := []string{header, viewportPanel, inputBox}
 		if palette := m.renderSuggestions(); palette != "" {
-			blocks = append(blocks, m.gapLine(3), m.insetBlock(palette))
+			blocks = append(blocks, m.insetBlock(palette))
 		}
-		blocks = append(blocks, m.gapLine(4), footerPanel)
+		blocks = append(blocks, footerPanel)
 		content = m.fitScreen(strings.Join(blocks, "\n"))
 
 		if m.focused && !m.busy {
 			cursor = m.input.Cursor()
 			if cursor != nil {
-				// Header, textured separator, viewport panel, separator, and the
-				// composer's top border all precede the real terminal cursor.
-				cursor.X += 4 + lipgloss.Width(prompt)
-				cursor.Y += lipgloss.Height(header) + lipgloss.Height(viewportPanel) + 3
+				// One-cell screen inset, panel border, panel padding, and prompt
+				// precede the real terminal cursor. Vertically the panels are packed
+				// without decorative spacer rows.
+				cursor.X += 3 + lipgloss.Width(prompt)
+				cursor.Y += lipgloss.Height(header) + lipgloss.Height(viewportPanel) + 1
 			}
 		}
 	} else if m.ready {
@@ -468,7 +471,7 @@ func (m *Model) resize() {
 	metrics := m.layoutMetrics()
 	m.paletteHeight = metrics.paletteOuterHeight
 	viewportHeight := max(3, metrics.viewportInnerHeight)
-	viewportWidth := max(10, m.width-8)
+	viewportWidth := max(10, m.width-6)
 	if m.viewport.Width() == 0 {
 		m.viewport = viewport.New(viewport.WithWidth(viewportWidth), viewport.WithHeight(viewportHeight))
 		m.viewport.MouseWheelEnabled = true
@@ -483,7 +486,7 @@ func (m *Model) resize() {
 		composerReserve = max(24, lipgloss.Width(m.renderComposerMeta())+2)
 	}
 	promptReserve := lipgloss.Width(m.promptLabel()) + 4
-	m.input.SetWidth(max(8, m.width-8-promptReserve-composerReserve))
+	m.input.SetWidth(max(8, m.width-6-promptReserve-composerReserve))
 }
 
 func (m *Model) refreshViewport(bottom bool) {
@@ -574,10 +577,7 @@ func (m Model) transcriptLine(style lipgloss.Style, text string) string {
 	case "signal":
 		glyph = "·"
 	}
-	prefix := style.Background(m.styles.Panel).Render(glyph + " " + label)
-	ruleWidth := max(0, m.transcriptWidth()-lipgloss.Width(prefix)-1)
-	rule := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.Panel).Render(strings.Repeat("─", ruleWidth))
-	return prefix + " " + rule
+	return style.Background(m.styles.Panel).Render(glyph + " " + label)
 }
 
 func (m Model) transcriptBlock(text string) string {
@@ -784,8 +784,28 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 			break
 		}
 		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider == "chatgpt" {
+			provider = "codex"
+		}
 		if !config.ValidProvider(provider) {
 			m.status = "Unknown provider: " + provider
+			break
+		}
+		candidate := m.cfg
+		candidate.Provider = provider
+		available, err := m.modelAvailableForConfig(candidate, candidate.Model(), false)
+		if err != nil {
+			m.cfg.Provider = provider
+			m.session.Provider = provider
+			m.session.Model = m.cfg.Model()
+			m.status = fmt.Sprintf("Provider → %s · model → %s (unverified)", provider, m.cfg.Model())
+			m.notice = "### Provider selected with unverified model\n\nThe saved route for `" + provider + "` could not be verified:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nThe saved model ID will be used anyway. If generation fails, run `/connect " + provider + "` or choose a model with `/models`."
+			_ = config.Save(m.cfg)
+			break
+		}
+		if !available {
+			m.startConnect(provider)
+			m.notice = "### Model selection recommended\n\nThe saved model `" + escapeMarkdown(candidate.Model()) + "` is not in this provider's live catalog. Complete the connection flow to choose an advertised model, or type the ID manually if the catalog is incomplete."
 			break
 		}
 		m.cfg.Provider = provider
@@ -802,8 +822,35 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 			m.openModelChooser()
 			break
 		}
-		model := strings.Join(args, " ")
-		m.cfg.SetModel(strings.TrimSpace(model))
+		model := strings.TrimSpace(strings.Join(args, " "))
+		available, err := m.modelAvailableForConfig(m.cfg, model, false)
+		if err != nil {
+			if m.cfg.Provider == "codex" {
+				m.status = "Codex model change blocked: " + err.Error()
+				m.notice = "### Codex model not changed\n\nThe Codex model list could not be loaded:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nOpen Codex once to refresh its login and model cache, then retry `/models`."
+				break
+			}
+			m.cfg.SetModel(model)
+			m.session.Model = m.cfg.Model()
+			m.status = "Model → " + m.cfg.Model() + " (unverified)"
+			m.notice = "### Model changed without catalog verification\n\nThe provider catalog could not be checked:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nThe typed model ID is active. If the provider rejects it, run `/models` or `/model <id>` to choose another."
+			_ = config.Save(m.cfg)
+			break
+		}
+		if !available {
+			if m.cfg.Provider == "codex" {
+				m.status = fmt.Sprintf("Model %q is not available from Codex.", model)
+				m.notice = "### Codex model blocked\n\n`" + escapeMarkdown(model) + "` is not in the Codex ChatGPT model list. Choose one of the listed Codex models so this route stays on subscription auth."
+				break
+			}
+			m.cfg.SetModel(model)
+			m.session.Model = m.cfg.Model()
+			m.status = "Model → " + m.cfg.Model() + " (not advertised)"
+			m.notice = "### Model changed outside catalog\n\n`" + escapeMarkdown(model) + "` was not advertised by `" + escapeMarkdown(m.providerName()) + "`. It is active anyway because provider catalogs can be incomplete."
+			_ = config.Save(m.cfg)
+			break
+		}
+		m.cfg.SetModel(model)
 		m.session.Model = m.cfg.Model()
 		m.status = "Model → " + m.cfg.Model()
 		_ = config.Save(m.cfg)
@@ -901,10 +948,10 @@ func (m *Model) applyThemeToComponents() {
 
 func inputComponentStyles(styles theme.Styles) textinput.Styles {
 	state := textinput.StyleState{
-		Prompt:      lipgloss.NewStyle().Foreground(styles.Primary).Background(styles.PanelRaised),
-		Text:        lipgloss.NewStyle().Foreground(styles.Text).Background(styles.PanelRaised),
-		Placeholder: lipgloss.NewStyle().Foreground(styles.Muted).Background(styles.PanelRaised),
-		Suggestion:  lipgloss.NewStyle().Foreground(styles.Secondary).Background(styles.PanelRaised),
+		Prompt:      lipgloss.NewStyle().Foreground(styles.Primary).Background(styles.Panel),
+		Text:        lipgloss.NewStyle().Foreground(styles.Text).Background(styles.Panel),
+		Placeholder: lipgloss.NewStyle().Foreground(styles.Muted).Background(styles.Panel),
+		Suggestion:  lipgloss.NewStyle().Foreground(styles.Secondary).Background(styles.Panel),
 	}
 	inputStyles := textinput.DefaultDarkStyles()
 	inputStyles.Focused = state
