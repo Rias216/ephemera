@@ -31,13 +31,35 @@ type Config struct {
 	CompatibleKey string `json:"-"`
 }
 
+// Protocol names the wire protocol used by a connection preset.
+type Protocol string
+
+const (
+	ProtocolOllama           Protocol = "ollama"
+	ProtocolOpenAI           Protocol = "openai"
+	ProtocolAnthropic        Protocol = "anthropic"
+	ProtocolOpenAICompatible Protocol = "openai-compatible"
+	NVIDIABaseURL                     = "https://integrate.api.nvidia.com/v1"
+	OpenRouterBaseURL                 = "https://openrouter.ai/api/v1"
+	GroqBaseURL                       = "https://api.groq.com/openai/v1"
+	TogetherBaseURL                   = "https://api.together.xyz/v1"
+	LMStudioBaseURL                   = "http://localhost:1234/v1"
+)
+
+// Connection describes non-secret provider connection metadata.
+type Connection struct {
+	Protocol  Protocol `json:"protocol"`
+	BaseURL   string   `json:"base_url,omitempty"`
+	APIKeyEnv string   `json:"api_key_env,omitempty"`
+}
+
 // Default returns a useful local-first configuration.
 func Default() Config {
 	return Config{
 		Provider: "ollama",
 		Models: map[string]string{
 			"ollama":     "qwen3:8b",
-			"openai":     "gpt-5.4-mini",
+			"openai":     "gpt-4.1-mini",
 			"anthropic":  "claude-sonnet-4-6",
 			"compatible": "model-name",
 		},
@@ -53,6 +75,52 @@ func Default() Config {
 // ProviderNames returns all provider types understood by Ephemera.
 func ProviderNames() []string {
 	return []string{"ollama", "openai", "anthropic", "compatible"}
+}
+
+// ConnectNames returns provider and preset names accepted by /connect.
+func ConnectNames() []string {
+	return []string{"ollama", "openai", "anthropic", "compatible", "nvidia", "openrouter", "groq", "together", "lm-studio"}
+}
+
+// Preset returns built-in connection metadata for known providers.
+func Preset(name string) (Connection, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "ollama":
+		return Connection{Protocol: ProtocolOllama, BaseURL: "http://localhost:11434"}, true
+	case "openai":
+		return Connection{Protocol: ProtocolOpenAI, APIKeyEnv: "OPENAI_API_KEY"}, true
+	case "anthropic":
+		return Connection{Protocol: ProtocolAnthropic, APIKeyEnv: "ANTHROPIC_API_KEY"}, true
+	case "nvidia":
+		return Connection{Protocol: ProtocolOpenAICompatible, BaseURL: NVIDIABaseURL, APIKeyEnv: "NVIDIA_API_KEY"}, true
+	case "openrouter":
+		return Connection{Protocol: ProtocolOpenAICompatible, BaseURL: OpenRouterBaseURL, APIKeyEnv: "OPENROUTER_API_KEY"}, true
+	case "groq":
+		return Connection{Protocol: ProtocolOpenAICompatible, BaseURL: GroqBaseURL, APIKeyEnv: "GROQ_API_KEY"}, true
+	case "together":
+		return Connection{Protocol: ProtocolOpenAICompatible, BaseURL: TogetherBaseURL, APIKeyEnv: "TOGETHER_API_KEY"}, true
+	case "lm-studio":
+		return Connection{Protocol: ProtocolOpenAICompatible, BaseURL: LMStudioBaseURL, APIKeyEnv: "LM_STUDIO_API_KEY"}, true
+	default:
+		return Connection{}, false
+	}
+}
+
+// DefaultAPIKeyEnv derives a conventional API-key environment variable name.
+func DefaultAPIKeyEnv(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(strings.TrimSpace(name)) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else if b.Len() > 0 {
+			b.WriteByte('_')
+		}
+	}
+	prefix := strings.Trim(b.String(), "_")
+	if prefix == "" {
+		prefix = "EPHEMERA"
+	}
+	return prefix + "_API_KEY"
 }
 
 // ValidProvider reports whether value names a supported provider type.
@@ -148,6 +216,9 @@ func (c *Config) normalize() {
 			c.Models[provider] = model
 		}
 	}
+	if isRetiredOpenAIModel(c.Models["openai"]) {
+		c.Models["openai"] = defaults.Models["openai"]
+	}
 	if !c.Mode.Valid() {
 		c.Mode = defaults.Mode
 	}
@@ -166,4 +237,9 @@ func (c *Config) normalize() {
 	if strings.TrimSpace(c.CompatibleURL) == "" {
 		c.CompatibleURL = defaults.CompatibleURL
 	}
+}
+
+func isRetiredOpenAIModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(model, "gpt-5.4") || strings.HasPrefix(model, "gpt-5.5")
 }

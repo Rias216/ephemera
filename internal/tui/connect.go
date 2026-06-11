@@ -62,35 +62,21 @@ func (m *Model) submitConnectStep() {
 
 	switch m.connect.Step {
 	case connectProvider:
-		provider := strings.ToLower(value)
-		if !config.ValidProvider(provider) {
-			m.status = "Choose ollama, openai, anthropic, or compatible."
+		if !m.applyConnectProvider(value) {
+			m.status = "Choose a provider or preset from the suggestions."
 			m.rebuildSuggestions()
 			return
 		}
-		m.connect.Provider = provider
-		switch provider {
-		case "ollama":
-			m.connect.Step = connectBaseURL
-		case "openai", "anthropic":
-			m.connect.Step = connectAPIKey
-		case "compatible":
-			m.connect.Step = connectName
-		}
 
 	case connectName:
-		if value == "" {
-			value = "compatible"
-		}
-		m.connect.Name = value
-		m.connect.Step = connectBaseURL
+		m.applyConnectName(value)
 
 	case connectBaseURL:
 		if value == "" {
 			if m.connect.Provider == "ollama" {
 				value = m.cfg.OllamaURL
 			} else {
-				value = m.cfg.CompatibleURL
+				value = m.defaultCompatibleBaseURL()
 			}
 		}
 		if err := validateEndpoint(value); err != nil {
@@ -125,6 +111,62 @@ func (m *Model) submitConnectStep() {
 	m.rebuildSuggestions()
 }
 
+func (m *Model) applyConnectProvider(value string) bool {
+	name := strings.ToLower(strings.TrimSpace(value))
+	switch name {
+	case "ollama":
+		m.connect.Provider = "ollama"
+		m.connect.Step = connectBaseURL
+		return true
+	case "openai":
+		m.connect.Provider = "openai"
+		m.connect.Step = connectAPIKey
+		return true
+	case "anthropic":
+		m.connect.Provider = "anthropic"
+		m.connect.Step = connectAPIKey
+		return true
+	case "compatible":
+		m.connect.Provider = "compatible"
+		m.connect.Step = connectName
+		return true
+	default:
+		preset, ok := config.Preset(name)
+		if !ok || preset.Protocol != config.ProtocolOpenAICompatible {
+			return false
+		}
+		m.connect.Provider = "compatible"
+		m.connect.Name = name
+		m.connect.BaseURL = strings.TrimRight(preset.BaseURL, "/")
+		m.connect.Step = connectAPIKey
+		return true
+	}
+}
+
+func (m *Model) applyConnectName(value string) {
+	name := strings.ToLower(strings.TrimSpace(value))
+	if name == "" {
+		name = "compatible"
+	}
+	m.connect.Name = name
+	if preset, ok := config.Preset(name); ok && preset.Protocol == config.ProtocolOpenAICompatible && strings.TrimSpace(preset.BaseURL) != "" {
+		m.connect.BaseURL = strings.TrimRight(preset.BaseURL, "/")
+		m.connect.Step = connectAPIKey
+		return
+	}
+	m.connect.Step = connectBaseURL
+}
+
+func (m *Model) acceptConnectSuggestionForEnter() bool {
+	if m.connect == nil || len(m.suggestions) == 0 {
+		return false
+	}
+	if strings.TrimSpace(m.input.Value()) == "" && m.connect.Step != connectProvider && m.connect.Step != connectModel {
+		return false
+	}
+	return m.acceptSuggestion()
+}
+
 func (m *Model) finishConnect() {
 	flow := m.connect
 	if flow == nil {
@@ -148,7 +190,7 @@ func (m *Model) finishConnect() {
 	m.session.Provider = m.cfg.Provider
 	m.session.Model = m.cfg.Model()
 	_ = config.Save(m.cfg)
-	_ = m.store.Save(m.session)
+	_ = m.saveSession()
 
 	display := flow.Provider
 	if flow.Provider == "compatible" {
@@ -190,14 +232,14 @@ func (m Model) connectPlaceholder() string {
 	}
 	switch m.connect.Step {
 	case connectProvider:
-		return "Provider: ollama, openai, anthropic, compatible"
+		return "Provider or preset: ollama, openai, anthropic, openrouter, groq, nvidia"
 	case connectName:
 		return "Connection name [compatible]"
 	case connectBaseURL:
 		if m.connect.Provider == "ollama" {
 			return "Ollama URL [" + m.cfg.OllamaURL + "]"
 		}
-		return "OpenAI-compatible base URL [" + m.cfg.CompatibleURL + "]"
+		return "OpenAI-compatible base URL [" + m.defaultCompatibleBaseURL() + "]"
 	case connectAPIKey:
 		switch m.connect.Provider {
 		case "openai":
@@ -211,8 +253,14 @@ func (m Model) connectPlaceholder() string {
 			}
 			return "Anthropic API key"
 		default:
-			if os.Getenv("EPHEMERA_API_KEY") != "" {
+			envName := config.DefaultAPIKeyEnv(m.connect.Name)
+			switch {
+			case m.connect.Name != "" && os.Getenv(envName) != "":
+				return "API key [Enter uses " + envName + "]"
+			case os.Getenv("EPHEMERA_API_KEY") != "":
 				return "API key [Enter uses EPHEMERA_API_KEY]"
+			case m.connect.Name != "":
+				return "API key [" + envName + " or optional for local servers]"
 			}
 			return "API key [optional for local servers]"
 		}
@@ -221,6 +269,15 @@ func (m Model) connectPlaceholder() string {
 	default:
 		return "Connection value"
 	}
+}
+
+func (m Model) defaultCompatibleBaseURL() string {
+	if m.connect != nil && strings.TrimSpace(m.connect.Name) != "" {
+		if preset, ok := config.Preset(m.connect.Name); ok && strings.TrimSpace(preset.BaseURL) != "" {
+			return preset.BaseURL
+		}
+	}
+	return m.cfg.CompatibleURL
 }
 
 func (m Model) defaultConnectModel() string {
@@ -233,7 +290,60 @@ func (m Model) defaultConnectModel() string {
 	return "model-name"
 }
 
-func (m Model) connectSuggestions() []suggestion {
+func (m *Model) openModelChooser() {
+	m.input.SetValue("/model ")
+	m.input.CursorEnd()
+	m.rebuildSuggestions()
+	provider := m.cfg.Provider
+	if provider == "compatible" && strings.TrimSpace(m.cfg.CompatibleName) != "" {
+		provider = m.cfg.CompatibleName
+	}
+	if len(m.suggestions) == 0 {
+		m.notice = "### Models\n\nNo model catalog is available for the active provider. Type `/model <model-id>` to set one manually."
+		m.status = "No model suggestions available."
+		return
+	}
+	m.notice = fmt.Sprintf(
+		"### Models\n\nChoose a model for `%s` from the palette below. Use **↑/↓** and **Enter** to activate the highlighted model, or **Tab** to only fill the input.",
+		provider,
+	)
+	m.status = fmt.Sprintf("Choose a model for %s.", provider)
+}
+
+func (m *Model) connectModelListConfig() config.Config {
+	cfg := m.cfg
+	if m.connect == nil {
+		return cfg
+	}
+	cfg.Provider = m.connect.Provider
+	switch m.connect.Provider {
+	case "ollama":
+		if strings.TrimSpace(m.connect.BaseURL) != "" {
+			cfg.OllamaURL = m.connect.BaseURL
+		}
+	case "openai":
+		if strings.TrimSpace(m.connect.APIKey) != "" {
+			cfg.OpenAIKey = m.connect.APIKey
+		}
+	case "anthropic":
+		if strings.TrimSpace(m.connect.APIKey) != "" {
+			cfg.AnthropicKey = m.connect.APIKey
+		}
+	case "compatible":
+		if strings.TrimSpace(m.connect.Name) != "" {
+			cfg.CompatibleName = m.connect.Name
+		}
+		if strings.TrimSpace(m.connect.BaseURL) != "" {
+			cfg.CompatibleURL = m.connect.BaseURL
+		}
+		if strings.TrimSpace(m.connect.APIKey) != "" {
+			cfg.CompatibleKey = m.connect.APIKey
+		}
+	}
+	return cfg
+}
+
+func (m *Model) connectSuggestions() []suggestion {
 	if m.connect == nil || m.connect.Step == connectAPIKey {
 		return nil
 	}
@@ -242,7 +352,7 @@ func (m Model) connectSuggestions() []suggestion {
 
 	switch m.connect.Step {
 	case connectProvider:
-		for _, provider := range config.ProviderNames() {
+		for _, provider := range config.ConnectNames() {
 			values = append(values, suggestion{
 				Value:       provider,
 				Label:       provider,
@@ -251,31 +361,35 @@ func (m Model) connectSuggestions() []suggestion {
 		}
 	case connectName:
 		values = []suggestion{
-			{Value: "openrouter", Label: "openrouter", Description: "custom connection name"},
-			{Value: "groq", Label: "groq", Description: "custom connection name"},
+			{Value: "openrouter", Label: "openrouter", Description: config.OpenRouterBaseURL},
+			{Value: "groq", Label: "groq", Description: config.GroqBaseURL},
+			{Value: "nvidia", Label: "nvidia", Description: config.NVIDIABaseURL},
 			{Value: "lm-studio", Label: "lm-studio", Description: "local compatible server"},
-			{Value: "together", Label: "together", Description: "custom connection name"},
+			{Value: "together", Label: "together", Description: config.TogetherBaseURL},
 		}
 	case connectBaseURL:
 		if m.connect.Provider == "ollama" {
 			values = []suggestion{{Value: m.cfg.OllamaURL, Label: m.cfg.OllamaURL, Description: "current Ollama endpoint"}}
 		} else {
 			values = []suggestion{
-				{Value: "https://openrouter.ai/api/v1", Label: "OpenRouter", Description: "https://openrouter.ai/api/v1"},
-				{Value: "https://api.groq.com/openai/v1", Label: "Groq", Description: "https://api.groq.com/openai/v1"},
-				{Value: "https://api.together.xyz/v1", Label: "Together", Description: "https://api.together.xyz/v1"},
-				{Value: "http://localhost:1234/v1", Label: "LM Studio", Description: "http://localhost:1234/v1"},
+				{Value: m.defaultCompatibleBaseURL(), Label: "Current default", Description: m.defaultCompatibleBaseURL()},
+				{Value: config.OpenRouterBaseURL, Label: "OpenRouter", Description: config.OpenRouterBaseURL},
+				{Value: config.GroqBaseURL, Label: "Groq", Description: config.GroqBaseURL},
+				{Value: config.NVIDIABaseURL, Label: "NVIDIA", Description: config.NVIDIABaseURL},
+				{Value: config.TogetherBaseURL, Label: "Together", Description: config.TogetherBaseURL},
+				{Value: config.LMStudioBaseURL, Label: "LM Studio", Description: config.LMStudioBaseURL},
 			}
 		}
 	case connectModel:
+		values = m.modelSuggestionsForConfig(m.connectModelListConfig())
 		model := m.defaultConnectModel()
-		if model != "" {
-			values = []suggestion{{Value: model, Label: model, Description: "current default model"}}
+		if model != "" && len(values) == 0 {
+			values = append(values, suggestion{Value: model, Label: model, Description: "current default model"})
 		}
 	}
 
 	if query == "" {
-		return limitSuggestions(values, 7)
+		return values
 	}
 	filtered := values[:0]
 	for _, item := range values {
@@ -283,7 +397,7 @@ func (m Model) connectSuggestions() []suggestion {
 			filtered = append(filtered, item)
 		}
 	}
-	return limitSuggestions(filtered, 7)
+	return filtered
 }
 
 func validateEndpoint(value string) error {

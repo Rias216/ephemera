@@ -6,15 +6,17 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 )
 
 // OpenAI drives both OpenAI itself and OpenAI-compatible chat completion APIs.
 type OpenAI struct {
-	name    string
-	apiKey  string
-	baseURL string
+	name      string
+	apiKey    string
+	apiKeyEnv string
+	baseURL   string
 }
 
 func NewOpenAI(apiKey string) *OpenAI {
@@ -26,7 +28,7 @@ func NewOpenAICompatible(name, baseURL, apiKey string) *OpenAI {
 	if name == "" {
 		name = "compatible"
 	}
-	return &OpenAI{name: name, apiKey: apiKey, baseURL: strings.TrimSpace(baseURL)}
+	return &OpenAI{name: name, apiKey: apiKey, apiKeyEnv: config.DefaultAPIKeyEnv(name), baseURL: strings.TrimSpace(baseURL)}
 }
 
 func (p *OpenAI) Name() string { return p.name }
@@ -37,7 +39,7 @@ func (p *OpenAI) Generate(ctx context.Context, req Request) (string, error) {
 		if p.baseURL == "" {
 			key = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
 		} else {
-			key = strings.TrimSpace(os.Getenv("EPHEMERA_API_KEY"))
+			key = firstNonEmpty(os.Getenv(p.apiKeyEnv), os.Getenv("EPHEMERA_API_KEY"))
 		}
 	}
 	if key == "" && p.baseURL == "" {
@@ -87,6 +89,9 @@ func (p *OpenAI) Generate(ctx context.Context, req Request) (string, error) {
 		)
 	}
 	if err != nil {
+		if p.baseURL == "" && strings.Contains(err.Error(), "insufficient_quota") {
+			return "", fmt.Errorf("%w\n\nOpenAI API billing is separate from ChatGPT Plus/Pro subscriptions. A valid API key can still return insufficient_quota until API billing or credits are enabled. Enable billing at platform.openai.com, or connect a different backend with /connect openrouter, /connect groq, or /connect ollama.", err)
+		}
 		return "", err
 	}
 	if len(response.Choices) == 0 {

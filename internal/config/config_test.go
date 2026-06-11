@@ -40,6 +40,17 @@ func TestNormalizeRepairsPartialConfig(t *testing.T) {
 	}
 }
 
+func TestNormalizeMigratesRetiredOpenAIModelDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{Provider: "openai", Models: map[string]string{"openai": "gpt-5.4"}}
+	cfg.normalize()
+
+	if got := cfg.Model(); got != Default().Models["openai"] {
+		t.Fatalf("retired OpenAI model normalized to %q, want %q", got, Default().Models["openai"])
+	}
+}
+
 func TestSetModelInitializesMap(t *testing.T) {
 	t.Parallel()
 
@@ -66,6 +77,29 @@ func TestRuntimeKeysAreNeverSerialized(t *testing.T) {
 	for _, secret := range []string{cfg.OpenAIKey, cfg.AnthropicKey, cfg.CompatibleKey} {
 		if strings.Contains(serialized, secret) {
 			t.Fatalf("serialized config leaked runtime key %q", secret)
+		}
+	}
+}
+
+func TestCompatiblePresets(t *testing.T) {
+	t.Parallel()
+
+	for name, wantURL := range map[string]string{
+		"nvidia":     NVIDIABaseURL,
+		"openrouter": OpenRouterBaseURL,
+		"groq":       GroqBaseURL,
+		"together":   TogetherBaseURL,
+		"lm-studio":  LMStudioBaseURL,
+	} {
+		preset, ok := Preset(name)
+		if !ok {
+			t.Fatalf("Preset(%q) was not found", name)
+		}
+		if preset.Protocol != ProtocolOpenAICompatible {
+			t.Fatalf("Preset(%q) protocol = %q, want OpenAI-compatible", name, preset.Protocol)
+		}
+		if preset.BaseURL != wantURL {
+			t.Fatalf("Preset(%q) base URL = %q, want %q", name, preset.BaseURL, wantURL)
 		}
 	}
 }

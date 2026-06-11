@@ -62,13 +62,11 @@ func build(primary, secondary, text, muted, background, panel lipgloss.Color) St
 		Muted:      muted,
 		Background: background,
 		Panel:      panel,
-		Banner: lipgloss.NewStyle().
-			Bold(true).
-			Foreground(primary).
-			Background(background),
-		Subtitle: lipgloss.NewStyle().Foreground(muted).Italic(true),
+		Banner:     lipgloss.NewStyle().Bold(true).Foreground(primary),
+		Subtitle:   lipgloss.NewStyle().Foreground(muted).Italic(true),
 		Meta: lipgloss.NewStyle().
 			Foreground(muted).
+			Background(background).
 			PaddingLeft(1),
 		Viewport: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -81,7 +79,7 @@ func build(primary, secondary, text, muted, background, panel lipgloss.Color) St
 			Background(panel).
 			Padding(0, 1),
 		Prompt:         lipgloss.NewStyle().Bold(true).Foreground(primary),
-		Status:         lipgloss.NewStyle().Foreground(muted).Background(background),
+		Status:         lipgloss.NewStyle().Foreground(muted),
 		UserLabel:      lipgloss.NewStyle().Bold(true).Foreground(primary),
 		AssistantLabel: lipgloss.NewStyle().Bold(true).Foreground(secondary),
 		NoticeLabel:    lipgloss.NewStyle().Bold(true).Foreground(muted),

@@ -88,15 +88,17 @@ Type `/` to open the command palette.
 |---|---|
 | `Tab` | Complete the selected command or value |
 | `↑` / `↓` | Move through suggestions |
-| `Enter` | Execute the completed command |
+| `Enter` | Execute the current input or activate the highlighted suggestion |
 | `Esc` | Cancel the `/connect` wizard |
 
 Autocomplete also suggests:
 
-- provider names for `/connect` and `/provider`,
+- provider names and known compatible presets for `/connect`,
+- provider names for `/provider`,
 - reasoning modes for `/mode`,
 - themes for `/theme`,
 - saved session names for `/load`,
+- live provider models, current model, and curated fallback models for `/model`,
 - common OpenAI-compatible endpoints during `/connect`.
 
 ## Connect from inside the TUI
@@ -114,6 +116,9 @@ Or begin with a provider already selected:
 /connect openai
 /connect anthropic
 /connect compatible
+/connect openrouter
+/connect groq
+/connect nvidia
 ```
 
 The wizard asks only for the fields the selected provider needs.
@@ -149,7 +154,7 @@ set.
 
 ### Any OpenAI-compatible provider
 
-Use `compatible` for providers and local servers exposing the standard
+Use `compatible` for custom providers and local servers exposing the standard
 `/chat/completions` API:
 
 ```text
@@ -160,8 +165,10 @@ API key: ********
 Model: provider/model-id
 ```
 
-Examples include OpenRouter, Groq, Together, LM Studio, vLLM, LocalAI, and other
-compatible gateways. The wizard accepts any custom HTTP or HTTPS base URL.
+Known presets such as `openrouter`, `groq`, `nvidia`, `together`, and
+`lm-studio` prefill the matching base URL while still storing the runtime
+provider as `compatible`. The wizard also accepts any custom HTTP or HTTPS base
+URL.
 
 API keys entered in `/connect` are masked and kept only in process memory. They
 are never written to `config.json`. For persistent credentials, set:
@@ -178,7 +185,7 @@ is persisted.
 ## Commands
 
 ```text
-/connect [ollama|openai|anthropic|compatible]
+/connect [ollama|openai|anthropic|compatible|openrouter|groq|nvidia|together|lm-studio]
 /help
 /clear
 /new [name]
@@ -187,6 +194,7 @@ is persisted.
 /sessions
 /provider <ollama|openai|anthropic|compatible>
 /model <model-id>
+/models
 /mode <normal|deep-reason|concise|creative>
 /theme <rose|mono>
 /copy

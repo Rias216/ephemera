@@ -3,6 +3,7 @@ package history
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/ephemera-ai/ephemera/internal/reasoning"
@@ -48,6 +49,9 @@ func TestStoreRoundTrip(t *testing.T) {
 	info, err := os.Stat(filepath.Join(dir, "deep-work.json"))
 	if err != nil {
 		t.Fatalf("Stat(): %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		return
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("session permissions are too broad: %o", info.Mode().Perm())

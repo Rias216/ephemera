@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"context"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
+	"github.com/ephemera-ai/ephemera/internal/llm"
 )
 
 type commandSpec struct {
@@ -22,7 +25,7 @@ type suggestion struct {
 
 var commandSpecs = []commandSpec{
 	{Name: "/help", Description: "show the command map"},
-	{Name: "/connect", Usage: "[provider]", Description: "guided provider connection", Choices: config.ProviderNames()},
+	{Name: "/connect", Usage: "[provider]", Description: "guided provider connection", Choices: config.ConnectNames()},
 	{Name: "/clear", Description: "clear the current conversation"},
 	{Name: "/new", Usage: "[name]", Description: "begin a new session"},
 	{Name: "/save", Usage: "[name]", Description: "save or rename this session"},
@@ -30,6 +33,7 @@ var commandSpecs = []commandSpec{
 	{Name: "/sessions", Description: "list saved sessions"},
 	{Name: "/provider", Usage: "<provider>", Description: "switch provider", Choices: config.ProviderNames()},
 	{Name: "/model", Usage: "<model-id>", Description: "switch model"},
+	{Name: "/models", Description: "open model chooser"},
 	{Name: "/mode", Usage: "<mode>", Description: "change reasoning mode", Choices: []string{"normal", "deep-reason", "concise", "creative"}},
 	{Name: "/theme", Usage: "<theme>", Description: "change palette", Choices: []string{"rose", "mono"}},
 	{Name: "/copy", Description: "copy the last answer"},
@@ -93,12 +97,7 @@ func (m *Model) commandSuggestions(raw string) []suggestion {
 	if !ok {
 		return nil
 	}
-	choices := append([]string(nil), spec.Choices...)
-	if spec.Name == "/load" {
-		if names, err := m.store.List(); err == nil {
-			choices = names
-		}
-	}
+	choices := m.commandChoiceSuggestions(spec)
 	if len(choices) == 0 {
 		return nil
 	}
@@ -106,13 +105,13 @@ func (m *Model) commandSuggestions(raw string) []suggestion {
 	query := strings.ToLower(strings.TrimSpace(argPrefix))
 	var out []suggestion
 	for _, choice := range choices {
-		if query != "" && !strings.Contains(strings.ToLower(choice), query) {
+		if query != "" && !strings.Contains(strings.ToLower(choice.Value+" "+choice.Label+" "+choice.Description), query) {
 			continue
 		}
 		out = append(out, suggestion{
-			Value:       spec.Name + " " + choice,
-			Label:       choice,
-			Description: argumentDescription(spec.Name, choice),
+			Value:       spec.Name + " " + choice.Value,
+			Label:       choice.Label,
+			Description: choice.Description,
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -123,7 +122,109 @@ func (m *Model) commandSuggestions(raw string) []suggestion {
 		}
 		return out[i].Label < out[j].Label
 	})
-	return limitSuggestions(out, 7)
+	return out
+}
+
+func (m *Model) commandChoiceSuggestions(spec commandSpec) []suggestion {
+	switch spec.Name {
+	case "/load":
+		names, err := m.listSessions()
+		if err != nil {
+			return nil
+		}
+		out := make([]suggestion, 0, len(names))
+		for _, name := range names {
+			out = append(out, suggestion{Value: name, Label: name, Description: argumentDescription(spec.Name, name)})
+		}
+		return out
+	case "/model":
+		return m.modelSuggestionsForConfig(m.cfg)
+	default:
+		out := make([]suggestion, 0, len(spec.Choices))
+		for _, choice := range spec.Choices {
+			out = append(out, suggestion{Value: choice, Label: choice, Description: argumentDescription(spec.Name, choice)})
+		}
+		return out
+	}
+}
+
+func (m *Model) modelSuggestionsForConfig(cfg config.Config) []suggestion {
+	key := modelCacheKey(cfg)
+	if m.modelSuggestionCache != nil {
+		if cached, ok := m.modelSuggestionCache[key]; ok {
+			return cached
+		}
+	} else {
+		m.modelSuggestionCache = map[string][]suggestion{}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	models, err := llm.ListModels(ctx, cfg)
+	fallback := false
+	if err != nil || len(models) == 0 {
+		models = llm.KnownModelIDs(cfg.Provider)
+		fallback = true
+	}
+	out := make([]suggestion, 0, len(models)+1)
+	seen := map[string]struct{}{}
+	add := func(model, description string) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return
+		}
+		if _, ok := seen[model]; ok {
+			return
+		}
+		seen[model] = struct{}{}
+		out = append(out, suggestion{Value: model, Label: model, Description: description})
+	}
+	add(cfg.Model(), "current selection")
+	description := "provider model"
+	if fallback {
+		description = "suggested " + cfg.Provider + " model"
+	}
+	for _, model := range models {
+		add(model, description)
+	}
+	m.modelSuggestionCache[key] = out
+	return out
+}
+
+func modelCacheKey(cfg config.Config) string {
+	return strings.Join([]string{
+		cfg.Provider,
+		cfg.OllamaURL,
+		cfg.CompatibleName,
+		cfg.CompatibleURL,
+		cfg.OpenAIKey,
+		cfg.AnthropicKey,
+		cfg.CompatibleKey,
+		cfg.Model(),
+	}, "\x00")
+}
+
+func (m *Model) acceptCommandSuggestionForEnter() bool {
+	if len(m.suggestions) == 0 {
+		return false
+	}
+	if !strings.HasPrefix(strings.TrimSpace(m.input.Value()), "/") {
+		return false
+	}
+	return m.acceptSuggestion()
+}
+
+func (m Model) commandNeedsMoreInput() bool {
+	command, argPrefix, hasArgs := splitCommandInput(m.input.Value())
+	spec, ok := findCommandSpec(command)
+	if !ok || !usageRequiresValue(spec.Usage) {
+		return false
+	}
+	return !hasArgs || strings.TrimSpace(argPrefix) == ""
+}
+
+func usageRequiresValue(usage string) bool {
+	return strings.HasPrefix(strings.TrimSpace(usage), "<")
 }
 
 func splitCommandInput(raw string) (command, argPrefix string, hasArgs bool) {
@@ -162,6 +263,9 @@ func argumentDescription(command, choice string) string {
 	case "/provider", "/connect":
 		if choice == "compatible" {
 			return "custom OpenAI-compatible API"
+		}
+		if preset, ok := config.Preset(choice); ok && preset.Protocol == config.ProtocolOpenAICompatible {
+			return "OpenAI-compatible preset"
 		}
 		return "connect to " + choice
 	case "/mode":

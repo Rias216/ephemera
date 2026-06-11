@@ -13,6 +13,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/ansi"
+	glamourStyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
@@ -24,7 +26,7 @@ import (
 
 const helpText = `### Commands
 
-- **/connect [ollama|openai|anthropic|compatible]** — guided provider setup
+- **/connect [provider|preset]** — guided provider setup
 - **/help** — show this command map
 - **/clear** — clear the current conversation
 - **/new [name]** — begin a new named session
@@ -33,12 +35,13 @@ const helpText = `### Commands
 - **/sessions** — list saved sessions
 - **/provider <ollama|openai|anthropic|compatible>** — select backend
 - **/model <id>** — select the active provider's model
+- **/models** — open the model chooser
 - **/mode <normal|deep-reason|concise|creative>** — change reasoning mode
 - **/theme <rose|mono>** — change palette
 - **/copy** — copy the last answer
 - **/quit** — leave Ephemera
 
-Autocomplete: type **/**, use **↑/↓** to select, and press **Tab** to complete.
+Autocomplete: type **/**, use **↑/↓** to select, and press **Enter** to run or **Tab** to complete.
 
 Keys: **Enter** send · **PgUp/PgDn** scroll · **Ctrl+Y** copy · **Ctrl+C** quit`
 
@@ -57,16 +60,17 @@ type Model struct {
 	input    textinput.Model
 	spinner  spinner.Model
 
-	width           int
-	height          int
-	ready           bool
-	busy            bool
-	status          string
-	notice          string
-	lastAssistant   string
-	suggestions     []suggestion
-	completionIndex int
-	connect         *connectFlow
+	width                int
+	height               int
+	ready                bool
+	busy                 bool
+	status               string
+	notice               string
+	lastAssistant        string
+	suggestions          []suggestion
+	completionIndex      int
+	connect              *connectFlow
+	modelSuggestionCache map[string][]suggestion
 }
 
 // New creates a TUI model. When sessionName exists it is loaded; otherwise a
@@ -91,16 +95,9 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 
 	var session history.Session
 	if sessionName != "" {
-		loaded, err := store.Load(sessionName)
-		if err == nil {
+		if loaded, err := loadFromStore(store, sessionName); err == nil {
 			session = loaded
-			if config.ValidProvider(loaded.Provider) {
-				cfg.Provider = loaded.Provider
-			}
-			cfg.SetModel(loaded.Model)
-			if loaded.Mode.Valid() {
-				cfg.Mode = loaded.Mode
-			}
+			applyLoadedSessionConfig(&cfg, loaded)
 		}
 	}
 	if session.Name == "" {
@@ -147,7 +144,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.session.Provider = m.cfg.Provider
 		m.session.Model = m.cfg.Model()
 		m.session.Mode = m.cfg.Mode
-		if err := m.store.Save(m.session); err != nil {
+		if err := m.saveSession(); err != nil {
 			m.status = "Answered, but session save failed: " + err.Error()
 		} else {
 			m.status = "Saved · the answer has settled."
@@ -166,7 +163,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		key := msg.String()
 		switch key {
 		case "ctrl+c":
-			_ = m.store.Save(m.session)
+			_ = m.saveSession()
 			_ = config.Save(m.cfg)
 			return m, tea.Quit
 		case "ctrl+y":
@@ -207,6 +204,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			case "enter":
+				m.acceptConnectSuggestionForEnter()
 				m.submitConnectStep()
 				m.refreshViewport(true)
 				return m, nil
@@ -232,6 +230,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "One thought at a time."
 					return m, nil
 				}
+				if m.acceptCommandSuggestionForEnter() && m.commandNeedsMoreInput() {
+					return m, nil
+				}
 				value := strings.TrimSpace(m.input.Value())
 				if value == "" {
 					return m, nil
@@ -250,7 +251,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.session.Append("user", value)
 				// Persist the prompt before starting a potentially long network call.
 				// A crash or interrupted request should not erase the user's thought.
-				_ = m.store.Save(m.session)
+				_ = m.saveSession()
 				m.busy = true
 				m.status = "Reasoning beneath the surface…"
 				m.refreshViewport(true)
@@ -299,7 +300,7 @@ func (m Model) View() string {
 	)
 	meta := m.styles.Meta.Render(clip(metaText, m.width-2))
 
-	prompt := m.styles.Prompt.Render("rose→ ")
+	prompt := m.styles.Prompt.Render(m.promptLabel())
 	inputLine := lipgloss.JoinHorizontal(lipgloss.Top, prompt, m.input.View())
 	inputBox := m.styles.Input.Width(max(1, m.width-4)).Render(inputLine)
 
@@ -309,9 +310,9 @@ func (m Model) View() string {
 	}
 	rightStatus := "PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+C quit"
 	if m.connect != nil {
-		rightStatus = "Esc cancel · Tab complete · ↑/↓ select"
+		rightStatus = "Enter next · Esc cancel · Tab complete · ↑/↓ select"
 	} else if len(m.suggestions) > 0 {
-		rightStatus = "Tab complete · ↑/↓ select"
+		rightStatus = "Enter accept · Tab complete · ↑/↓ select"
 	} else if m.width < 88 {
 		rightStatus = "Ctrl+C quit"
 	}
@@ -349,10 +350,10 @@ func (m Model) renderSuggestions() string {
 	var lines []string
 	for i, item := range items {
 		marker := "  "
-		style := lipgloss.NewStyle().Foreground(m.styles.Muted)
+		style := lipgloss.NewStyle().Foreground(m.styles.Muted).Background(m.styles.Panel)
 		if start+i == m.completionIndex {
 			marker = "› "
-			style = lipgloss.NewStyle().Bold(true).Foreground(m.styles.Primary)
+			style = lipgloss.NewStyle().Bold(true).Foreground(m.styles.Primary).Background(m.styles.Panel)
 		}
 		line := marker + item.Label
 		if item.Description != "" && m.width >= 68 {
@@ -397,10 +398,10 @@ func (m *Model) refreshViewport(bottom bool) {
 }
 
 func (m Model) renderTranscript() string {
-	width := max(20, m.viewport.Width-2)
+	width := m.transcriptWidth()
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
-		glamour.WithWordWrap(width),
+		glamour.WithStyles(markdownStyle(m.styles)),
+		glamour.WithWordWrap(max(1, width-2)),
 	)
 	if err != nil {
 		return "renderer error: " + err.Error()
@@ -408,45 +409,121 @@ func (m Model) renderTranscript() string {
 
 	var out strings.Builder
 	if len(m.session.Messages) == 0 {
-		out.WriteString(m.styles.NoticeLabel.Render("signal"))
+		out.WriteString(m.transcriptLine(m.styles.NoticeLabel, "signal"))
 		out.WriteString("\n")
 		welcome, _ := renderer.Render("A quiet reasoning harness. Ask plainly; Ephemera will do the hidden work.")
-		out.WriteString(strings.TrimSpace(welcome))
+		out.WriteString(m.transcriptBlock(strings.TrimSpace(welcome)))
 		out.WriteString("\n")
 	}
 
 	for _, message := range m.session.Messages {
 		switch message.Role {
 		case "user":
-			out.WriteString(m.styles.UserLabel.Render("you"))
+			out.WriteString(m.transcriptLine(m.styles.UserLabel, "you"))
 		case "assistant":
-			out.WriteString(m.styles.AssistantLabel.Render("ephemera"))
+			out.WriteString(m.transcriptLine(m.styles.AssistantLabel, "ephemera"))
 		default:
 			continue
 		}
 		out.WriteString("\n")
 		rendered, renderErr := renderer.Render(message.Content)
 		if renderErr != nil {
-			out.WriteString(message.Content)
+			out.WriteString(m.transcriptBlock(message.Content))
 		} else {
-			out.WriteString(strings.TrimSpace(rendered))
+			out.WriteString(m.transcriptBlock(strings.TrimSpace(rendered)))
 		}
 		out.WriteString("\n\n")
 	}
 
 	if m.notice != "" {
-		out.WriteString(m.styles.NoticeLabel.Render("signal"))
+		out.WriteString(m.transcriptLine(m.styles.NoticeLabel, "signal"))
 		out.WriteString("\n")
 		rendered, renderErr := renderer.Render(m.notice)
 		if renderErr != nil {
-			out.WriteString(m.notice)
+			out.WriteString(m.transcriptBlock(m.notice))
 		} else {
-			out.WriteString(strings.TrimSpace(rendered))
+			out.WriteString(m.transcriptBlock(strings.TrimSpace(rendered)))
 		}
 		out.WriteString("\n")
 	}
 	return strings.TrimSpace(out.String())
 }
+
+func (m Model) transcriptWidth() int {
+	return max(20, m.viewport.Width-2)
+}
+
+func (m Model) transcriptLine(style lipgloss.Style, text string) string {
+	return style.Width(m.transcriptWidth()).Render(text)
+}
+
+func (m Model) transcriptBlock(text string) string {
+	width := m.transcriptWidth()
+	style := lipgloss.NewStyle().Foreground(m.styles.Text).Width(width)
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = style.Render(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func markdownStyle(styles theme.Styles) ansi.StyleConfig {
+	cfg := glamourStyles.DarkStyleConfig
+	if cfg.CodeBlock.Chroma != nil {
+		chroma := *cfg.CodeBlock.Chroma
+		cfg.CodeBlock.Chroma = &chroma
+	}
+
+	text := string(styles.Text)
+	muted := string(styles.Muted)
+	primary := string(styles.Primary)
+	secondary := string(styles.Secondary)
+	panel := string(styles.Panel)
+	bold := true
+
+	setPrimitive := func(primitive *ansi.StylePrimitive, color string) {
+		primitive.Color = stringPtr(color)
+		primitive.BackgroundColor = nil
+	}
+	setBlock := func(block *ansi.StyleBlock, color string) {
+		setPrimitive(&block.StylePrimitive, color)
+	}
+
+	setBlock(&cfg.Document, text)
+	setBlock(&cfg.Paragraph, text)
+	setBlock(&cfg.BlockQuote, muted)
+	setBlock(&cfg.Heading, primary)
+	setBlock(&cfg.H1, primary)
+	setBlock(&cfg.H2, primary)
+	setBlock(&cfg.H3, primary)
+	setBlock(&cfg.H4, primary)
+	setBlock(&cfg.H5, primary)
+	setBlock(&cfg.H6, primary)
+	setBlock(&cfg.Code, secondary)
+	setBlock(&cfg.CodeBlock.StyleBlock, text)
+	setBlock(&cfg.List.StyleBlock, text)
+	setBlock(&cfg.Table.StyleBlock, text)
+	setPrimitive(&cfg.Text, text)
+	setPrimitive(&cfg.Item, text)
+	setPrimitive(&cfg.Enumeration, text)
+	setPrimitive(&cfg.Strong, text)
+	setPrimitive(&cfg.Emph, text)
+	setPrimitive(&cfg.Link, secondary)
+	setPrimitive(&cfg.LinkText, secondary)
+	setPrimitive(&cfg.HorizontalRule, muted)
+	cfg.Heading.Bold = &bold
+	cfg.H1.Bold = &bold
+	cfg.H2.Bold = &bold
+	cfg.H3.Bold = &bold
+	if cfg.CodeBlock.Chroma != nil {
+		cfg.CodeBlock.Chroma.Text.Color = stringPtr(text)
+		cfg.CodeBlock.Chroma.Text.BackgroundColor = nil
+		cfg.CodeBlock.Chroma.Background.BackgroundColor = nil
+	}
+	return cfg
+}
+
+func stringPtr(value string) *string { return &value }
 
 func (m Model) generateCmd() tea.Cmd {
 	cfg := m.cfg
@@ -507,16 +584,16 @@ func (m *Model) handleCommand(raw string) bool {
 		m.lastAssistant = ""
 		m.notice = ""
 		m.status = "The surface is clear."
-		_ = m.store.Save(m.session)
+		_ = m.saveSession()
 
 	case "/new":
 		name := ""
 		if len(args) > 0 {
 			name = strings.Join(args, " ")
 		}
-		_ = m.store.Save(m.session)
+		_ = m.saveSession()
 		m.session = history.New(name, m.cfg.Provider, m.cfg.Model(), m.cfg.Mode)
-		_ = m.store.Save(m.session)
+		_ = m.saveSession()
 		m.notice = ""
 		m.lastAssistant = ""
 		m.status = "New session: " + m.session.Name
@@ -525,7 +602,7 @@ func (m *Model) handleCommand(raw string) bool {
 		if len(args) > 0 {
 			m.session.Name = history.Sanitize(strings.Join(args, " "))
 		}
-		if err := m.store.Save(m.session); err != nil {
+		if err := m.saveSession(); err != nil {
 			m.status = "Save failed: " + err.Error()
 		} else {
 			m.status = "Saved session " + m.session.Name
@@ -536,27 +613,19 @@ func (m *Model) handleCommand(raw string) bool {
 		if !ok {
 			break
 		}
-		loaded, err := m.store.Load(name)
+		loaded, err := m.loadSession(name)
 		if err != nil {
 			m.status = err.Error()
 			break
 		}
-		_ = m.store.Save(m.session)
-		m.session = loaded
-		if config.ValidProvider(loaded.Provider) {
-			m.cfg.Provider = loaded.Provider
-		}
-		m.cfg.SetModel(loaded.Model)
-		if loaded.Mode.Valid() {
-			m.cfg.Mode = loaded.Mode
-		}
-		m.lastAssistant = findLastAssistant(loaded.Messages)
+		_ = m.saveSession()
+		m.applyLoadedSession(loaded)
 		m.notice = ""
 		m.status = "Loaded session " + loaded.Name
 		_ = config.Save(m.cfg)
 
 	case "/sessions":
-		names, err := m.store.List()
+		names, err := m.listSessions()
 		if err != nil {
 			m.status = "List failed: " + err.Error()
 			break
@@ -589,11 +658,15 @@ func (m *Model) handleCommand(raw string) bool {
 		m.status = fmt.Sprintf("Provider → %s · model → %s", provider, m.cfg.Model())
 		_ = config.Save(m.cfg)
 
+	case "/models":
+		m.openModelChooser()
+
 	case "/model":
-		model, ok := requireArg("/model <model-id>")
-		if !ok {
+		if len(args) == 0 {
+			m.openModelChooser()
 			break
 		}
+		model := strings.Join(args, " ")
 		m.cfg.SetModel(strings.TrimSpace(model))
 		m.session.Model = m.cfg.Model()
 		m.status = "Model → " + m.cfg.Model()
@@ -634,7 +707,7 @@ func (m *Model) handleCommand(raw string) bool {
 		m.copyLast()
 
 	case "/quit", "/exit":
-		_ = m.store.Save(m.session)
+		_ = m.saveSession()
 		_ = config.Save(m.cfg)
 		return true
 
@@ -650,6 +723,58 @@ func (m *Model) applyThemeToComponents() {
 	m.input.CompletionStyle = lipgloss.NewStyle().Foreground(m.styles.Secondary)
 	m.input.Cursor.Style = lipgloss.NewStyle().Foreground(m.styles.Primary)
 	m.spinner.Style = lipgloss.NewStyle().Foreground(m.styles.Primary)
+}
+
+func (m Model) promptLabel() string {
+	switch m.cfg.Theme {
+	case "mono":
+		return "mono→ "
+	default:
+		return "rose→ "
+	}
+}
+
+func (m *Model) applyLoadedSession(loaded history.Session) {
+	m.session = loaded
+	applyLoadedSessionConfig(&m.cfg, loaded)
+	m.lastAssistant = findLastAssistant(loaded.Messages)
+}
+
+func applyLoadedSessionConfig(cfg *config.Config, loaded history.Session) {
+	if config.ValidProvider(loaded.Provider) {
+		cfg.Provider = loaded.Provider
+	}
+	if strings.TrimSpace(loaded.Model) != "" {
+		cfg.SetModel(loaded.Model)
+	}
+	if loaded.Mode.Valid() {
+		cfg.Mode = loaded.Mode
+	}
+}
+
+func (m *Model) saveSession() error {
+	if m.store == nil {
+		return nil
+	}
+	return m.store.Save(m.session)
+}
+
+func (m *Model) loadSession(name string) (history.Session, error) {
+	return loadFromStore(m.store, name)
+}
+
+func (m *Model) listSessions() ([]string, error) {
+	if m.store == nil {
+		return nil, fmt.Errorf("session store unavailable")
+	}
+	return m.store.List()
+}
+
+func loadFromStore(store *history.Store, name string) (history.Session, error) {
+	if store == nil {
+		return history.Session{}, fmt.Errorf("session store unavailable")
+	}
+	return store.Load(name)
 }
 
 func (m *Model) copyLast() {
