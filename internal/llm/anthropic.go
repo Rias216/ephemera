@@ -11,15 +11,20 @@ import (
 )
 
 // Anthropic uses Anthropic's official Go SDK.
-type Anthropic struct{}
+type Anthropic struct {
+	apiKey string
+}
 
-func NewAnthropic() *Anthropic    { return &Anthropic{} }
-func (p *Anthropic) Name() string { return "anthropic" }
+func NewAnthropic(apiKey string) *Anthropic { return &Anthropic{apiKey: apiKey} }
+func (p *Anthropic) Name() string           { return "anthropic" }
 
 func (p *Anthropic) Generate(ctx context.Context, req Request) (string, error) {
-	key := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
+	key := strings.TrimSpace(p.apiKey)
 	if key == "" {
-		return "", fmt.Errorf("ANTHROPIC_API_KEY is not set")
+		key = strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
+	}
+	if key == "" {
+		return "", fmt.Errorf("ANTHROPIC_API_KEY is not set; run /connect anthropic")
 	}
 
 	client := anthropic.NewClient(option.WithAPIKey(key))

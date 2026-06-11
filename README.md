@@ -8,29 +8,55 @@ and returns dense, useful answers through a rose-lit Bubble Tea TUI.
 
 ## Features
 
-- Native Go TUI: Bubble Tea, Bubbles, Lip Gloss, and Glamour
-- Rose-pink dark theme (`#FF69B4` / `#DB2777`) plus a monochrome theme
-- Providers: Ollama, OpenAI, and Anthropic
-- Official Go clients for Ollama, OpenAI, and Anthropic
+- Native Go TUI using Bubble Tea, Bubbles, Lip Gloss, and Glamour
+- Rose-pink dark theme (`#FF69B4` / `#DB2777`) plus monochrome mode
+- OpenCode-style command palette and autocomplete
+- Guided `/connect` flow with masked API-key input
+- Native Ollama, OpenAI, and Anthropic providers
+- Any OpenAI-compatible API, including local servers
 - Named JSON sessions with automatic persistence
-- Normal, deep-reason, concise, and creative modes
-- Scrollable Markdown answers and terminal mouse-wheel support
+- Normal, deep-reason, concise, and creative reasoning modes
+- Scrollable Markdown answers and mouse-wheel support
 - Clipboard copy through `/copy` or `Ctrl+Y`
+- Single Windows launcher that resolves modules, compiles, and runs
 - One static binary when built with `make static`
 
 ## Requirements
 
 - Go 1.22.8 or newer
 - A terminal with ANSI color support
-- One of:
+- One model provider:
   - Ollama running locally
-  - `OPENAI_API_KEY`
-  - `ANTHROPIC_API_KEY`
+  - OpenAI
+  - Anthropic
+  - An OpenAI-compatible endpoint
 
-The project is otherwise pure Go. `requirements.txt` intentionally contains no
-Python dependencies.
+The project is pure Go. `requirements.txt` intentionally contains no Python
+dependencies.
 
-## Install
+## Windows: one-click compile and run
+
+Open the project folder and double-click:
+
+```text
+run.bat
+```
+
+From PowerShell or Command Prompt, arguments are passed through to Ephemera:
+
+```powershell
+.\run.bat --session architecture-notes
+.\run.bat --provider ollama --model qwen3:8b
+```
+
+`run.bat` performs these steps:
+
+1. checks that Go is available,
+2. runs `go mod tidy` when `go.sum` is missing,
+3. builds `bin\ephemera.exe`,
+4. launches the compiled executable.
+
+## Linux and macOS
 
 ```bash
 git clone https://github.com/ephemera-ai/ephemera.git
@@ -40,81 +66,126 @@ make build
 ./bin/ephemera
 ```
 
+Without `make`:
+
+```bash
+mkdir -p bin
+go build -trimpath -ldflags "-s -w -X main.version=dev" -o bin/ephemera ./cmd/ephemera
+./bin/ephemera
+```
+
 Build a stripped, CGO-free binary:
 
 ```bash
 make static VERSION=0.1.0
 ```
 
-Install into your Go binary path:
+## Command autocomplete
 
-```bash
-make install VERSION=0.1.0
+Type `/` to open the command palette.
+
+| Key | Action |
+|---|---|
+| `Tab` | Complete the selected command or value |
+| `↑` / `↓` | Move through suggestions |
+| `Enter` | Execute the completed command |
+| `Esc` | Cancel the `/connect` wizard |
+
+Autocomplete also suggests:
+
+- provider names for `/connect` and `/provider`,
+- reasoning modes for `/mode`,
+- themes for `/theme`,
+- saved session names for `/load`,
+- common OpenAI-compatible endpoints during `/connect`.
+
+## Connect from inside the TUI
+
+Run the guided wizard:
+
+```text
+/connect
 ```
 
-## Provider setup
+Or begin with a provider already selected:
+
+```text
+/connect ollama
+/connect openai
+/connect anthropic
+/connect compatible
+```
+
+The wizard asks only for the fields the selected provider needs.
 
 ### Ollama
 
-```bash
-ollama pull qwen3:8b
-ollama serve
-./bin/ephemera --provider ollama --model qwen3:8b
+```text
+/connect ollama
+Ollama URL: http://localhost:11434
+Model: qwen3:8b
 ```
-
-`OLLAMA_HOST` is optional and defaults to `http://localhost:11434`.
 
 ### OpenAI
 
-```bash
-export OPENAI_API_KEY='...'
-./bin/ephemera --provider openai --model gpt-5.4-mini
+```text
+/connect openai
+API key: ********
+Model: your-model-id
 ```
+
+Press Enter on the API-key step to use `OPENAI_API_KEY` when it is already set.
 
 ### Anthropic
 
-```bash
-export ANTHROPIC_API_KEY='...'
-./bin/ephemera --provider anthropic --model claude-sonnet-4-6
+```text
+/connect anthropic
+API key: ********
+Model: your-model-id
 ```
 
-Model identifiers are configuration, not hard-coded capability checks. Use
-`/model <id>` whenever a provider adds or retires a model.
+Press Enter on the API-key step to use `ANTHROPIC_API_KEY` when it is already
+set.
 
-## Usage
+### Any OpenAI-compatible provider
 
-Start a new unnamed session:
-
-```bash
-ephemera
-```
-
-Open or create a named session:
-
-```bash
-ephemera --session architecture-notes
-```
-
-Override startup settings:
-
-```bash
-ephemera \
-  --provider anthropic \
-  --model claude-sonnet-4-6 \
-  --mode deep-reason \
-  --session compiler-design
-```
-
-Inside the TUI:
+Use `compatible` for providers and local servers exposing the standard
+`/chat/completions` API:
 
 ```text
+/connect compatible
+Connection name: openrouter
+Base URL: https://openrouter.ai/api/v1
+API key: ********
+Model: provider/model-id
+```
+
+Examples include OpenRouter, Groq, Together, LM Studio, vLLM, LocalAI, and other
+compatible gateways. The wizard accepts any custom HTTP or HTTPS base URL.
+
+API keys entered in `/connect` are masked and kept only in process memory. They
+are never written to `config.json`. For persistent credentials, set:
+
+```text
+OPENAI_API_KEY
+ANTHROPIC_API_KEY
+EPHEMERA_API_KEY
+```
+
+Non-secret connection metadata such as base URLs, provider names, and model IDs
+is persisted.
+
+## Commands
+
+```text
+/connect [ollama|openai|anthropic|compatible]
 /help
 /clear
 /new [name]
 /save [name]
 /load <name>
 /sessions
-/provider <ollama|openai|anthropic>
+/provider <ollama|openai|anthropic|compatible>
 /model <model-id>
 /mode <normal|deep-reason|concise|creative>
 /theme <rose|mono>
@@ -122,15 +193,33 @@ Inside the TUI:
 /quit
 ```
 
-Keyboard shortcuts:
+## General keyboard shortcuts
 
 | Key | Action |
 |---|---|
-| `Enter` | Send prompt or run command |
+| `Enter` | Send a prompt or run a command |
 | `PgUp` / `PgDn` | Scroll the transcript |
 | `Ctrl+U` / `Ctrl+D` | Half-page scroll |
-| `Ctrl+Y` | Copy last answer |
+| `Ctrl+Y` | Copy the last answer |
 | `Ctrl+C` | Save and quit |
+
+## Startup flags
+
+Open or create a named session:
+
+```bash
+ephemera --session architecture-notes
+```
+
+Override settings:
+
+```bash
+ephemera \
+  --provider anthropic \
+  --model your-model-id \
+  --mode deep-reason \
+  --session compiler-design
+```
 
 ## Persistence
 
@@ -147,11 +236,11 @@ config.json
 sessions/<session-name>.json
 ```
 
-API keys are never written to disk.
+Runtime API keys are excluded from serialized configuration.
 
 ## Reasoning design
 
-The harness sends a system/developer prompt that instructs the model to:
+The harness instructs the selected model to:
 
 1. identify objectives and constraints,
 2. compare approaches,
@@ -160,8 +249,7 @@ The harness sends a system/developer prompt that instructs the model to:
 5. return only the smallest complete final answer.
 
 Private chain-of-thought is neither requested for display nor stored separately.
-Anthropic thinking blocks are explicitly ignored; only final text blocks enter
-the transcript.
+Anthropic thinking blocks are ignored; only final text enters the transcript.
 
 ## Project structure
 
@@ -184,14 +272,18 @@ ephemera/
 │   │   ├── harness.go
 │   │   └── harness_test.go
 │   ├── theme/theme.go
-│   └── tui/model.go
+│   └── tui/
+│       ├── commands.go
+│       ├── connect.go
+│       └── model.go
 ├── .env.example
 ├── .gitignore
 ├── go.mod
 ├── LICENSE
 ├── Makefile
 ├── README.md
-└── requirements.txt
+├── requirements.txt
+└── run.bat
 ```
 
 ## Development
@@ -203,11 +295,20 @@ make test
 make run
 ```
 
+On Windows without `make`:
+
+```powershell
+gofmt -w .
+go vet ./...
+go test ./...
+go run .\cmd\ephemera
+```
+
 ## Static binary notes
 
 `CGO_ENABLED=0` produces a self-contained executable. Clipboard integration is
-best-effort and depends on facilities available on the host desktop/session;
-Ephemera reports a non-fatal status message when copying is unavailable.
+best-effort and depends on facilities available on the host desktop or terminal
+session; Ephemera reports a non-fatal status message when copying is unavailable.
 
 ## License
 

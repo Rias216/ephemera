@@ -29,16 +29,18 @@ type Provider interface {
 	Generate(context.Context, Request) (string, error)
 }
 
-// New constructs the configured provider. Secrets are read by each provider
-// from environment variables at request time.
+// New constructs the configured provider. Environment variables remain valid,
+// while /connect may supply runtime-only credentials in cfg.
 func New(cfg config.Config) (Provider, error) {
 	switch cfg.Provider {
 	case "openai":
-		return NewOpenAI(), nil
+		return NewOpenAI(cfg.OpenAIKey), nil
 	case "anthropic":
-		return NewAnthropic(), nil
+		return NewAnthropic(cfg.AnthropicKey), nil
 	case "ollama":
 		return NewOllama(cfg.OllamaURL), nil
+	case "compatible":
+		return NewOpenAICompatible(cfg.CompatibleName, cfg.CompatibleURL, cfg.CompatibleKey), nil
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", cfg.Provider)
 	}

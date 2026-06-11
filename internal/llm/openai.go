@@ -10,21 +10,55 @@ import (
 	"github.com/openai/openai-go/v3/option"
 )
 
-// OpenAI uses OpenAI's official Go SDK.
-type OpenAI struct{}
+// OpenAI drives both OpenAI itself and OpenAI-compatible chat completion APIs.
+type OpenAI struct {
+	name    string
+	apiKey  string
+	baseURL string
+}
 
-func NewOpenAI() *OpenAI       { return &OpenAI{} }
-func (p *OpenAI) Name() string { return "openai" }
+func NewOpenAI(apiKey string) *OpenAI {
+	return &OpenAI{name: "openai", apiKey: apiKey}
+}
+
+func NewOpenAICompatible(name, baseURL, apiKey string) *OpenAI {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "compatible"
+	}
+	return &OpenAI{name: name, apiKey: apiKey, baseURL: strings.TrimSpace(baseURL)}
+}
+
+func (p *OpenAI) Name() string { return p.name }
 
 func (p *OpenAI) Generate(ctx context.Context, req Request) (string, error) {
-	key := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	key := strings.TrimSpace(p.apiKey)
 	if key == "" {
-		return "", fmt.Errorf("OPENAI_API_KEY is not set")
+		if p.baseURL == "" {
+			key = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+		} else {
+			key = strings.TrimSpace(os.Getenv("EPHEMERA_API_KEY"))
+		}
+	}
+	if key == "" && p.baseURL == "" {
+		return "", fmt.Errorf("OPENAI_API_KEY is not set; run /connect openai")
+	}
+	// Local OpenAI-compatible servers commonly require no authentication, but
+	// the SDK expects a value. Most such servers ignore this placeholder header.
+	if key == "" {
+		key = "not-needed"
 	}
 
-	client := openai.NewClient(option.WithAPIKey(key))
+	opts := []option.RequestOption{option.WithAPIKey(key)}
+	if p.baseURL != "" {
+		opts = append(opts, option.WithBaseURL(p.baseURL))
+	}
+	client := openai.NewClient(opts...)
+
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.Messages)+1)
-	messages = append(messages, openai.DeveloperMessage(req.System))
+	// System messages are understood by OpenAI and by the broadest set of
+	// OpenAI-compatible servers.
+	messages = append(messages, openai.SystemMessage(req.System))
 	for _, message := range req.Messages {
 		switch message.Role {
 		case "user":
@@ -35,22 +69,32 @@ func (p *OpenAI) Generate(ctx context.Context, req Request) (string, error) {
 	}
 
 	params := openai.ChatCompletionNewParams{
-		Messages:            messages,
-		Model:               openai.ChatModel(req.Model),
-		MaxCompletionTokens: openai.Int(req.MaxTokens),
+		Messages: messages,
+		Model:    openai.ChatModel(req.Model),
 	}
-	// Temperature is intentionally omitted. New reasoning models may reject it;
-	// the reasoning mode is already encoded in the developer prompt.
-	response, err := client.Chat.Completions.New(ctx, params)
+	var response *openai.ChatCompletion
+	var err error
+	if p.baseURL == "" {
+		params.MaxCompletionTokens = openai.Int(req.MaxTokens)
+		response, err = client.Chat.Completions.New(ctx, params)
+	} else {
+		// max_tokens is still the most portable field across compatible APIs.
+		response, err = client.Chat.Completions.New(
+			ctx,
+			params,
+			option.WithJSONSet("max_tokens", req.MaxTokens),
+			option.WithJSONSet("temperature", req.Temperature),
+		)
+	}
 	if err != nil {
 		return "", err
 	}
 	if len(response.Choices) == 0 {
-		return "", fmt.Errorf("OpenAI returned no choices")
+		return "", fmt.Errorf("%s returned no choices", p.Name())
 	}
 	text := strings.TrimSpace(response.Choices[0].Message.Content)
 	if text == "" {
-		return "", fmt.Errorf("OpenAI returned an empty response")
+		return "", fmt.Errorf("%s returned an empty response", p.Name())
 	}
 	return text, nil
 }

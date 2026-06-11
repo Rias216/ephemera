@@ -24,18 +24,21 @@ import (
 
 const helpText = `### Commands
 
+- **/connect [ollama|openai|anthropic|compatible]** — guided provider setup
 - **/help** — show this command map
 - **/clear** — clear the current conversation
 - **/new [name]** — begin a new named session
 - **/save [name]** — save, optionally renaming the session
 - **/load <name>** — load a saved session
 - **/sessions** — list saved sessions
-- **/provider <ollama|openai|anthropic>** — select backend
+- **/provider <ollama|openai|anthropic|compatible>** — select backend
 - **/model <id>** — select the active provider's model
 - **/mode <normal|deep-reason|concise|creative>** — change reasoning mode
 - **/theme <rose|mono>** — change palette
 - **/copy** — copy the last answer
 - **/quit** — leave Ephemera
+
+Autocomplete: type **/**, use **↑/↓** to select, and press **Tab** to complete.
 
 Keys: **Enter** send · **PgUp/PgDn** scroll · **Ctrl+Y** copy · **Ctrl+C** quit`
 
@@ -54,13 +57,16 @@ type Model struct {
 	input    textinput.Model
 	spinner  spinner.Model
 
-	width         int
-	height        int
-	ready         bool
-	busy          bool
-	status        string
-	notice        string
-	lastAssistant string
+	width           int
+	height          int
+	ready           bool
+	busy            bool
+	status          string
+	notice          string
+	lastAssistant   string
+	suggestions     []suggestion
+	completionIndex int
+	connect         *connectFlow
 }
 
 // New creates a TUI model. When sessionName exists it is loaded; otherwise a
@@ -72,9 +78,11 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 	input.Prompt = ""
 	input.Placeholder = "Ask what must be seen…"
 	input.CharLimit = 32_768
+	input.ShowSuggestions = false
 	input.Focus()
 	input.TextStyle = lipgloss.NewStyle().Foreground(styles.Text)
 	input.PlaceholderStyle = lipgloss.NewStyle().Foreground(styles.Muted)
+	input.CompletionStyle = lipgloss.NewStyle().Foreground(styles.Secondary)
 	input.Cursor.Style = lipgloss.NewStyle().Foreground(styles.Primary)
 
 	spin := spinner.New()
@@ -86,7 +94,9 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 		loaded, err := store.Load(sessionName)
 		if err == nil {
 			session = loaded
-			cfg.Provider = loaded.Provider
+			if config.ValidProvider(loaded.Provider) {
+				cfg.Provider = loaded.Provider
+			}
 			cfg.SetModel(loaded.Model)
 			if loaded.Mode.Valid() {
 				cfg.Mode = loaded.Mode
@@ -98,13 +108,14 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 	}
 
 	return Model{
-		cfg:     cfg,
-		store:   store,
-		session: session,
-		styles:  styles,
-		input:   input,
-		spinner: spin,
-		status:  "Enter a prompt, or /help for the map.",
+		cfg:             cfg,
+		store:           store,
+		session:         session,
+		styles:          styles,
+		input:           input,
+		spinner:         spin,
+		status:          "Enter a prompt, or /help for the map.",
+		completionIndex: 0,
 	}
 }
 
@@ -152,7 +163,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
-		switch msg.String() {
+		key := msg.String()
+		switch key {
 		case "ctrl+c":
 			_ = m.store.Save(m.session)
 			_ = config.Save(m.cfg)
@@ -172,33 +184,78 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+d":
 			m.viewport.HalfViewDown()
 			return m, nil
-		case "enter":
-			if m.busy {
-				m.status = "One thought at a time."
-				return m, nil
-			}
-			value := strings.TrimSpace(m.input.Value())
-			if value == "" {
-				return m, nil
-			}
-			m.input.SetValue("")
-			if strings.HasPrefix(value, "/") {
-				quit := m.handleCommand(value)
+		}
+
+		if m.connect != nil {
+			switch key {
+			case "esc":
+				m.cancelConnect()
 				m.refreshViewport(true)
-				if quit {
-					return m, tea.Quit
+				return m, nil
+			case "tab":
+				if m.acceptSuggestion() {
+					return m, nil
 				}
+			case "up":
+				if len(m.suggestions) > 0 {
+					m.moveSuggestion(-1)
+					return m, nil
+				}
+			case "down":
+				if len(m.suggestions) > 0 {
+					m.moveSuggestion(1)
+					return m, nil
+				}
+			case "enter":
+				m.submitConnectStep()
+				m.refreshViewport(true)
 				return m, nil
 			}
-			m.notice = ""
-			m.session.Append("user", value)
-			// Persist the prompt before starting a potentially long network call.
-			// A crash or interrupted request should not erase the user's thought.
-			_ = m.store.Save(m.session)
-			m.busy = true
-			m.status = "Reasoning beneath the surface…"
-			m.refreshViewport(true)
-			return m, tea.Batch(m.spinner.Tick, m.generateCmd())
+		} else {
+			switch key {
+			case "tab":
+				if m.acceptSuggestion() {
+					return m, nil
+				}
+			case "up":
+				if len(m.suggestions) > 0 {
+					m.moveSuggestion(-1)
+					return m, nil
+				}
+			case "down":
+				if len(m.suggestions) > 0 {
+					m.moveSuggestion(1)
+					return m, nil
+				}
+			case "enter":
+				if m.busy {
+					m.status = "One thought at a time."
+					return m, nil
+				}
+				value := strings.TrimSpace(m.input.Value())
+				if value == "" {
+					return m, nil
+				}
+				m.input.SetValue("")
+				m.rebuildSuggestions()
+				if strings.HasPrefix(value, "/") {
+					quit := m.handleCommand(value)
+					m.refreshViewport(true)
+					if quit {
+						return m, tea.Quit
+					}
+					return m, nil
+				}
+				m.notice = ""
+				m.session.Append("user", value)
+				// Persist the prompt before starting a potentially long network call.
+				// A crash or interrupted request should not erase the user's thought.
+				_ = m.store.Save(m.session)
+				m.busy = true
+				m.status = "Reasoning beneath the surface…"
+				m.refreshViewport(true)
+				return m, tea.Batch(m.spinner.Tick, m.generateCmd())
+			}
 		}
 	}
 
@@ -208,9 +265,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 	if !m.busy {
+		before := m.input.Value()
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
+		if m.input.Value() != before {
+			m.rebuildSuggestions()
+		}
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -225,9 +286,13 @@ func (m Model) View() string {
 
 	banner := m.styles.Banner.Render("✦ EPHEMERA") + "  " +
 		m.styles.Subtitle.Render("what vanishes may still illuminate")
+	provider := m.cfg.Provider
+	if provider == "compatible" && strings.TrimSpace(m.cfg.CompatibleName) != "" {
+		provider = m.cfg.CompatibleName
+	}
 	metaText := fmt.Sprintf(
 		"%s · %s · %s · %s",
-		m.cfg.Provider,
+		provider,
 		m.cfg.Model(),
 		m.cfg.Mode,
 		m.session.Name,
@@ -243,7 +308,11 @@ func (m Model) View() string {
 		leftStatus = m.spinner.View() + " " + m.status
 	}
 	rightStatus := "PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+C quit"
-	if m.width < 88 {
+	if m.connect != nil {
+		rightStatus = "Esc cancel · Tab complete · ↑/↓ select"
+	} else if len(m.suggestions) > 0 {
+		rightStatus = "Tab complete · ↑/↓ select"
+	} else if m.width < 88 {
 		rightStatus = "Ctrl+C quit"
 	}
 	if lipgloss.Width(leftStatus)+lipgloss.Width(rightStatus)+3 > m.width {
@@ -253,26 +322,59 @@ func (m Model) View() string {
 	space := max(0, m.width-lipgloss.Width(leftStatus)-lipgloss.Width(rightStatus)-2)
 	status := m.styles.Status.Render(leftStatus + strings.Repeat(" ", space) + rightStatus)
 
+	blocks := []string{
+		banner,
+		meta,
+		m.styles.Viewport.Width(max(1, m.width-4)).Height(m.viewport.Height).Render(m.viewport.View()),
+		inputBox,
+	}
+	if palette := m.renderSuggestions(); palette != "" {
+		blocks = append(blocks, palette)
+	}
+	blocks = append(blocks, status)
+
 	return lipgloss.NewStyle().
 		Background(m.styles.Background).
 		Foreground(m.styles.Text).
 		Width(m.width).
 		Height(m.height).
-		Render(strings.Join([]string{
-			banner,
-			meta,
-			m.styles.Viewport.Width(max(1, m.width-4)).Height(m.viewport.Height).Render(m.viewport.View()),
-			inputBox,
-			status,
-		}, "\n"))
+		Render(strings.Join(blocks, "\n"))
+}
+
+func (m Model) renderSuggestions() string {
+	items, start := m.suggestionWindow()
+	if len(items) == 0 {
+		return ""
+	}
+	var lines []string
+	for i, item := range items {
+		marker := "  "
+		style := lipgloss.NewStyle().Foreground(m.styles.Muted)
+		if start+i == m.completionIndex {
+			marker = "› "
+			style = lipgloss.NewStyle().Bold(true).Foreground(m.styles.Primary)
+		}
+		line := marker + item.Label
+		if item.Description != "" && m.width >= 68 {
+			line += "  " + item.Description
+		}
+		lines = append(lines, style.Render(clip(line, max(8, m.width-8))))
+	}
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.styles.Secondary).
+		Background(m.styles.Panel).
+		Padding(0, 1).
+		Width(max(1, m.width-4)).
+		Render(strings.Join(lines, "\n"))
 }
 
 func (m *Model) resize() {
 	m.ready = true
 	// Header+meta (2), viewport borders (2), input borders (2), status (1),
-	// and the separators between the five rendered blocks (4) leave the
-	// remainder for scrollable content.
-	viewportHeight := max(3, m.height-12)
+	// separators (4), and the optional autocomplete palette leave the rest for
+	// scrollable content.
+	viewportHeight := max(3, m.height-12-m.suggestionHeight())
 	viewportWidth := max(10, m.width-6)
 	if m.viewport.Width == 0 {
 		m.viewport = viewport.New(viewportWidth, viewportHeight)
@@ -393,6 +495,13 @@ func (m *Model) handleCommand(raw string) bool {
 		m.notice = helpText
 		m.status = "Command map opened."
 
+	case "/connect":
+		provider := ""
+		if len(args) > 0 {
+			provider = args[0]
+		}
+		m.startConnect(provider)
+
 	case "/clear":
 		m.session.Messages = nil
 		m.lastAssistant = ""
@@ -434,7 +543,9 @@ func (m *Model) handleCommand(raw string) bool {
 		}
 		_ = m.store.Save(m.session)
 		m.session = loaded
-		m.cfg.Provider = loaded.Provider
+		if config.ValidProvider(loaded.Provider) {
+			m.cfg.Provider = loaded.Provider
+		}
 		m.cfg.SetModel(loaded.Model)
 		if loaded.Mode.Valid() {
 			m.cfg.Mode = loaded.Mode
@@ -463,12 +574,12 @@ func (m *Model) handleCommand(raw string) bool {
 		m.status = fmt.Sprintf("%d session(s).", len(names))
 
 	case "/provider":
-		provider, ok := requireArg("/provider <ollama|openai|anthropic>")
+		provider, ok := requireArg("/provider <ollama|openai|anthropic|compatible>")
 		if !ok {
 			break
 		}
 		provider = strings.ToLower(strings.TrimSpace(provider))
-		if provider != "ollama" && provider != "openai" && provider != "anthropic" {
+		if !config.ValidProvider(provider) {
 			m.status = "Unknown provider: " + provider
 			break
 		}
@@ -536,6 +647,7 @@ func (m *Model) handleCommand(raw string) bool {
 func (m *Model) applyThemeToComponents() {
 	m.input.TextStyle = lipgloss.NewStyle().Foreground(m.styles.Text)
 	m.input.PlaceholderStyle = lipgloss.NewStyle().Foreground(m.styles.Muted)
+	m.input.CompletionStyle = lipgloss.NewStyle().Foreground(m.styles.Secondary)
 	m.input.Cursor.Style = lipgloss.NewStyle().Foreground(m.styles.Primary)
 	m.spinner.Style = lipgloss.NewStyle().Foreground(m.styles.Primary)
 }

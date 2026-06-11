@@ -19,7 +19,7 @@ var version = "dev"
 func main() {
 	var (
 		sessionName = flag.String("session", "", "load or create a named session")
-		provider    = flag.String("provider", "", "override a configured provider")
+		provider    = flag.String("provider", "", "override provider: ollama, openai, anthropic, compatible")
 		model       = flag.String("model", "", "override model for the selected provider")
 		mode        = flag.String("mode", "", "override mode: normal, deep-reason, concise, creative")
 		showVersion = flag.Bool("version", false, "print version and exit")
@@ -37,8 +37,8 @@ func main() {
 	}
 	if *provider != "" {
 		value := strings.ToLower(strings.TrimSpace(*provider))
-		if _, ok := cfg.Connection(value); !ok {
-			fatal("provider", fmt.Errorf("provider %q is not configured; connect it in the TUI first", *provider))
+		if !config.ValidProvider(value) {
+			fatal("provider", fmt.Errorf("unsupported provider %q", *provider))
 		}
 		cfg.Provider = value
 	}

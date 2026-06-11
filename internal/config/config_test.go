@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/ephemera-ai/ephemera/internal/reasoning"
@@ -16,8 +18,8 @@ func TestDefault(t *testing.T) {
 	if cfg.Mode != reasoning.ModeNormal || cfg.Theme != "rose" {
 		t.Fatalf("unexpected default mode/theme: %q/%q", cfg.Mode, cfg.Theme)
 	}
-	if connection, ok := cfg.Connection("nvidia"); !ok || connection.BaseURL != NVIDIABaseURL {
-		t.Fatalf("missing NVIDIA preset: %#v, %v", connection, ok)
+	if !ValidProvider("compatible") {
+		t.Fatal("compatible provider should be supported")
 	}
 }
 
@@ -30,32 +32,11 @@ func TestNormalizeRepairsPartialConfig(t *testing.T) {
 	if cfg.Model() != "custom-model" {
 		t.Fatalf("normalize overwrote selected model: %q", cfg.Model())
 	}
-	if cfg.Models["ollama"] == "" || cfg.Models["anthropic"] == "" {
+	if cfg.Models["ollama"] == "" || cfg.Models["anthropic"] == "" || cfg.Models["compatible"] == "" {
 		t.Fatal("normalize did not restore missing provider models")
 	}
-	if cfg.MaxTokens <= 0 || cfg.OllamaURL == "" {
+	if cfg.MaxTokens <= 0 || cfg.OllamaURL == "" || cfg.CompatibleURL == "" {
 		t.Fatal("normalize did not restore scalar defaults")
-	}
-	if _, ok := cfg.Connection("openai"); !ok {
-		t.Fatal("normalize did not restore provider connections")
-	}
-}
-
-func TestNormalizeKeepsCustomConnection(t *testing.T) {
-	t.Parallel()
-
-	cfg := Default()
-	cfg.Provider = "openrouter"
-	cfg.SetConnection("openrouter", Connection{
-		Protocol:  ProtocolOpenAICompatible,
-		BaseURL:   "https://openrouter.ai/api/v1",
-		APIKeyEnv: "OPENROUTER_API_KEY",
-	})
-	cfg.SetModel("openai/gpt-4.1")
-	cfg.normalize()
-
-	if cfg.Provider != "openrouter" || cfg.Model() != "openai/gpt-4.1" {
-		t.Fatalf("custom provider was not preserved: %q/%q", cfg.Provider, cfg.Model())
 	}
 }
 
@@ -69,20 +50,22 @@ func TestSetModelInitializesMap(t *testing.T) {
 	}
 }
 
-func TestDefaultAPIKeyEnv(t *testing.T) {
+func TestRuntimeKeysAreNeverSerialized(t *testing.T) {
 	t.Parallel()
-	if got := DefaultAPIKeyEnv("my-provider.io"); got != "MY_PROVIDER_IO_API_KEY" {
-		t.Fatalf("DefaultAPIKeyEnv() = %q", got)
+
+	cfg := Default()
+	cfg.OpenAIKey = "openai-secret"
+	cfg.AnthropicKey = "anthropic-secret"
+	cfg.CompatibleKey = "compatible-secret"
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestNormalizeMigratesLegacyOllamaURL(t *testing.T) {
-	t.Parallel()
-
-	cfg := Config{Provider: "ollama", OllamaURL: "http://ollama.internal:11434"}
-	cfg.normalize()
-	connection, ok := cfg.Connection("ollama")
-	if !ok || connection.BaseURL != cfg.OllamaURL {
-		t.Fatalf("legacy Ollama URL was not migrated: %#v", connection)
+	serialized := string(data)
+	for _, secret := range []string{cfg.OpenAIKey, cfg.AnthropicKey, cfg.CompatibleKey} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("serialized config leaked runtime key %q", secret)
+		}
 	}
 }
