@@ -41,10 +41,11 @@ func (m Model) texturedViewport() string {
 
 func (m Model) insetBlock(block string) string {
 	lines := strings.Split(block, "\n")
+	fill := lipgloss.NewStyle().Background(m.styles.Background)
 	for i, line := range lines {
 		left := 1
 		right := max(0, m.width-left-lipgloss.Width(line))
-		lines[i] = strings.Repeat(" ", left) + line + strings.Repeat(" ", right)
+		lines[i] = fill.Render(strings.Repeat(" ", left)) + line + fill.Render(strings.Repeat(" ", right))
 	}
 	return strings.Join(lines, "\n")
 }

@@ -191,7 +191,7 @@ func TestMarkdownStyleUsesPanelBackgroundForInlineText(t *testing.T) {
 	}
 }
 
-func TestTranscriptRowsDoNotPaintInlineBackgroundBoxes(t *testing.T) {
+func TestTranscriptRowsUseThemeBackgroundInsteadOfBlack(t *testing.T) {
 	cfg := config.Default()
 	styles := theme.New("rose")
 	m := Model{cfg: cfg, styles: styles}
@@ -200,8 +200,12 @@ func TestTranscriptRowsDoNotPaintInlineBackgroundBoxes(t *testing.T) {
 	m.session.Append("user", "Hello")
 
 	got := m.renderTranscript()
-	if strings.Contains(got, "48;2;") || strings.Contains(got, "\x1b[40m") {
-		t.Fatalf("transcript contains inline background escape boxes: %q", got)
+	if strings.Contains(got, "\x1b[40m") || strings.Contains(got, "48;2;0;0;0") {
+		t.Fatalf("transcript contains black background escape: %q", got)
+	}
+	panel := "48;2;20;10;18"
+	if !strings.Contains(got, panel) {
+		t.Fatalf("transcript did not use panel background %q: %q", panel, got)
 	}
 }
 
@@ -456,6 +460,24 @@ func TestBudgetCommandUpdatesContextTokens(t *testing.T) {
 	}
 	if !strings.Contains(m.status, "8.2k") {
 		t.Fatalf("status = %q, want formatted budget", m.status)
+	}
+}
+
+func TestAgentCommandTogglesAgentMode(t *testing.T) {
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+
+	_, _ = m.handleCommand("/agent on")
+
+	if !m.cfg.AgentEnabled {
+		t.Fatal("/agent on did not enable agent mode")
+	}
+	if !strings.Contains(m.notice, "Approval policy") {
+		t.Fatalf("agent notice = %q, want approval details", m.notice)
+	}
+
+	_, _ = m.handleCommand("/agent off")
+	if !m.cfg.AgentEnabled {
+		t.Fatal("/agent off should leave always-on agent mode enabled")
 	}
 }
 

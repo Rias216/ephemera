@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -192,4 +193,16 @@ func stripBackgroundParams(params string) string {
 		}
 	}
 	return strings.Join(filtered, ";")
+}
+
+func ensurePanelForeground(text string, foreground color.Color) string {
+	if strings.TrimSpace(text) == "" {
+		return text
+	}
+	return "\x1b[38;2;" + rgbParams(foreground) + "m" + text
+}
+
+func rgbParams(value color.Color) string {
+	rgba := color.NRGBAModel.Convert(value).(color.NRGBA)
+	return fmt.Sprintf("%d;%d;%d", rgba.R, rgba.G, rgba.B)
 }

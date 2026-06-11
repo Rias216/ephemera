@@ -114,8 +114,8 @@ func build(primary, secondary, accentSoft, accentBright, text, muted, faint, bac
 		Divider:      divider,
 		Success:      success,
 		Warning:      warning,
-		Banner:       lipgloss.NewStyle().Bold(true).Foreground(primary),
-		Subtitle:     lipgloss.NewStyle().Foreground(muted).Italic(true),
+		Banner:       lipgloss.NewStyle().Bold(true).Foreground(primary).Background(background),
+		Subtitle:     lipgloss.NewStyle().Foreground(muted).Background(background).Italic(true),
 		Meta: lipgloss.NewStyle().
 			Foreground(muted).
 			Background(panel).
@@ -123,23 +123,26 @@ func build(primary, secondary, accentSoft, accentBright, text, muted, faint, bac
 		Viewport: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(secondary).
+			Foreground(text).
 			Background(panel).
 			Padding(0, 1),
 		Input: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(primary).
+			Foreground(text).
 			Background(panel).
 			Padding(0, 1),
 		Prompt: lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panel),
-		Status: lipgloss.NewStyle().Foreground(muted),
+		Status: lipgloss.NewStyle().Foreground(muted).Background(panelDeep),
 		Footer: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(divider).
+			Foreground(text).
 			Background(panelDeep).
 			Padding(0, 1),
 		UserLabel:      lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panel),
 		AssistantLabel: lipgloss.NewStyle().Bold(true).Foreground(secondary).Background(panel),
 		NoticeLabel:    lipgloss.NewStyle().Bold(true).Foreground(muted).Background(panel),
-		Error:          lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FB7185")),
+		Error:          lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FB7185")).Background(background),
 	}
 }

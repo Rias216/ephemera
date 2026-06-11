@@ -25,6 +25,15 @@ type Config struct {
 	ContextTokens int    `json:"context_tokens"`
 	OllamaURL     string `json:"ollama_url"`
 
+	AgentEnabled        bool           `json:"agent_enabled"`
+	ApprovalPolicy      ApprovalPolicy `json:"approval_policy"`
+	WorkspaceRoot       string         `json:"workspace_root,omitempty"`
+	AutoTestCommand     string         `json:"auto_test_command,omitempty"`
+	MaxToolOutputTokens int            `json:"max_tool_output_tokens"`
+	ThemeDensity        string         `json:"theme_density"`
+	ShowThinking        bool           `json:"show_thinking"`
+	ToolDetails         bool           `json:"tool_details"`
+
 	CompatibleName string `json:"compatible_name,omitempty"`
 	CompatibleURL  string `json:"compatible_url,omitempty"`
 
@@ -32,6 +41,16 @@ type Config struct {
 	AnthropicKey  string `json:"-"`
 	CompatibleKey string `json:"-"`
 }
+
+// ApprovalPolicy controls how much autonomy the local agent has.
+type ApprovalPolicy string
+
+const (
+	ApprovalChat           ApprovalPolicy = "chat"
+	ApprovalReadOnly       ApprovalPolicy = "read-only"
+	ApprovalApproveWrites  ApprovalPolicy = "approve-writes"
+	ApprovalWorkspaceWrite ApprovalPolicy = "workspace-write"
+)
 
 // Protocol names the wire protocol used by a connection preset.
 type Protocol string
@@ -67,13 +86,20 @@ func Default() Config {
 			"anthropic":  "claude-sonnet-4-6",
 			"compatible": "model-name",
 		},
-		Mode:           reasoning.ModeNormal,
-		Theme:          "rose",
-		MaxTokens:      4096,
-		ContextTokens:  16_000,
-		OllamaURL:      "http://localhost:11434",
-		CompatibleName: "compatible",
-		CompatibleURL:  "http://localhost:1234/v1",
+		Mode:                reasoning.ModeNormal,
+		Theme:               "rose",
+		MaxTokens:           4096,
+		ContextTokens:       16_000,
+		OllamaURL:           "http://localhost:11434",
+		AgentEnabled:        true,
+		ApprovalPolicy:      ApprovalApproveWrites,
+		AutoTestCommand:     "go test ./...",
+		MaxToolOutputTokens: 6_000,
+		ThemeDensity:        "comfortable",
+		ShowThinking:        true,
+		ToolDetails:         true,
+		CompatibleName:      "compatible",
+		CompatibleURL:       "http://localhost:1234/v1",
 	}
 }
 
@@ -139,6 +165,16 @@ func ValidProvider(value string) bool {
 		}
 	}
 	return false
+}
+
+// ValidApprovalPolicy reports whether value is a supported agent autonomy mode.
+func ValidApprovalPolicy(value ApprovalPolicy) bool {
+	switch value {
+	case ApprovalChat, ApprovalReadOnly, ApprovalApproveWrites, ApprovalWorkspaceWrite:
+		return true
+	default:
+		return false
+	}
 }
 
 // Dir returns Ephemera's platform-appropriate config directory.
@@ -234,6 +270,20 @@ func (c *Config) normalize() {
 	}
 	if c.ContextTokens <= 0 {
 		c.ContextTokens = defaults.ContextTokens
+	}
+	if !ValidApprovalPolicy(c.ApprovalPolicy) {
+		c.ApprovalPolicy = defaults.ApprovalPolicy
+	}
+	c.AgentEnabled = true
+	c.WorkspaceRoot = strings.TrimSpace(c.WorkspaceRoot)
+	if strings.TrimSpace(c.AutoTestCommand) == "" {
+		c.AutoTestCommand = defaults.AutoTestCommand
+	}
+	if c.MaxToolOutputTokens <= 0 {
+		c.MaxToolOutputTokens = defaults.MaxToolOutputTokens
+	}
+	if c.ThemeDensity != "compact" && c.ThemeDensity != "comfortable" {
+		c.ThemeDensity = defaults.ThemeDensity
 	}
 	if strings.TrimSpace(c.OllamaURL) == "" {
 		c.OllamaURL = defaults.OllamaURL

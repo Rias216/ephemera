@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/glamour/ansi"
 	glamourStyles "github.com/charmbracelet/glamour/styles"
 
+	"github.com/ephemera-ai/ephemera/internal/agent"
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
 	"github.com/ephemera-ai/ephemera/internal/llm"
@@ -49,9 +50,17 @@ Autocomplete: type **/**, use **↑/↓** or **Ctrl+N/P** to select, **PgUp/PgDn
 Keys: **Enter** send · **Ctrl+L** clear composer · **Ctrl+R** retry · **PgUp/PgDn** scroll · **Ctrl+Y** copy · **Ctrl+C** quit`
 
 type responseMsg struct {
-	text  string
-	err   error
-	stats contextStats
+	text    string
+	err     error
+	stats   contextStats
+	events  []history.Event
+	pending *agent.PendingApproval
+}
+
+type approvalResultMsg struct {
+	event         history.Event
+	err           error
+	continueAgent bool
 }
 
 // Model is the complete Bubble Tea state machine.
@@ -80,6 +89,7 @@ type Model struct {
 	completionIndex     int
 	connect             *connectFlow
 	modelCatalogCache   map[string]modelCatalogState
+	pendingApproval     *agent.PendingApproval
 }
 
 // New creates a TUI model. When sessionName exists it is loaded; otherwise a
@@ -189,18 +199,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport(true)
 			return m, nil
 		}
-		m.session.Append("assistant", msg.text)
-		m.lastAssistant = msg.text
+		for _, event := range msg.events {
+			m.session.AppendEvent(event)
+		}
+		m.pendingApproval = msg.pending
+		if strings.TrimSpace(msg.text) != "" {
+			m.session.Append("assistant", msg.text)
+			m.lastAssistant = msg.text
+		}
 		m.session.Provider = m.cfg.Provider
 		m.session.Model = m.cfg.Model()
 		m.session.Mode = m.cfg.Mode
 		if err := m.saveSession(); err != nil {
 			m.status = "Answered, but session save failed: " + err.Error()
+		} else if m.pendingApproval != nil {
+			m.status = "Approval needed · /approve or /reject"
 		} else {
 			m.status = "Saved · " + summary
 		}
 		m.refreshViewport(true)
 		return m, nil
+
+	case approvalResultMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = "Approved action failed: " + msg.err.Error()
+			m.refreshViewport(true)
+			return m, nil
+		}
+		m.session.AppendEvent(msg.event)
+		m.pendingApproval = nil
+		_ = m.saveSession()
+		if !msg.continueAgent {
+			m.status = "Shell command captured."
+			m.refreshViewport(true)
+			return m, nil
+		}
+		m.busy = true
+		m.status = "Approved action ran · continuing agent..."
+		m.refreshViewport(true)
+		return m, tea.Batch(m.spinner.Tick, m.generateCmd())
 
 	case spinner.TickMsg:
 		if m.busy && m.focused {
@@ -223,6 +261,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.retryLast()
 			m.refreshViewport(true)
 			return m, cmd
+		case "enter", "a":
+			if m.pendingApproval != nil && m.input.Value() == "" {
+				return m, m.approvePending()
+			}
+		case "r":
+			if m.pendingApproval != nil && m.input.Value() == "" {
+				m.rejectPending()
+				m.refreshViewport(true)
+				return m, nil
+			}
 		case "pgup":
 			if len(m.suggestions) > 0 && m.suggestionPaletteActive() {
 				m.moveSuggestion(-max(1, m.suggestionCapacity()))
@@ -358,6 +406,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if quit {
 						return m, tea.Quit
 					}
+					return m, cmd
+				}
+				if strings.HasPrefix(value, "!") {
+					cmd := m.submitShellCommand(strings.TrimSpace(strings.TrimPrefix(value, "!")))
+					m.refreshViewport(true)
 					return m, cmd
 				}
 				m.notice = ""
@@ -559,6 +612,10 @@ Route: **%s** · **%s** · **%s** token context.`,
 		}
 		out.WriteString("\n")
 	}
+	if len(m.session.Events) > 0 {
+		out.WriteString("\n")
+		out.WriteString(m.renderAgentTimeline())
+	}
 	return strings.TrimSpace(out.String())
 }
 
@@ -577,7 +634,7 @@ func (m Model) transcriptLine(style lipgloss.Style, text string) string {
 	case "signal":
 		glyph = "·"
 	}
-	return style.Background(m.styles.Panel).Render(glyph + " " + label)
+	return style.Render(glyph + " " + label)
 }
 
 func (m Model) transcriptBlock(text string) string {
@@ -589,6 +646,7 @@ func (m Model) transcriptBlock(text string) string {
 		if strings.TrimSpace(clean) != "" {
 			clean = "  " + clean
 		}
+		clean = ensurePanelForeground(clean, m.styles.Text)
 		lines[i] = style.Render(clean)
 	}
 	return strings.Join(lines, "\n")
@@ -666,6 +724,10 @@ func (m Model) generateCmd() tea.Cmd {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
+		if cfg.AgentEnabled {
+			result := agent.NewRunner(cfg, provider).Run(ctx, session)
+			return responseMsg{text: result.Text, events: result.Events, pending: result.Pending, stats: stats}
+		}
 		text, err := provider.Generate(ctx, llm.Request{
 			Model:       cfg.Model(),
 			System:      system,
@@ -717,7 +779,9 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 
 	case "/clear":
 		m.session.Messages = nil
+		m.session.Events = nil
 		m.lastAssistant = ""
+		m.pendingApproval = nil
 		m.notice = ""
 		m.status = "The surface is clear."
 		_ = m.saveSession()
@@ -732,6 +796,7 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		_ = m.saveSession()
 		m.notice = ""
 		m.lastAssistant = ""
+		m.pendingApproval = nil
 		m.status = "New session: " + m.session.Name
 
 	case "/save":
@@ -874,6 +939,80 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		stats := m.currentContextStats()
 		m.notice = m.usageNotice(stats)
 		m.status = "Usage · " + contextSummary(stats)
+
+	case "/agent":
+		value := "status"
+		if len(args) > 0 {
+			value = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		switch value {
+		case "on":
+			m.cfg.AgentEnabled = true
+			m.status = "Agent mode enabled · writes require approval"
+			_ = config.Save(m.cfg)
+		case "off":
+			m.cfg.AgentEnabled = true
+			m.status = "Agent mode is always on."
+			_ = config.Save(m.cfg)
+		case "status":
+			m.status = "Agent status opened."
+		default:
+			m.status = "Usage: /agent <on|off|status>"
+		}
+		m.notice = m.agentNotice()
+
+	case "/approve":
+		return false, m.approvePending()
+
+	case "/reject":
+		m.rejectPending()
+
+	case "/plan":
+		m.notice = m.planNotice()
+		m.status = "Plan opened."
+
+	case "/tools":
+		m.notice = m.toolsNotice()
+		m.status = "Tools opened."
+
+	case "/thinking":
+		m.cfg.ShowThinking = !m.cfg.ShowThinking
+		_ = config.Save(m.cfg)
+		m.status = fmt.Sprintf("Thinking visibility → %t", m.cfg.ShowThinking)
+
+	case "/details":
+		m.cfg.ToolDetails = !m.cfg.ToolDetails
+		_ = config.Save(m.cfg)
+		m.status = fmt.Sprintf("Tool details → %t", m.cfg.ToolDetails)
+
+	case "/run":
+		if m.pendingApproval != nil {
+			m.status = "Approval pending · /approve or /reject"
+			break
+		}
+		if len(m.session.Messages) == 0 {
+			m.status = "Nothing for the agent to run yet."
+			break
+		}
+		m.cfg.AgentEnabled = true
+		m.busy = true
+		m.status = "Agent continuing..."
+		return false, tea.Batch(m.spinner.Tick, m.generateCmd())
+
+	case "/diff":
+		m.notice = m.localToolNotice("git_diff")
+		m.status = "Diff opened."
+
+	case "/compact":
+		m.compactAgentEvents()
+
+	case "/config":
+		m.notice = m.configNotice()
+		m.status = "Config opened."
+
+	case "/memory":
+		m.notice = m.memoryNotice()
+		m.status = "Memory sources opened."
 
 	case "/budget":
 		value, ok := requireArg("/budget <tokens>")

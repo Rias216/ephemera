@@ -25,6 +25,19 @@ type Message struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Event is a structured agent timeline item. Chat messages remain the compact
+// compatibility transcript; events preserve tool use, approvals, and plans.
+type Event struct {
+	ID        string         `json:"id"`
+	Type      string         `json:"type"`
+	Title     string         `json:"title,omitempty"`
+	Content   string         `json:"content,omitempty"`
+	Tool      string         `json:"tool,omitempty"`
+	Status    string         `json:"status,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
 // Session is a named conversation and the settings that produced it.
 type Session struct {
 	Name      string         `json:"name"`
@@ -34,6 +47,7 @@ type Session struct {
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
 	Messages  []Message      `json:"messages"`
+	Events    []Event        `json:"events,omitempty"`
 }
 
 // New creates an empty session.
@@ -50,6 +64,7 @@ func New(name, provider, model string, mode reasoning.Mode) Session {
 		CreatedAt: now,
 		UpdatedAt: now,
 		Messages:  make([]Message, 0, 16),
+		Events:    make([]Event, 0, 32),
 	}
 }
 
@@ -60,6 +75,18 @@ func (s *Session) Append(role, content string) {
 		Content:   content,
 		CreatedAt: time.Now(),
 	})
+	s.UpdatedAt = time.Now()
+}
+
+// AppendEvent adds a structured agent event.
+func (s *Session) AppendEvent(event Event) {
+	if event.ID == "" {
+		event.ID = fmt.Sprintf("evt-%d", time.Now().UnixNano())
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now()
+	}
+	s.Events = append(s.Events, event)
 	s.UpdatedAt = time.Now()
 }
 

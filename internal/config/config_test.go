@@ -41,6 +41,24 @@ func TestNormalizeRepairsPartialConfig(t *testing.T) {
 	if cfg.MaxTokens <= 0 || cfg.ContextTokens <= 0 || cfg.OllamaURL == "" || cfg.CompatibleURL == "" {
 		t.Fatal("normalize did not restore scalar defaults")
 	}
+	if cfg.ApprovalPolicy != ApprovalApproveWrites || cfg.MaxToolOutputTokens <= 0 || cfg.AutoTestCommand == "" {
+		t.Fatal("normalize did not restore agent defaults")
+	}
+}
+
+func TestDefaultAgentPolicy(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	if !cfg.AgentEnabled {
+		t.Fatal("agent mode should be always on by default")
+	}
+	if cfg.ApprovalPolicy != ApprovalApproveWrites {
+		t.Fatalf("approval policy = %q, want approve-writes", cfg.ApprovalPolicy)
+	}
+	if cfg.ThemeDensity != "comfortable" {
+		t.Fatalf("theme density = %q, want comfortable", cfg.ThemeDensity)
+	}
 }
 
 func TestNormalizePreservesExplicitOpenAIModel(t *testing.T) {

@@ -97,6 +97,54 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/usage", "show current context usage"}},
 	},
 	{
+		Name: "/agent", Usage: "<on|off|status>", Description: "toggle or inspect project-agent mode", Category: "AGENT", Introduced: "v0.4.0", Permission: "local", Choices: []string{"on", "off", "status"},
+		Examples: []commandExample{{"/agent on", "enable project-agent mode"}, {"/agent status", "show agent settings"}},
+	},
+	{
+		Name: "/approve", Description: "run the pending agent action", Category: "AGENT", Introduced: "v0.4.0", Permission: "workspace",
+		Examples: []commandExample{{"/approve", "execute the pending patch or command"}},
+	},
+	{
+		Name: "/reject", Description: "reject the pending agent action", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
+		Examples: []commandExample{{"/reject", "skip the pending patch or command"}},
+	},
+	{
+		Name: "/plan", Description: "show the latest agent plan", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
+		Examples: []commandExample{{"/plan", "inspect the current agent plan"}},
+	},
+	{
+		Name: "/tools", Description: "list local agent tools", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
+		Examples: []commandExample{{"/tools", "show tool names and risk levels"}},
+	},
+	{
+		Name: "/thinking", Description: "toggle visible reasoning blocks", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
+		Examples: []commandExample{{"/thinking", "show or hide reasoning summaries"}},
+	},
+	{
+		Name: "/details", Description: "toggle detailed tool call output", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
+		Examples: []commandExample{{"/details", "show or hide tool details"}},
+	},
+	{
+		Name: "/run", Description: "continue the agent loop", Category: "AGENT", Introduced: "v0.4.0", Permission: "network",
+		Examples: []commandExample{{"/run", "resume after reviewing the timeline"}},
+	},
+	{
+		Name: "/diff", Description: "ask the agent to inspect git diff", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
+		Examples: []commandExample{{"/diff", "show changed files and patch context"}},
+	},
+	{
+		Name: "/compact", Description: "compact old timeline context", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
+		Examples: []commandExample{{"/compact", "trim older agent events"}},
+	},
+	{
+		Name: "/config", Description: "show saved runtime configuration", Category: "SYSTEM", Introduced: "v0.4.0", Permission: "local",
+		Examples: []commandExample{{"/config", "inspect agent and token settings"}},
+	},
+	{
+		Name: "/memory", Description: "show project memory sources", Category: "AGENT", Introduced: "v0.4.0", Permission: "filesystem",
+		Examples: []commandExample{{"/memory", "inspect project memory guidance"}},
+	},
+	{
 		Name: "/budget", Usage: "<tokens>", Description: "set the context token budget", Category: "CONTEXT", Introduced: "v0.3.0", Permission: "local",
 		Examples: []commandExample{{"/budget 8192", "set an 8k token budget"}},
 	},

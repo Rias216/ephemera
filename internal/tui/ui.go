@@ -504,8 +504,8 @@ func (m Model) renderFooter() string {
 		if len(prefix) > 1 {
 			rest = string(prefix[1:])
 		}
-		return lipgloss.NewStyle().Foreground(stateColor).Render(glyph) +
-			lipgloss.NewStyle().Foreground(m.styles.Muted).Render(rest)
+		return lipgloss.NewStyle().Foreground(stateColor).Background(m.styles.PanelDeep).Render(glyph) +
+			lipgloss.NewStyle().Foreground(m.styles.Muted).Background(m.styles.PanelDeep).Render(rest)
 	}
 
 	middleRaw := ""
@@ -531,11 +531,12 @@ func (m Model) renderFooter() string {
 	available := max(8, m.width-6)
 	if middleRaw != "" && len([]rune(leftRaw))+len([]rune(middleRaw))+len([]rune(rightRaw))+6 <= available {
 		left := styleLeft(leftRaw)
-		middle := lipgloss.NewStyle().Foreground(m.styles.Faint).Render(middleRaw)
-		right := lipgloss.NewStyle().Foreground(m.styles.Faint).Render(rightRaw)
+		middle := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.PanelDeep).Render(middleRaw)
+		right := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.PanelDeep).Render(rightRaw)
 		gapA := max(1, (available-lipgloss.Width(left)-lipgloss.Width(middle)-lipgloss.Width(right))/2)
 		gapB := max(1, available-lipgloss.Width(left)-lipgloss.Width(middle)-lipgloss.Width(right)-gapA)
-		return left + strings.Repeat(" ", gapA) + middle + strings.Repeat(" ", gapB) + right
+		gapStyle := lipgloss.NewStyle().Background(m.styles.PanelDeep)
+		return left + gapStyle.Render(strings.Repeat(" ", gapA)) + middle + gapStyle.Render(strings.Repeat(" ", gapB)) + right
 	}
 
 	if len([]rune(leftRaw))+len([]rune(rightRaw))+3 > available {
@@ -543,9 +544,9 @@ func (m Model) renderFooter() string {
 	}
 	leftRaw = clip(leftRaw, max(8, available-len([]rune(rightRaw))-2))
 	left := styleLeft(leftRaw)
-	right := lipgloss.NewStyle().Foreground(m.styles.Faint).Render(rightRaw)
+	right := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.PanelDeep).Render(rightRaw)
 	gap := max(0, available-lipgloss.Width(left)-lipgloss.Width(right))
-	return left + strings.Repeat(" ", gap) + right
+	return left + lipgloss.NewStyle().Background(m.styles.PanelDeep).Render(strings.Repeat(" ", gap)) + right
 }
 
 func (m Model) statusPresentation() (color.Color, string) {
