@@ -173,8 +173,14 @@ func (m Model) panelStyle(base lipgloss.Style, offset int) lipgloss.Style {
 }
 
 func (m Model) renderPanel(base lipgloss.Style, offset int, content string) string {
+	background := base.GetBackground()
+	if background == nil {
+		background = m.styles.Panel
+	}
 	rendered := m.panelStyle(base, offset).Render(content)
-	return m.localizedGradientBorder(rendered, offset)
+	rendered = m.localizedGradientBorder(rendered, offset)
+	rendered = reassertBackground(rendered, background)
+	return m.paintBlockWidth(rendered, lipgloss.Width(rendered), background)
 }
 
 // localizedGradientBorder gives the complete outline a slowly shifting pink
@@ -425,6 +431,11 @@ func ansiForeground(value color.Color) string {
 	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 }
 
+func rgbParams(value color.Color) string {
+	r, g, b := colorRGB(value)
+	return fmt.Sprintf("%d;%d;%d", r, g, b)
+}
+
 func fadeColor(from, to color.Color, t float64) color.Color {
 	t = math.Max(0, math.Min(1, t))
 	fr, fg, fb := colorRGB(from)
@@ -491,62 +502,13 @@ func (m Model) renderComposerMeta() string {
 }
 
 func (m Model) renderFooter() string {
-	stateColor, stateGlyph := m.statusPresentation()
-
-	leftRaw := stateGlyph + " " + m.status
-	styleLeft := func(raw string) string {
-		if raw == "" {
-			return ""
-		}
-		prefix := []rune(raw)
-		glyph := string(prefix[:1])
-		rest := ""
-		if len(prefix) > 1 {
-			rest = string(prefix[1:])
-		}
-		return lipgloss.NewStyle().Foreground(stateColor).Background(m.styles.PanelDeep).Render(glyph) +
-			lipgloss.NewStyle().Foreground(m.styles.Muted).Background(m.styles.PanelDeep).Render(rest)
-	}
-
-	middleRaw := ""
-	if m.connect != nil {
-		step, total := m.connectProgress()
-		middleRaw = fmt.Sprintf("setup %d/%d", step, total)
-	} else if m.ready && !m.viewport.AtBottom() {
-		middleRaw = fmt.Sprintf("scroll %3.0f%%", m.viewport.ScrollPercent()*100)
-	}
-
-	rightRaw := "Ctrl+R retry  Ctrl+Y copy  Ctrl+L clear  Ctrl+C quit"
-	if m.connect != nil {
-		rightRaw = "Enter next  Shift+Tab back  Esc cancel  Tab fill  ↑↓ select"
-		if m.connect.Step == connectReview {
-			rightRaw = "Enter activate  Shift+Tab revise  Esc cancel"
-		}
-	} else if len(m.suggestions) > 0 {
-		rightRaw = "Enter run  Tab fill  Esc close  ↑↓ select"
-	} else if m.width < 90 {
-		rightRaw = "Ctrl+C quit"
-	}
-
 	available := max(8, m.width-6)
-	if middleRaw != "" && len([]rune(leftRaw))+len([]rune(middleRaw))+len([]rune(rightRaw))+6 <= available {
-		left := styleLeft(leftRaw)
-		middle := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.PanelDeep).Render(middleRaw)
-		right := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.PanelDeep).Render(rightRaw)
-		gapA := max(1, (available-lipgloss.Width(left)-lipgloss.Width(middle)-lipgloss.Width(right))/2)
-		gapB := max(1, available-lipgloss.Width(left)-lipgloss.Width(middle)-lipgloss.Width(right)-gapA)
-		gapStyle := lipgloss.NewStyle().Background(m.styles.PanelDeep)
-		return left + gapStyle.Render(strings.Repeat(" ", gapA)) + middle + gapStyle.Render(strings.Repeat(" ", gapB)) + right
+	lines := []string{
+		m.footerTabsLine(available),
+		m.footerPrimaryLine(available),
+		m.footerSecondaryLine(available),
 	}
-
-	if len([]rune(leftRaw))+len([]rune(rightRaw))+3 > available {
-		rightRaw = ""
-	}
-	leftRaw = clip(leftRaw, max(8, available-len([]rune(rightRaw))-2))
-	left := styleLeft(leftRaw)
-	right := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.PanelDeep).Render(rightRaw)
-	gap := max(0, available-lipgloss.Width(left)-lipgloss.Width(right))
-	return left + lipgloss.NewStyle().Background(m.styles.PanelDeep).Render(strings.Repeat(" ", gap)) + right
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) statusPresentation() (color.Color, string) {

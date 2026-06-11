@@ -24,6 +24,39 @@ type PendingApproval struct {
 	LocalOnly bool
 }
 
+// StreamKind identifies one live agent update sent to the TUI.
+type StreamKind string
+
+const (
+	StreamStatus StreamKind = "status"
+	StreamDelta  StreamKind = "delta"
+	StreamEvent  StreamKind = "event"
+	StreamDone   StreamKind = "done"
+)
+
+// StreamUpdate is a provider-neutral live agent update. Delta contains only
+// visible model output; private thinking blocks are never forwarded.
+type StreamUpdate struct {
+	Kind            StreamKind
+	Phase           string
+	Iteration       int
+	Delta           string
+	Event           *history.Event
+	Text            string
+	Pending         *PendingApproval
+	Err             error
+	ContextTokens   int
+	OutputTokens    int
+	SentMessages    int
+	TotalMessages   int
+	DroppedMessages int
+	Tool            string
+	StartedAt       time.Time
+}
+
+// StreamFunc consumes live updates. It should return quickly.
+type StreamFunc func(StreamUpdate)
+
 // RunResult contains the visible output and structured timeline deltas.
 type RunResult struct {
 	Text    string
@@ -49,56 +82,209 @@ func NewRunner(cfg config.Config, provider llm.Provider) Runner {
 
 // Run advances the agent until it produces a final answer or needs approval.
 func (r Runner) Run(ctx context.Context, session history.Session) RunResult {
+	return r.run(ctx, session, nil)
+}
+
+// RunStream advances the agent while publishing provider deltas, structured
+// reasoning summaries, plans, tool calls, tool results, and completion state.
+func (r Runner) RunStream(ctx context.Context, session history.Session, emit StreamFunc) RunResult {
+	return r.run(ctx, session, emit)
+}
+
+func (r Runner) run(ctx context.Context, session history.Session, emit StreamFunc) RunResult {
+	started := time.Now()
+	emitUpdate := func(update StreamUpdate) {
+		if emit == nil {
+			return
+		}
+		if update.StartedAt.IsZero() {
+			update.StartedAt = started
+		}
+		emit(update)
+	}
+	emitEvent := func(event history.Event, iteration int) {
+		e := event
+		emitUpdate(StreamUpdate{Kind: StreamEvent, Event: &e, Iteration: iteration})
+	}
+
 	var events []history.Event
 	observations := recentToolObservations(session.Events)
 	for iteration := 0; iteration < maxAgentIterations; iteration++ {
-		text, err := r.Provider.Generate(ctx, llm.Request{
+		systemPrompt := r.systemPrompt(session, observations)
+		messages, selection := selectAgentMessages(session.Messages, systemPrompt, r.Config.ContextTokens)
+		request := llm.Request{
 			Model:       r.Config.Model(),
-			System:      r.systemPrompt(session, observations),
-			Messages:    conversationMessages(session.Messages),
+			System:      systemPrompt,
+			Messages:    messages,
 			MaxTokens:   r.Config.MaxTokens,
 			Temperature: r.Config.Mode.Temperature(),
+		}
+		contextTokens := estimateRequestTokens(request)
+		emitUpdate(StreamUpdate{
+			Kind:            StreamStatus,
+			Phase:           "requesting model",
+			Iteration:       iteration + 1,
+			ContextTokens:   contextTokens,
+			SentMessages:    selection.Sent,
+			TotalMessages:   selection.Total,
+			DroppedMessages: selection.Dropped,
+		})
+
+		outputRunes := 0
+		text, err := llm.GenerateStreaming(ctx, r.Provider, request, func(delta string) error {
+			outputRunes += len([]rune(delta))
+			emitUpdate(StreamUpdate{
+				Kind:          StreamDelta,
+				Phase:         "receiving model",
+				Iteration:     iteration + 1,
+				Delta:         delta,
+				ContextTokens: contextTokens,
+				OutputTokens:  (outputRunes + 3) / 4,
+			})
+			return nil
 		})
 		if err != nil {
-			events = append(events, newEvent("tool_result", "Agent request failed", err.Error(), "", "error"))
-			return RunResult{Text: "Agent request failed: " + err.Error(), Events: events}
+			event := newEvent("tool_result", "Agent request failed", err.Error(), "", "error")
+			events = append(events, event)
+			emitEvent(event, iteration+1)
+			result := RunResult{Text: "Agent request failed: " + err.Error(), Events: events}
+			emitUpdate(StreamUpdate{Kind: StreamDone, Phase: "failed", Iteration: iteration + 1, Text: result.Text, Err: err, ContextTokens: contextTokens, OutputTokens: (outputRunes + 3) / 4})
+			return result
 		}
 
+		emitUpdate(StreamUpdate{Kind: StreamStatus, Phase: "parsing decision", Iteration: iteration + 1, ContextTokens: contextTokens, OutputTokens: estimateVisibleTokens(text)})
 		action, ok := parseModelAction(text)
 		if !ok {
-			events = append(events, newEvent("final", "Final", text, "", "done"))
-			return RunResult{Text: text, Events: events}
+			event := newEvent("final", "Final", text, "", "done")
+			events = append(events, event)
+			emitEvent(event, iteration+1)
+			result := RunResult{Text: text, Events: events}
+			emitUpdate(StreamUpdate{Kind: StreamDone, Phase: "complete", Iteration: iteration + 1, Text: result.Text, ContextTokens: contextTokens, OutputTokens: estimateVisibleTokens(text)})
+			return result
 		}
 
-		events = append(events, actionEvents(action)...)
+		for _, event := range actionEvents(action) {
+			events = append(events, event)
+			emitEvent(event, iteration+1)
+		}
 		if strings.TrimSpace(action.Final) != "" && len(action.Actions) == 0 {
-			events = append(events, newEvent("final", "Final", action.Final, "", "done"))
-			return RunResult{Text: action.Final, Events: events}
+			event := newEvent("final", "Final", action.Final, "", "done")
+			events = append(events, event)
+			emitEvent(event, iteration+1)
+			result := RunResult{Text: action.Final, Events: events}
+			emitUpdate(StreamUpdate{Kind: StreamDone, Phase: "complete", Iteration: iteration + 1, Text: result.Text, ContextTokens: contextTokens, OutputTokens: estimateVisibleTokens(text)})
+			return result
 		}
 
 		if len(action.Actions) == 0 {
-			text := firstNonEmpty(action.Summary, "I need more direction before taking action.")
-			events = append(events, newEvent("final", "Final", text, "", "done"))
-			return RunResult{Text: text, Events: events}
+			finalText := firstNonEmpty(action.Summary, "I need more direction before taking action.")
+			event := newEvent("final", "Final", finalText, "", "done")
+			events = append(events, event)
+			emitEvent(event, iteration+1)
+			result := RunResult{Text: finalText, Events: events}
+			emitUpdate(StreamUpdate{Kind: StreamDone, Phase: "complete", Iteration: iteration + 1, Text: result.Text, ContextTokens: contextTokens, OutputTokens: estimateVisibleTokens(text)})
+			return result
 		}
 
 		for _, item := range action.Actions {
 			call := tools.Call{Name: item.Name, Arguments: item.Arguments}
-			events = append(events, newEvent("tool_call", call.Name, marshalArgs(call.Arguments), call.Name, "pending"))
+			callEvent := newEvent("tool_call", call.Name, marshalArgs(call.Arguments), call.Name, "running")
+			callIndex := len(events)
+			events = append(events, callEvent)
+			emitUpdate(StreamUpdate{Kind: StreamStatus, Phase: "running tool", Iteration: iteration + 1, Tool: call.Name, ContextTokens: contextTokens, OutputTokens: estimateVisibleTokens(text)})
+			emitEvent(callEvent, iteration+1)
 			if r.Tools.RequiresApproval(call.Name) {
+				callEvent.Status = "pending"
+				events[callIndex] = callEvent
+				emitEvent(callEvent, iteration+1)
 				reason := firstNonEmpty(action.Summary, "This action can change the workspace or run a command.")
-				events = append(events, newEvent("approval_request", "Approval required: "+call.Name, reason, call.Name, "pending"))
-				return RunResult{Text: approvalText(call, reason), Events: events, Pending: &PendingApproval{Call: call, Reason: reason}}
+				approval := newEvent("approval_request", "Approval required: "+call.Name, reason, call.Name, "pending")
+				events = append(events, approval)
+				emitEvent(approval, iteration+1)
+				pending := &PendingApproval{Call: call, Reason: reason}
+				result := RunResult{Text: approvalText(call, reason), Events: events, Pending: pending}
+				emitUpdate(StreamUpdate{Kind: StreamDone, Phase: "awaiting approval", Iteration: iteration + 1, Text: result.Text, Pending: pending, ContextTokens: contextTokens, OutputTokens: estimateVisibleTokens(text), Tool: call.Name})
+				return result
 			}
 			result := r.Tools.Execute(ctx, call)
-			events = append(events, toolResultEvent(result))
+			callEvent.Status = "done"
+			if !result.OK {
+				callEvent.Status = "error"
+			}
+			events[callIndex] = callEvent
+			emitEvent(callEvent, iteration+1)
+			resultEvent := toolResultEvent(result)
+			events = append(events, resultEvent)
+			emitEvent(resultEvent, iteration+1)
 			observations = append(observations, formatToolObservation(result))
 		}
+		emitUpdate(StreamUpdate{Kind: StreamStatus, Phase: "continuing agent", Iteration: iteration + 1, ContextTokens: contextTokens, OutputTokens: estimateVisibleTokens(text)})
 	}
 
 	text := "Agent paused after several tool rounds. Review the timeline and run `/run` to continue."
-	events = append(events, newEvent("final", "Paused", text, "", "paused"))
-	return RunResult{Text: text, Events: events}
+	event := newEvent("final", "Paused", text, "", "paused")
+	events = append(events, event)
+	emitEvent(event, maxAgentIterations)
+	result := RunResult{Text: text, Events: events}
+	emitUpdate(StreamUpdate{Kind: StreamDone, Phase: "paused", Iteration: maxAgentIterations, Text: text})
+	return result
+}
+
+type messageSelection struct {
+	Sent    int
+	Total   int
+	Dropped int
+}
+
+func selectAgentMessages(messages []history.Message, system string, budget int) ([]llm.Message, messageSelection) {
+	valid := conversationMessages(messages)
+	if budget <= 0 {
+		budget = 16_000
+	}
+	used := estimateVisibleTokens(system) + 4
+	selected := make([]llm.Message, 0, len(valid))
+	for index := len(valid) - 1; index >= 0; index-- {
+		cost := estimateVisibleTokens(valid[index].Role) + estimateVisibleTokens(valid[index].Content) + 4
+		if used+cost > budget && len(selected) > 0 {
+			break
+		}
+		selected = append(selected, valid[index])
+		used += cost
+	}
+	for left, right := 0, len(selected)-1; left < right; left, right = left+1, right-1 {
+		selected[left], selected[right] = selected[right], selected[left]
+	}
+	for len(selected) > 0 && selected[0].Role == "assistant" {
+		selected = selected[1:]
+	}
+	return selected, messageSelection{
+		Sent:    len(selected),
+		Total:   len(valid),
+		Dropped: len(valid) - len(selected),
+	}
+}
+
+func estimateRequestTokens(req llm.Request) int {
+	total := estimateVisibleTokens(req.System) + 4
+	for _, message := range req.Messages {
+		total += estimateVisibleTokens(message.Role) + estimateVisibleTokens(message.Content) + 4
+	}
+	return total
+}
+
+func estimateVisibleTokens(text string) int {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0
+	}
+	return maxInt(1, (len([]rune(text))+3)/4)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // ExecuteApproved runs a previously approved tool call.

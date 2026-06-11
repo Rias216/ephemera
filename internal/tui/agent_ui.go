@@ -23,7 +23,52 @@ func (m Model) renderAgentTimeline() string {
 		}
 		rows = append(rows, m.renderAgentEvent(event, renderer)...)
 	}
+	if m.liveAgent.Active {
+		rows = append(rows, m.renderLiveAgent(renderer)...)
+	}
 	return strings.Join(rows, "\n")
+}
+
+func (m Model) renderLiveAgent(renderer cliRenderer) []string {
+	phase := firstNonEmpty(m.liveAgent.Phase, "working")
+	label := fmt.Sprintf("  ◆ live · round %d · %s", max(1, m.liveAgent.Iteration), phase)
+	if m.liveAgent.Tool != "" {
+		label += " · " + m.liveAgent.Tool
+	}
+	header := renderer.paintRow(cliLine{{text: label, style: cliStyle{foreground: m.styles.Primary, bold: true}}})
+	elapsed := time.Since(m.liveAgent.StartedAt).Round(time.Second)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	messageState := ""
+	if m.liveAgent.TotalMessages > 0 {
+		messageState = fmt.Sprintf(" · sent %d/%d", m.liveAgent.SentMessages, m.liveAgent.TotalMessages)
+		if m.liveAgent.DroppedMessages > 0 {
+			messageState += fmt.Sprintf(" · trimmed %d", m.liveAgent.DroppedMessages)
+		}
+	}
+	detail := fmt.Sprintf("  ctx ~%s/%s · output ~%s%s · received %d chars · elapsed %s",
+		formatTokenCount(m.liveAgent.ContextTokens),
+		formatTokenCount(m.cfg.ContextTokens),
+		formatTokenCount(m.liveAgent.OutputTokens),
+		messageState,
+		m.liveAgent.ReceivedChars,
+		elapsed,
+	)
+	rows := []string{header, renderer.paintRow(cliLine{{text: detail, style: cliStyle{foreground: m.styles.Faint}}})}
+	if goal := strings.TrimSpace(m.liveAgent.Goal); goal != "" {
+		rows = append(rows, renderer.paintRow(cliLine{
+			{text: "  goal · ", style: cliStyle{foreground: m.styles.AccentSoft, bold: true}},
+			{text: firstLineCompact(goal, max(12, renderer.width-9)), style: cliStyle{foreground: m.styles.Muted}},
+		}))
+	}
+	if plan := strings.TrimSpace(m.liveAgent.Plan); plan != "" {
+		rows = append(rows, renderer.paintRow(cliLine{
+			{text: "  next · ", style: cliStyle{foreground: m.styles.AccentSoft, bold: true}},
+			{text: firstLineCompact(plan, max(12, renderer.width-9)), style: cliStyle{foreground: m.styles.Muted}},
+		}))
+	}
+	return rows
 }
 
 func (m Model) renderAgentEvent(event history.Event, renderer cliRenderer) []string {
@@ -121,6 +166,23 @@ func (m *Model) approvePending() tea.Cmd {
 		defer cancel()
 		event := agent.NewRunner(cfg, nil).ExecuteApproved(ctx, pending)
 		return approvalResultMsg{event: event, continueAgent: !pending.LocalOnly}
+	}
+}
+
+func (m *Model) resolvePendingToolEvent(result history.Event) {
+	if result.Tool == "" {
+		return
+	}
+	status := "done"
+	if result.Status == "error" {
+		status = "error"
+	}
+	for index := len(m.session.Events) - 1; index >= 0; index-- {
+		event := &m.session.Events[index]
+		if event.Type == "tool_call" && event.Tool == result.Tool && (event.Status == "pending" || event.Status == "running") {
+			event.Status = status
+			return
+		}
 	}
 }
 

@@ -21,6 +21,17 @@ type contextStats struct {
 
 func (m Model) currentContextStats() contextStats {
 	_, stats := buildRequestMessages(m.session.Messages, reasoning.SystemPrompt(m.cfg.Mode), m.cfg.ContextTokens)
+	if draft := strings.TrimSpace(m.input.Value()); draft != "" && !m.busy && m.connect == nil && !strings.HasPrefix(draft, "/") {
+		stats.EstimatedTokens += estimateTextTokens(draft) + 4
+	}
+	if m.liveAgent.Active && m.liveAgent.ContextTokens > 0 {
+		stats.EstimatedTokens = m.liveAgent.ContextTokens + m.liveAgent.OutputTokens
+		if m.liveAgent.TotalMessages > 0 {
+			stats.SentMessages = m.liveAgent.SentMessages
+			stats.TotalMessages = m.liveAgent.TotalMessages
+			stats.DroppedMessages = m.liveAgent.DroppedMessages
+		}
+	}
 	return stats
 }
 

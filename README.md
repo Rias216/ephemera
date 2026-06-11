@@ -12,13 +12,15 @@ and returns dense, useful answers through a rose-lit Bubble Tea TUI.
 - Rose-pink dark theme (`#FF69B4` / `#DB2777`) plus monochrome mode
 - 60 FPS elapsed-time pink outline fade with a moving knife glimmer
 - Cell-diff rendering, synchronized terminal updates, and a native terminal cursor
-- OpenCode-style command palette and autocomplete
+- OpenCode-style command palette, live agent timeline, and interactive bottom inspector
 - Guided `/connect` flow with masked API-key input
 - Native Ollama, OpenAI, and Anthropic providers
 - Any OpenAI-compatible API, including local servers
 - Named JSON sessions with automatic persistence
 - Normal, deep-reason, concise, and creative reasoning modes
 - Scrollable CLI-rendered answers with framed code, tables, lists, and mouse-wheel support
+- Native token streaming for OpenAI, Anthropic, Ollama, compatible APIs, and Codex JSONL
+- Live context/output estimates, agent rounds, tool status, structured reasoning summaries, and cancellation
 - Clipboard copy through `/copy` or `Ctrl+Y`
 - Single Windows launcher that resolves modules, compiles, and runs
 - One static binary when built with `make static`
@@ -199,6 +201,11 @@ is persisted.
 /models
 /mode <normal|deep-reason|concise|creative>
 /theme <rose|mono>
+/agent <auto|safe|read-only|status>
+/approval <auto|safe|read-only|workspace-write|chat>
+/thinking <on|off|toggle>
+/run
+/stop
 /copy
 /quit
 ```
@@ -210,6 +217,9 @@ is persisted.
 | `Enter` | Send a prompt or run a command |
 | `PgUp` / `PgDn` | Scroll the transcript |
 | `Ctrl+U` / `Ctrl+D` | Half-page scroll |
+| `Ctrl+X` | Cancel the active streaming agent run |
+| `Alt+1..4` | Open Context, Agent, Surface, or Keys inspector tab |
+| `Ctrl+Left` / `Ctrl+Right` | Cycle inspector tabs |
 | `Ctrl+Y` | Copy the last answer |
 | `Ctrl+C` | Save and quit |
 
@@ -350,3 +360,22 @@ unstyled final-column padding that appeared as a black strip in some terminals.
 - `/thinking off` hides visible reasoning traces.
 
 See `RENDERER_AUTO_APPROVE_REASONING.md` for implementation and safety details.
+
+
+## Live agent and context inspector
+
+Agent runs now publish updates throughout execution rather than returning one
+large result at the end. The transcript receives structured reasoning summaries,
+plans, tool calls, and tool results as they occur. The bottom inspector updates
+without moving the composer:
+
+- `Alt+1` — live input/output context estimate and trimming state
+- `Alt+2` — active round, phase, tool, approval policy, and elapsed time
+- `Alt+3` — Beneath the Surface goal and current plan
+- `Alt+4` — keyboard map
+
+Use `Ctrl+X` or `/stop` to cancel the current provider request or tool loop.
+`/agent auto` keeps the existing unrestricted auto-approve mode.
+
+Only visible model output and explicit structured reasoning summaries are shown.
+Private hidden chain-of-thought and provider thinking blocks are not forwarded.

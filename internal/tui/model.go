@@ -17,7 +17,6 @@ import (
 	"github.com/ephemera-ai/ephemera/internal/agent"
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
-	"github.com/ephemera-ai/ephemera/internal/llm"
 	"github.com/ephemera-ai/ephemera/internal/reasoning"
 	"github.com/ephemera-ai/ephemera/internal/theme"
 )
@@ -38,6 +37,7 @@ const helpText = `### Commands
 - **/approval <auto|safe|read-only>** — set agent approval policy
 - **/thinking <on|off>** — show or hide Beneath the Surface traces
 - **/retry** / **/undo** — revise the latest exchange
+- **/stop** — cancel the active streaming agent run
 - **/export [path]** — export the transcript
 - **/doctor** — inspect the active route
 - **/theme <rose|mono>** — change palette
@@ -46,7 +46,7 @@ const helpText = `### Commands
 
 Autocomplete: type **/**, use **↑/↓** or **Ctrl+N/P** to select, **PgUp/PgDn** to jump, **Enter** to run, **Tab** to complete, and **Esc** to close.
 
-Keys: **Enter** send · **Ctrl+L** clear composer · **Ctrl+R** retry · **PgUp/PgDn** scroll · **Ctrl+Y** copy · **Ctrl+C** quit`
+Keys: **Enter** send · **Ctrl+X** stop agent · **Ctrl+L** clear composer · **Ctrl+R** retry · **PgUp/PgDn** scroll · **Alt+1..4** inspector tabs · **Ctrl+←/→** switch tabs · **Ctrl+Y** copy · **Ctrl+C** quit`
 
 type responseMsg struct {
 	text    string
@@ -89,6 +89,10 @@ type Model struct {
 	connect             *connectFlow
 	modelCatalogCache   map[string]modelCatalogState
 	pendingApproval     *agent.PendingApproval
+	inspectorTab        int
+	agentStream         <-chan agent.StreamUpdate
+	agentCancel         context.CancelFunc
+	liveAgent           liveAgentState
 }
 
 // New creates a TUI model. When sessionName exists it is loaded; otherwise a
@@ -136,6 +140,7 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 		focused:             true,
 		animationGeneration: 1,
 		animationLastTick:   now,
+		inspectorTab:        0,
 	}
 }
 
@@ -189,6 +194,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport(true)
 		return m, nil
 
+	case agentStreamMsg:
+		if !msg.ok {
+			if m.busy {
+				m.busy = false
+				m.liveAgent.Active = false
+				if m.liveAgent.Phase == "cancelling" {
+					m.liveAgent.Phase = "cancelled"
+					m.status = "Agent run cancelled."
+				} else {
+					m.status = "Agent stream closed unexpectedly."
+				}
+				m.agentStream = nil
+				m.agentCancel = nil
+				m.refreshViewport(true)
+			}
+			return m, nil
+		}
+		return m, m.applyAgentStream(msg.update)
+
 	case responseMsg:
 		m.busy = false
 		summary := contextSummary(msg.stats)
@@ -227,6 +251,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.session.AppendEvent(msg.event)
+		m.resolvePendingToolEvent(msg.event)
 		m.pendingApproval = nil
 		_ = m.saveSession()
 		if !msg.continueAgent {
@@ -249,10 +274,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		key := msg.String()
 		switch key {
+		case "alt+1":
+			m.inspectorTab = 0
+			return m, nil
+		case "alt+2":
+			m.inspectorTab = 1
+			return m, nil
+		case "alt+3":
+			m.inspectorTab = 2
+			return m, nil
+		case "alt+4":
+			m.inspectorTab = 3
+			return m, nil
+		case "ctrl+left":
+			m.rotateInspector(-1)
+			return m, nil
+		case "ctrl+right":
+			m.rotateInspector(1)
+			return m, nil
 		case "ctrl+c":
+			if m.agentCancel != nil {
+				m.agentCancel()
+			}
 			_ = m.saveSession()
 			_ = config.Save(m.cfg)
 			return m, tea.Quit
+		case "ctrl+x":
+			m.cancelGeneration()
+			return m, nil
 		case "ctrl+y":
 			m.copyLast()
 			return m, nil
@@ -511,11 +560,14 @@ func (m Model) fitScreen(content string) string {
 	for len(lines) < m.height {
 		lines = append(lines, m.textureLine(max(1, m.width), len(lines), 211, m.styles.Background))
 	}
-	return lipgloss.NewStyle().
+	rendered := lipgloss.NewStyle().
 		Foreground(m.styles.Text).
 		Background(m.styles.Background).
+		ColorWhitespace(true).
 		Width(max(1, m.width)).
+		Height(max(1, m.height)).
 		Render(strings.Join(lines, "\n"))
+	return reassertBackground(rendered, m.styles.Background)
 }
 
 func (m *Model) resize() {
@@ -598,7 +650,7 @@ Route: **%s** · **%s** · **%s** token context.`,
 		rows = append(rows, m.transcriptLine(m.styles.NoticeLabel, "signal"))
 		rows = append(rows, strings.Split(renderer.Render(m.notice), "\n")...)
 	}
-	if len(m.session.Events) > 0 {
+	if len(m.session.Events) > 0 || m.liveAgent.Active {
 		appendSectionGap()
 		rows = append(rows, strings.Split(m.renderAgentTimeline(), "\n")...)
 	}
@@ -631,35 +683,6 @@ func (m Model) transcriptLine(style lipgloss.Style, text string) string {
 	labelStyle := style.Background(m.styles.Panel)
 	dividerStyle := lipgloss.NewStyle().Foreground(m.styles.Divider).Background(m.styles.Panel)
 	return labelStyle.Render(labelText) + dividerStyle.Render(divider)
-}
-
-func (m Model) generateCmd() tea.Cmd {
-	cfg := m.cfg
-	session := m.session
-	return func() tea.Msg {
-		system := reasoning.SystemPrompt(cfg.Mode)
-		messages, stats := buildRequestMessages(session.Messages, system, cfg.ContextTokens)
-
-		provider, err := llm.New(cfg)
-		if err != nil {
-			return responseMsg{err: err, stats: stats}
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-		if cfg.AgentEnabled {
-			result := agent.NewRunner(cfg, provider).Run(ctx, session)
-			return responseMsg{text: result.Text, events: result.Events, pending: result.Pending, stats: stats}
-		}
-		text, err := provider.Generate(ctx, llm.Request{
-			Model:       cfg.Model(),
-			System:      system,
-			Messages:    messages,
-			MaxTokens:   cfg.MaxTokens,
-			Temperature: cfg.Mode.Temperature(),
-		})
-		return responseMsg{text: text, err: err, stats: stats}
-	}
 }
 
 func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
@@ -985,6 +1008,9 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		m.status = "Agent continuing..."
 		return false, tea.Batch(m.spinner.Tick, m.generateCmd())
 
+	case "/stop":
+		m.cancelGeneration()
+
 	case "/diff":
 		m.notice = m.localToolNotice("git_diff")
 		m.status = "Diff opened."
@@ -1073,10 +1099,10 @@ func (m *Model) applyThemeToComponents() {
 
 func inputComponentStyles(styles theme.Styles) textinput.Styles {
 	state := textinput.StyleState{
-		Prompt:      lipgloss.NewStyle().Foreground(styles.Primary).Background(styles.Panel),
-		Text:        lipgloss.NewStyle().Foreground(styles.Text).Background(styles.Panel),
-		Placeholder: lipgloss.NewStyle().Foreground(styles.Muted).Background(styles.Panel),
-		Suggestion:  lipgloss.NewStyle().Foreground(styles.Secondary).Background(styles.Panel),
+		Prompt:      lipgloss.NewStyle().Foreground(styles.Primary).Background(styles.Panel).ColorWhitespace(true),
+		Text:        lipgloss.NewStyle().Foreground(styles.Text).Background(styles.Panel).ColorWhitespace(true),
+		Placeholder: lipgloss.NewStyle().Foreground(styles.Muted).Background(styles.Panel).ColorWhitespace(true),
+		Suggestion:  lipgloss.NewStyle().Foreground(styles.Secondary).Background(styles.Panel).ColorWhitespace(true),
 	}
 	inputStyles := textinput.DefaultDarkStyles()
 	inputStyles.Focused = state

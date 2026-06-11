@@ -3,7 +3,7 @@ package tui
 const (
 	headerRows          = 2
 	composerOuterRows   = 3
-	footerOuterRows     = 3
+	footerOuterRows     = 5
 	panelBorderRows     = 2
 	minViewportRows     = 4 // viewport content rows, excluding its border
 	minPaletteOuterRows = 7

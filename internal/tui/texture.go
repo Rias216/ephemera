@@ -17,7 +17,7 @@ func (m Model) textureLine(width, row, seed int, background color.Color) string 
 	}
 	_ = row
 	_ = seed
-	style := lipgloss.NewStyle().Foreground(m.styles.Texture)
+	style := lipgloss.NewStyle().Foreground(m.styles.Texture).ColorWhitespace(true)
 	if background != nil {
 		style = style.Background(background)
 	}
@@ -42,7 +42,7 @@ func (m Model) texturedViewport() string {
 	end := min(len(allLines), start+targetHeight)
 	lines := append([]string(nil), allLines[start:end]...)
 
-	fill := lipgloss.NewStyle().Foreground(m.styles.Text).Background(m.styles.Panel)
+	fill := lipgloss.NewStyle().Foreground(m.styles.Text).Background(m.styles.Panel).ColorWhitespace(true)
 	xOffset := m.viewport.XOffset()
 	for index, line := range lines {
 		if xOffset > 0 || lipgloss.Width(line) > targetWidth {
@@ -57,16 +57,79 @@ func (m Model) texturedViewport() string {
 	for len(lines) < targetHeight {
 		lines = append(lines, fill.Render(strings.Repeat(" ", targetWidth)))
 	}
+	return m.paintBlockWidth(strings.Join(lines, "\n"), targetWidth, m.styles.Panel)
+}
+
+func (m Model) paintBlockWidth(block string, width int, background color.Color) string {
+	if width <= 0 {
+		return block
+	}
+	fill := lipgloss.NewStyle().Foreground(m.styles.Text).Background(background).ColorWhitespace(true)
+	lines := strings.Split(block, "\n")
+	for i, line := range lines {
+		missing := width - lipgloss.Width(line)
+		if missing > 0 {
+			line += fill.Render(strings.Repeat(" ", missing))
+		}
+		lines[i] = line
+	}
 	return strings.Join(lines, "\n")
+}
+
+func reassertBackground(block string, background color.Color) string {
+	if background == nil || block == "" {
+		return block
+	}
+	prefix := "\x1b[48;2;" + rgbParams(background) + "m"
+	var out strings.Builder
+	out.Grow(len(block) + strings.Count(block, "\n")*len(prefix) + 32)
+	out.WriteString(prefix)
+	for index := 0; index < len(block); {
+		if block[index] == '\n' {
+			out.WriteByte('\n')
+			out.WriteString(prefix)
+			index++
+			continue
+		}
+		if block[index] != '\x1b' {
+			out.WriteByte(block[index])
+			index++
+			continue
+		}
+		end := ansiEscapeEnd(block, index)
+		sequence := block[index:end]
+		out.WriteString(sequence)
+		if sgrResetsBackground(sequence) {
+			out.WriteString(prefix)
+		}
+		index = end
+	}
+	return out.String()
+}
+
+func sgrResetsBackground(sequence string) bool {
+	if len(sequence) < 3 || !strings.HasPrefix(sequence, "\x1b[") || sequence[len(sequence)-1] != 'm' {
+		return false
+	}
+	params := sequence[2 : len(sequence)-1]
+	if params == "" {
+		return true
+	}
+	for _, part := range strings.Split(params, ";") {
+		if part == "" || part == "0" || part == "49" {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) insetBlock(block string) string {
 	lines := strings.Split(block, "\n")
-	fill := lipgloss.NewStyle().Background(m.styles.Background)
+	fill := lipgloss.NewStyle().Background(m.styles.Background).ColorWhitespace(true)
 	for i, line := range lines {
 		left := 1
 		right := max(0, m.width-left-lipgloss.Width(line))
 		lines[i] = fill.Render(strings.Repeat(" ", left)) + line + fill.Render(strings.Repeat(" ", right))
 	}
-	return strings.Join(lines, "\n")
+	return m.paintBlockWidth(strings.Join(lines, "\n"), m.width, m.styles.Background)
 }

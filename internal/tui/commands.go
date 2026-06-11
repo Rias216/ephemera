@@ -133,6 +133,10 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/run", "resume after reviewing the timeline"}},
 	},
 	{
+		Name: "/stop", Description: "cancel the active streaming agent run", Category: "AGENT", Introduced: "v0.5.0", Permission: "local",
+		Examples: []commandExample{{"/stop", "cancel the current model or tool step"}},
+	},
+	{
 		Name: "/diff", Description: "ask the agent to inspect git diff", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
 		Examples: []commandExample{{"/diff", "show changed files and patch context"}},
 	},

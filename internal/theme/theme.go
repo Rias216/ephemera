@@ -119,30 +119,34 @@ func build(primary, secondary, accentSoft, accentBright, text, muted, faint, bac
 		Meta: lipgloss.NewStyle().
 			Foreground(muted).
 			Background(panel).
+			ColorWhitespace(true).
 			PaddingLeft(1),
 		Viewport: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(secondary).
 			Foreground(text).
 			Background(panel).
+			ColorWhitespace(true).
 			Padding(0, 1),
 		Input: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(primary).
 			Foreground(text).
 			Background(panel).
+			ColorWhitespace(true).
 			Padding(0, 1),
 		Prompt: lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panel),
-		Status: lipgloss.NewStyle().Foreground(muted).Background(panelDeep),
+		Status: lipgloss.NewStyle().Foreground(muted).Background(panelDeep).ColorWhitespace(true),
 		Footer: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(divider).
 			Foreground(text).
 			Background(panelDeep).
+			ColorWhitespace(true).
 			Padding(0, 1),
-		UserLabel:      lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panel),
-		AssistantLabel: lipgloss.NewStyle().Bold(true).Foreground(secondary).Background(panel),
-		NoticeLabel:    lipgloss.NewStyle().Bold(true).Foreground(muted).Background(panel),
+		UserLabel:      lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panel).ColorWhitespace(true),
+		AssistantLabel: lipgloss.NewStyle().Bold(true).Foreground(secondary).Background(panel).ColorWhitespace(true),
+		NoticeLabel:    lipgloss.NewStyle().Bold(true).Foreground(muted).Background(panel).ColorWhitespace(true),
 		Error:          lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FB7185")).Background(background),
 	}
 }
