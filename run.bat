@@ -15,6 +15,7 @@ if errorlevel 1 (
 )
 
 if not exist "bin" mkdir "bin"
+del /q "bin\ephemera-run-*.exe" >nul 2>nul
 
 if not exist "go.sum" (
     echo [setup] Resolving Go modules...
@@ -22,12 +23,13 @@ if not exist "go.sum" (
     if errorlevel 1 goto :build_failed
 )
 
-go build -trimpath -ldflags "-s -w -X main.version=dev" -o "bin\ephemera.exe" ".\cmd\ephemera"
+set "EXE=bin\ephemera-run-%RANDOM%%RANDOM%.exe"
+go build -trimpath -ldflags "-s -w -X main.version=dev" -o "%EXE%" ".\cmd\ephemera"
 if errorlevel 1 goto :build_failed
 
 echo [ready] Launching Ephemera...
 echo.
-"bin\ephemera.exe" %*
+"%EXE%" %*
 exit /b %errorlevel%
 
 :build_failed

@@ -43,11 +43,12 @@ const helpText = `### Commands
 
 Autocomplete: type **/**, use **↑/↓** to select, and press **Enter** to run or **Tab** to complete.
 
-Keys: **Enter** send · **PgUp/PgDn** scroll · **Ctrl+Y** copy · **Ctrl+C** quit`
+Keys: **Enter** send · **Ctrl+R** retry · **PgUp/PgDn** scroll · **Ctrl+Y** copy · **Ctrl+C** quit`
 
 type responseMsg struct {
-	text string
-	err  error
+	text  string
+	err   error
+	stats contextStats
 }
 
 // Model is the complete Bubble Tea state machine.
@@ -62,6 +63,7 @@ type Model struct {
 
 	width                int
 	height               int
+	frame                int
 	ready                bool
 	busy                 bool
 	status               string
@@ -84,10 +86,10 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 	input.CharLimit = 32_768
 	input.ShowSuggestions = false
 	input.Focus()
-	input.TextStyle = lipgloss.NewStyle().Foreground(styles.Text)
-	input.PlaceholderStyle = lipgloss.NewStyle().Foreground(styles.Muted)
-	input.CompletionStyle = lipgloss.NewStyle().Foreground(styles.Secondary)
-	input.Cursor.Style = lipgloss.NewStyle().Foreground(styles.Primary)
+	input.TextStyle = lipgloss.NewStyle().Foreground(styles.Text).Background(styles.Panel)
+	input.PlaceholderStyle = lipgloss.NewStyle().Foreground(styles.Muted).Background(styles.Panel)
+	input.CompletionStyle = lipgloss.NewStyle().Foreground(styles.Secondary).Background(styles.Panel)
+	input.Cursor.Style = lipgloss.NewStyle().Foreground(styles.Primary).Background(styles.Panel)
 
 	spin := spinner.New()
 	spin.Spinner = spinner.MiniDot
@@ -117,13 +119,17 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return textinput.Blink
+	return tea.Batch(textinput.Blink, animationTick())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case animationTickMsg:
+		m.frame++
+		return m, animationTick()
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -133,8 +139,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case responseMsg:
 		m.busy = false
+		summary := contextSummary(msg.stats)
 		if msg.err != nil {
-			m.status = "The signal broke: " + msg.err.Error()
+			m.status = "The signal broke · " + summary
 			m.notice = "**Request failed:** " + escapeMarkdown(msg.err.Error())
 			m.refreshViewport(true)
 			return m, nil
@@ -147,7 +154,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := m.saveSession(); err != nil {
 			m.status = "Answered, but session save failed: " + err.Error()
 		} else {
-			m.status = "Saved · the answer has settled."
+			m.status = "Saved · " + summary
 		}
 		m.refreshViewport(true)
 		return m, nil
@@ -169,6 +176,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+y":
 			m.copyLast()
 			return m, nil
+		case "ctrl+r":
+			cmd := m.retryLast()
+			m.refreshViewport(true)
+			return m, cmd
 		case "pgup":
 			m.viewport.ViewUp()
 			return m, nil
@@ -240,12 +251,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.SetValue("")
 				m.rebuildSuggestions()
 				if strings.HasPrefix(value, "/") {
-					quit := m.handleCommand(value)
+					quit, cmd := m.handleCommand(value)
 					m.refreshViewport(true)
 					if quit {
 						return m, tea.Quit
 					}
-					return m, nil
+					return m, cmd
 				}
 				m.notice = ""
 				m.session.Append("user", value)
@@ -285,30 +296,15 @@ func (m Model) View() string {
 		return m.styles.Error.Render("Ephemera needs a terminal at least 40×15.")
 	}
 
-	banner := m.styles.Banner.Render("✦ EPHEMERA") + "  " +
-		m.styles.Subtitle.Render("what vanishes may still illuminate")
-	provider := m.cfg.Provider
-	if provider == "compatible" && strings.TrimSpace(m.cfg.CompatibleName) != "" {
-		provider = m.cfg.CompatibleName
-	}
-	metaText := fmt.Sprintf(
-		"%s · %s · %s · %s",
-		provider,
-		m.cfg.Model(),
-		m.cfg.Mode,
-		m.session.Name,
-	)
-	meta := m.styles.Meta.Render(clip(metaText, m.width-2))
-
 	prompt := m.styles.Prompt.Render(m.promptLabel())
 	inputLine := lipgloss.JoinHorizontal(lipgloss.Top, prompt, m.input.View())
-	inputBox := m.styles.Input.Width(max(1, m.width-4)).Render(inputLine)
+	inputBox := m.panelStyle(m.styles.Input, 3).Width(max(1, m.width-4)).Render(inputLine)
 
 	leftStatus := m.status
 	if m.busy {
 		leftStatus = m.spinner.View() + " " + m.status
 	}
-	rightStatus := "PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+C quit"
+	rightStatus := "Ctrl+R retry · Ctrl+Y copy · Ctrl+C quit"
 	if m.connect != nil {
 		rightStatus = "Enter next · Esc cancel · Tab complete · ↑/↓ select"
 	} else if len(m.suggestions) > 0 {
@@ -324,9 +320,8 @@ func (m Model) View() string {
 	status := m.styles.Status.Render(leftStatus + strings.Repeat(" ", space) + rightStatus)
 
 	blocks := []string{
-		banner,
-		meta,
-		m.styles.Viewport.Width(max(1, m.width-4)).Height(m.viewport.Height).Render(m.viewport.View()),
+		m.renderHeader(),
+		m.panelStyle(m.styles.Viewport, 1).Width(max(1, m.width-4)).Height(m.viewport.Height).Render(m.viewport.View()),
 		inputBox,
 	}
 	if palette := m.renderSuggestions(); palette != "" {
@@ -363,7 +358,7 @@ func (m Model) renderSuggestions() string {
 	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.styles.Secondary).
+		BorderForeground(m.styles.Primary).
 		Background(m.styles.Panel).
 		Padding(0, 1).
 		Width(max(1, m.width-4)).
@@ -411,7 +406,15 @@ func (m Model) renderTranscript() string {
 	if len(m.session.Messages) == 0 {
 		out.WriteString(m.transcriptLine(m.styles.NoticeLabel, "signal"))
 		out.WriteString("\n")
-		welcome, _ := renderer.Render("A quiet reasoning harness. Ask plainly; Ephemera will do the hidden work.")
+		welcome, _ := renderer.Render(fmt.Sprintf(`### Ready
+
+- Ask normally, or type **/** for the command palette.
+- Start fast with **/connect**, **/models**, **/mode concise**, or **/doctor**.
+- Current route: **%s** · **%s** · context **%s** tokens.`,
+			m.providerName(),
+			m.cfg.Model(),
+			formatTokenCount(m.cfg.ContextTokens),
+		))
 		out.WriteString(m.transcriptBlock(strings.TrimSpace(welcome)))
 		out.WriteString("\n")
 	}
@@ -454,15 +457,15 @@ func (m Model) transcriptWidth() int {
 }
 
 func (m Model) transcriptLine(style lipgloss.Style, text string) string {
-	return style.Width(m.transcriptWidth()).Render(text)
+	return style.Background(m.styles.Panel).Width(m.transcriptWidth()).Render(text)
 }
 
 func (m Model) transcriptBlock(text string) string {
 	width := m.transcriptWidth()
-	style := lipgloss.NewStyle().Foreground(m.styles.Text).Width(width)
+	style := lipgloss.NewStyle().Foreground(m.styles.Text).Background(m.styles.Panel).Width(width)
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		lines[i] = style.Render(line)
+		lines[i] = style.Render(stripANSIBackgrounds(line))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -483,7 +486,7 @@ func markdownStyle(styles theme.Styles) ansi.StyleConfig {
 
 	setPrimitive := func(primitive *ansi.StylePrimitive, color string) {
 		primitive.Color = stringPtr(color)
-		primitive.BackgroundColor = nil
+		primitive.BackgroundColor = stringPtr(panel)
 	}
 	setBlock := func(block *ansi.StyleBlock, color string) {
 		setPrimitive(&block.StylePrimitive, color)
@@ -517,8 +520,8 @@ func markdownStyle(styles theme.Styles) ansi.StyleConfig {
 	cfg.H3.Bold = &bold
 	if cfg.CodeBlock.Chroma != nil {
 		cfg.CodeBlock.Chroma.Text.Color = stringPtr(text)
-		cfg.CodeBlock.Chroma.Text.BackgroundColor = nil
-		cfg.CodeBlock.Chroma.Background.BackgroundColor = nil
+		cfg.CodeBlock.Chroma.Text.BackgroundColor = stringPtr(panel)
+		cfg.CodeBlock.Chroma.Background.BackgroundColor = stringPtr(panel)
 	}
 	return cfg
 }
@@ -529,32 +532,28 @@ func (m Model) generateCmd() tea.Cmd {
 	cfg := m.cfg
 	session := m.session
 	return func() tea.Msg {
+		system := reasoning.SystemPrompt(cfg.Mode)
+		messages, stats := buildRequestMessages(session.Messages, system, cfg.ContextTokens)
+
 		provider, err := llm.New(cfg)
 		if err != nil {
-			return responseMsg{err: err}
-		}
-
-		messages := make([]llm.Message, 0, len(session.Messages))
-		for _, message := range session.Messages {
-			if message.Role == "user" || message.Role == "assistant" {
-				messages = append(messages, llm.Message{Role: message.Role, Content: message.Content})
-			}
+			return responseMsg{err: err, stats: stats}
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		text, err := provider.Generate(ctx, llm.Request{
 			Model:       cfg.Model(),
-			System:      reasoning.SystemPrompt(cfg.Mode),
+			System:      system,
 			Messages:    messages,
 			MaxTokens:   cfg.MaxTokens,
 			Temperature: cfg.Mode.Temperature(),
 		})
-		return responseMsg{text: text, err: err}
+		return responseMsg{text: text, err: err, stats: stats}
 	}
 }
 
-func (m *Model) handleCommand(raw string) bool {
+func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 	parts := strings.Fields(raw)
 	command := strings.ToLower(parts[0])
 	args := parts[1:]
@@ -687,6 +686,47 @@ func (m *Model) handleCommand(raw string) bool {
 		m.status = "Mode → " + string(mode)
 		_ = config.Save(m.cfg)
 
+	case "/usage":
+		stats := m.currentContextStats()
+		m.notice = m.usageNotice(stats)
+		m.status = "Usage · " + contextSummary(stats)
+
+	case "/budget":
+		value, ok := requireArg("/budget <tokens>")
+		if !ok {
+			break
+		}
+		budget, err := parseContextBudget(value)
+		if err != nil {
+			m.status = err.Error()
+			break
+		}
+		m.cfg.ContextTokens = budget
+		m.status = "Context budget → " + formatTokenCount(budget) + " tokens"
+		_ = config.Save(m.cfg)
+
+	case "/retry":
+		return false, m.retryLast()
+
+	case "/undo":
+		m.undoLastMessage()
+
+	case "/export":
+		target := ""
+		if len(args) > 0 {
+			target = strings.Join(args, " ")
+		}
+		path, err := m.exportTranscript(target)
+		if err != nil {
+			m.status = "Export failed: " + err.Error()
+			break
+		}
+		m.status = "Exported → " + path
+
+	case "/doctor":
+		m.notice = m.doctorNotice()
+		m.status = "Doctor report opened."
+
 	case "/theme":
 		value, ok := requireArg("/theme <rose|mono>")
 		if !ok {
@@ -709,19 +749,19 @@ func (m *Model) handleCommand(raw string) bool {
 	case "/quit", "/exit":
 		_ = m.saveSession()
 		_ = config.Save(m.cfg)
-		return true
+		return true, nil
 
 	default:
 		m.status = "Unknown command. /help reveals the map."
 	}
-	return false
+	return false, nil
 }
 
 func (m *Model) applyThemeToComponents() {
-	m.input.TextStyle = lipgloss.NewStyle().Foreground(m.styles.Text)
-	m.input.PlaceholderStyle = lipgloss.NewStyle().Foreground(m.styles.Muted)
-	m.input.CompletionStyle = lipgloss.NewStyle().Foreground(m.styles.Secondary)
-	m.input.Cursor.Style = lipgloss.NewStyle().Foreground(m.styles.Primary)
+	m.input.TextStyle = lipgloss.NewStyle().Foreground(m.styles.Text).Background(m.styles.Panel)
+	m.input.PlaceholderStyle = lipgloss.NewStyle().Foreground(m.styles.Muted).Background(m.styles.Panel)
+	m.input.CompletionStyle = lipgloss.NewStyle().Foreground(m.styles.Secondary).Background(m.styles.Panel)
+	m.input.Cursor.Style = lipgloss.NewStyle().Foreground(m.styles.Primary).Background(m.styles.Panel)
 	m.spinner.Style = lipgloss.NewStyle().Foreground(m.styles.Primary)
 }
 

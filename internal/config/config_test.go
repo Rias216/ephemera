@@ -35,7 +35,7 @@ func TestNormalizeRepairsPartialConfig(t *testing.T) {
 	if cfg.Models["ollama"] == "" || cfg.Models["anthropic"] == "" || cfg.Models["compatible"] == "" {
 		t.Fatal("normalize did not restore missing provider models")
 	}
-	if cfg.MaxTokens <= 0 || cfg.OllamaURL == "" || cfg.CompatibleURL == "" {
+	if cfg.MaxTokens <= 0 || cfg.ContextTokens <= 0 || cfg.OllamaURL == "" || cfg.CompatibleURL == "" {
 		t.Fatal("normalize did not restore scalar defaults")
 	}
 }

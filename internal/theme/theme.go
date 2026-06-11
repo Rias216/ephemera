@@ -50,7 +50,7 @@ func New(name string) Styles {
 		lipgloss.Color("#FCE7F3"),
 		lipgloss.Color("#9D8B99"),
 		lipgloss.Color("#09070A"),
-		lipgloss.Color("#171118"),
+		lipgloss.Color("#24111F"),
 	)
 }
 
@@ -66,7 +66,7 @@ func build(primary, secondary, text, muted, background, panel lipgloss.Color) St
 		Subtitle:   lipgloss.NewStyle().Foreground(muted).Italic(true),
 		Meta: lipgloss.NewStyle().
 			Foreground(muted).
-			Background(background).
+			Background(panel).
 			PaddingLeft(1),
 		Viewport: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -78,11 +78,11 @@ func build(primary, secondary, text, muted, background, panel lipgloss.Color) St
 			BorderForeground(primary).
 			Background(panel).
 			Padding(0, 1),
-		Prompt:         lipgloss.NewStyle().Bold(true).Foreground(primary),
+		Prompt:         lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panel),
 		Status:         lipgloss.NewStyle().Foreground(muted),
-		UserLabel:      lipgloss.NewStyle().Bold(true).Foreground(primary),
-		AssistantLabel: lipgloss.NewStyle().Bold(true).Foreground(secondary),
-		NoticeLabel:    lipgloss.NewStyle().Bold(true).Foreground(muted),
+		UserLabel:      lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panel),
+		AssistantLabel: lipgloss.NewStyle().Bold(true).Foreground(secondary).Background(panel),
+		NoticeLabel:    lipgloss.NewStyle().Bold(true).Foreground(muted).Background(panel),
 		Error:          lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FB7185")),
 	}
 }

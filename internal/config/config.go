@@ -21,7 +21,9 @@ type Config struct {
 	Mode      reasoning.Mode    `json:"mode"`
 	Theme     string            `json:"theme"`
 	MaxTokens int64             `json:"max_tokens"`
-	OllamaURL string            `json:"ollama_url"`
+	// ContextTokens caps the approximate prompt tokens sent with each request.
+	ContextTokens int    `json:"context_tokens"`
+	OllamaURL     string `json:"ollama_url"`
 
 	CompatibleName string `json:"compatible_name,omitempty"`
 	CompatibleURL  string `json:"compatible_url,omitempty"`
@@ -66,6 +68,7 @@ func Default() Config {
 		Mode:           reasoning.ModeNormal,
 		Theme:          "rose",
 		MaxTokens:      4096,
+		ContextTokens:  16_000,
 		OllamaURL:      "http://localhost:11434",
 		CompatibleName: "compatible",
 		CompatibleURL:  "http://localhost:1234/v1",
@@ -227,6 +230,9 @@ func (c *Config) normalize() {
 	}
 	if c.MaxTokens <= 0 {
 		c.MaxTokens = defaults.MaxTokens
+	}
+	if c.ContextTokens <= 0 {
+		c.ContextTokens = defaults.ContextTokens
 	}
 	if strings.TrimSpace(c.OllamaURL) == "" {
 		c.OllamaURL = defaults.OllamaURL

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -146,10 +148,73 @@ func TestTranscriptRowsDoNotPaintInlineBackgroundBoxes(t *testing.T) {
 	}
 }
 
+func TestStripANSIBackgroundsRemovesResetsAndBackgrounds(t *testing.T) {
+	input := "\x1b[0;38;2;252;231;243;48;2;0;0;0mHello\x1b[0m"
+
+	got := stripANSIBackgrounds(input)
+
+	if strings.Contains(got, "48;2") || strings.Contains(got, "\x1b[0") {
+		t.Fatalf("stripANSIBackgrounds() = %q, want no background or reset escapes", got)
+	}
+	if !strings.Contains(got, "38;2;252;231;243") {
+		t.Fatalf("stripANSIBackgrounds() = %q, want foreground preserved", got)
+	}
+}
+
+func TestGlowColorChangesWithFrame(t *testing.T) {
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+	first := m.glowColor(0)
+	m.frame = 1
+
+	if got := m.glowColor(0); got == first {
+		t.Fatalf("glowColor did not shift with frame: %q", got)
+	}
+}
+
+func TestRenderLogoGlowPreservesBrandText(t *testing.T) {
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+
+	got := m.renderLogoGlow()
+
+	if !strings.Contains(got, "EPHEMERA") {
+		t.Fatalf("renderLogoGlow() = %q, want brand text", got)
+	}
+}
+
+func TestBuildRequestMessagesTrimsOldestContext(t *testing.T) {
+	messages := []history.Message{
+		{Role: "user", Content: strings.Repeat("old ", 400)},
+		{Role: "assistant", Content: "old answer"},
+		{Role: "user", Content: "new ask"},
+	}
+
+	got, stats := buildRequestMessages(messages, "system", 64)
+
+	if len(got) != 1 || got[0].Role != "user" || got[0].Content != "new ask" {
+		t.Fatalf("request messages = %#v, want only latest user prompt", got)
+	}
+	if stats.SentMessages != 1 || stats.TotalMessages != 3 || stats.DroppedMessages != 2 {
+		t.Fatalf("stats = %#v, want 1 sent / 3 total / 2 dropped", stats)
+	}
+}
+
+func TestBudgetCommandUpdatesContextTokens(t *testing.T) {
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+
+	_, _ = m.handleCommand("/budget 8192")
+
+	if m.cfg.ContextTokens != 8192 {
+		t.Fatalf("context budget = %d, want 8192", m.cfg.ContextTokens)
+	}
+	if !strings.Contains(m.status, "8.2k") {
+		t.Fatalf("status = %q, want formatted budget", m.status)
+	}
+}
+
 func TestModelsCommandOpensInteractiveChooser(t *testing.T) {
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
 	m.cfg.Provider = "openai"
-	m.handleCommand("/models")
+	_, _ = m.handleCommand("/models")
 
 	if m.input.Value() != "/model " {
 		t.Fatalf("input = %q, want /model chooser", m.input.Value())
@@ -175,12 +240,12 @@ func TestEnterChoosesHighlightedModelSuggestion(t *testing.T) {
 func TestSessionCommandsHandleMissingStore(t *testing.T) {
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
 
-	m.handleCommand("/sessions")
+	_, _ = m.handleCommand("/sessions")
 	if m.status != "List failed: session store unavailable" {
 		t.Fatalf("status = %q, want missing-store message", m.status)
 	}
 
-	m.handleCommand("/save draft")
+	_, _ = m.handleCommand("/save draft")
 	if m.status != "Saved session draft" {
 		t.Fatalf("save status = %q, want no-op save to succeed without store", m.status)
 	}
@@ -214,6 +279,68 @@ func TestLoadSessionDoesNotOverwriteModelWithEmptyValue(t *testing.T) {
 	}
 	if m.session.Model != "" {
 		t.Fatalf("session model = %q, want original loaded empty value preserved", m.session.Model)
+	}
+}
+
+func TestRetryCommandRemovesPreviousAssistantAndStartsRequest(t *testing.T) {
+	cfg := config.Default()
+	m := Model{cfg: cfg, styles: theme.New("rose")}
+	m.session = history.New("current", cfg.Provider, cfg.Model(), reasoning.ModeNormal)
+	m.session.Append("user", "try this")
+	m.session.Append("assistant", "old answer")
+
+	_, cmd := m.handleCommand("/retry")
+
+	if cmd == nil || !m.busy {
+		t.Fatal("retry did not start a request")
+	}
+	if len(m.session.Messages) != 1 || m.session.Messages[0].Role != "user" {
+		t.Fatalf("messages after retry = %#v, want only latest user prompt", m.session.Messages)
+	}
+	if m.lastAssistant != "" {
+		t.Fatalf("lastAssistant = %q, want cleared", m.lastAssistant)
+	}
+}
+
+func TestUndoCommandRemovesLatestMessage(t *testing.T) {
+	cfg := config.Default()
+	m := Model{cfg: cfg, styles: theme.New("rose")}
+	m.session = history.New("current", cfg.Provider, cfg.Model(), reasoning.ModeNormal)
+	m.session.Append("user", "hello")
+	m.session.Append("assistant", "answer")
+
+	_, _ = m.handleCommand("/undo")
+
+	if len(m.session.Messages) != 1 || m.session.Messages[0].Role != "user" {
+		t.Fatalf("messages after undo = %#v, want only user message", m.session.Messages)
+	}
+}
+
+func TestExportCommandWritesMarkdown(t *testing.T) {
+	cfg := config.Default()
+	m := Model{cfg: cfg, styles: theme.New("rose")}
+	m.session = history.New("current", cfg.Provider, cfg.Model(), reasoning.ModeNormal)
+	m.session.Append("user", "hello")
+	target := filepath.Join(t.TempDir(), "chat")
+
+	_, _ = m.handleCommand("/export " + target)
+
+	data, err := os.ReadFile(target + ".md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "## You") || !strings.Contains(string(data), "hello") {
+		t.Fatalf("export content = %q, want transcript markdown", data)
+	}
+}
+
+func TestDoctorCommandShowsProviderState(t *testing.T) {
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+
+	_, _ = m.handleCommand("/doctor")
+
+	if !strings.Contains(m.notice, "### Doctor") || !strings.Contains(m.notice, "Provider") {
+		t.Fatalf("doctor notice = %q, want provider report", m.notice)
 	}
 }
 
