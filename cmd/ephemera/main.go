@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
@@ -63,8 +63,7 @@ func main() {
 
 	program := tea.NewProgram(
 		tui.New(cfg, store, *sessionName),
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
+		tea.WithFPS(tui.AnimationFPS),
 	)
 	if _, err := program.Run(); err != nil {
 		fatal("run TUI", err)

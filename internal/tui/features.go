@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"

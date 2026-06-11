@@ -2,24 +2,33 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"math"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
-var roseGlow = []lipgloss.Color{
-	lipgloss.Color("#FF69B4"),
-	lipgloss.Color("#DDA0DD"),
+var roseGlow = []color.Color{
+	lipgloss.Color("#8F164D"), // deep rose
+	lipgloss.Color("#C21866"), // rich pink
+	lipgloss.Color("#F02D8A"), // hot pink
+	lipgloss.Color("#FF77B7"), // bright pink
+	lipgloss.Color("#FFD1E6"), // pale pink glint
 }
 
-var monoGlow = []lipgloss.Color{
-	lipgloss.Color("#6B7280"),
+var monoGlow = []color.Color{
+	lipgloss.Color("#4B5563"),
+	lipgloss.Color("#9CA3AF"),
 	lipgloss.Color("#F9FAFB"),
 }
 
-const glimmerRadius = 3
+const (
+	glimmerTrailLength   = 15.0
+	glimmerLeadLength    = 2.25
+	ambientFadeHalfWidth = 11.0
+)
 
 func (m Model) renderHeader() string {
 	banner := m.renderLogoGlow() + "  " +
@@ -89,14 +98,19 @@ func (m Model) renderLogoGlow() string {
 	}
 
 	runes := []rune(logo)
-	position := positiveMod(m.frame, len(runes))
+	period := float64(len(runes))
+	head := positiveModFloat(m.animationSeconds()*logoCellsPerSecond, period)
 	var b strings.Builder
 	for i, r := range runes {
-		color := palette[0]
-		distance := circularDistance(i, position, len(runes))
-		if distance <= 1 {
-			boost := 1.0 - float64(distance)/2.0
-			color = brighten(fadeColor(palette[0], palette[1], 0.65), boost*0.75)
+		delta := signedCircularDelta(float64(i), head, period)
+		color := samplePalette(palette, 0.12)
+		switch {
+		case delta >= 0 && delta <= 0.9:
+			t := 1.0 - 0.18*smootherStep(delta/0.9)
+			color = samplePalette(palette, t)
+		case delta < 0 && -delta <= 3.8:
+			t := 1.0 - (-delta / 3.8)
+			color = samplePalette(palette, smootherStep(t))
 		}
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(color).Render(string(r)))
 	}
@@ -112,10 +126,10 @@ func (m Model) renderPanel(base lipgloss.Style, offset int, content string) stri
 	return m.localizedGradientBorder(rendered, offset)
 }
 
-// localizedGradientBorder paints a stable two-tone outline and then brightens
-// only a short segment that travels around its perimeter. Bubble Tea compares
-// frames line-by-line, so at most a handful of rows differ on each tick instead
-// of every row in a tall viewport.
+// localizedGradientBorder gives the complete outline a slowly shifting pink
+// gradient, then layers a broad rose wave and a sharp pale-pink knife glimmer on
+// top. Bubble Tea v2 diffs terminal cells and uses synchronized updates where
+// supported, so this richer animation no longer depends on limiting changed rows.
 func (m Model) localizedGradientBorder(rendered string, offset int) string {
 	width := lipgloss.Width(rendered)
 	height := lipgloss.Height(rendered)
@@ -124,11 +138,22 @@ func (m Model) localizedGradientBorder(rendered string, offset int) string {
 		return rendered
 	}
 
-	glimmer := positiveMod(m.frame*2+offset*max(1, perimeter/7), perimeter)
 	palette := m.glowPalette()
 	if len(palette) < 2 {
 		return rendered
 	}
+
+	period := float64(perimeter)
+	seconds := m.animationSeconds()
+	glimmerHead := positiveModFloat(
+		seconds*glimmerCellsPerSecond+float64(offset)*period/7.0,
+		period,
+	)
+	ambientHead := positiveModFloat(
+		seconds*ambientCellsPerSecond+float64(offset)*period/5.0+period*0.31,
+		period,
+	)
+	basePhase := positiveModFloat(seconds*baseGradientCyclesPS+float64(offset)*0.071, 1)
 
 	var b strings.Builder
 	b.Grow(len(rendered) + perimeter*24)
@@ -151,13 +176,8 @@ func (m Model) localizedGradientBorder(rendered string, offset int) string {
 		}
 
 		if isOuterBorderRune(r, x, y, width, height) {
-			position := borderPosition(x, y, width, height)
-			color := perimeterColor(palette[0], palette[1], position, perimeter, offset)
-			distance := circularDistance(position, glimmer, perimeter)
-			if distance <= glimmerRadius {
-				boost := 1.0 - float64(distance)/float64(glimmerRadius+1)
-				color = brighten(color, boost*boost*0.92)
-			}
+			position := float64(borderPosition(x, y, width, height))
+			color := knifeFadeColor(palette, position, glimmerHead, ambientHead, basePhase, period, offset)
 			b.WriteString(ansiForeground(color))
 		}
 		b.WriteRune(r)
@@ -198,7 +218,7 @@ func ansiEscapeEnd(value string, start int) int {
 	}
 }
 
-func (m Model) glowColor(offset int) lipgloss.Color {
+func (m Model) glowColor(offset int) color.Color {
 	palette := m.glowPalette()
 	if len(palette) == 0 {
 		return lipgloss.Color("#FFFFFF")
@@ -210,7 +230,7 @@ func (m Model) glowColor(offset int) lipgloss.Color {
 	return palette[index]
 }
 
-func (m Model) glowPalette() []lipgloss.Color {
+func (m Model) glowPalette() []color.Color {
 	if m.cfg.Theme == "mono" {
 		return monoGlow
 	}
@@ -249,71 +269,118 @@ func isOuterBorderRune(r rune, x, y, width, height int) bool {
 	}
 }
 
-func perimeterColor(from, to lipgloss.Color, position, perimeter, offset int) lipgloss.Color {
+func knifeFadeColor(palette []color.Color, position, glimmerHead, ambientHead, basePhase, perimeter float64, offset int) color.Color {
 	if perimeter <= 0 {
-		return from
+		return samplePalette(palette, 0)
 	}
-	phase := float64(position)/float64(perimeter) + float64(offset)*0.11
-	t := 0.5 + 0.5*math.Sin(2*math.Pi*phase)
-	return fadeColor(from, to, t)
+
+	// The resting outline is itself animated: a broad pink fade circulates slowly
+	// around the entire perimeter underneath the quicker glimmer.
+	baseWave := 0.5 + 0.5*math.Sin(2*math.Pi*(position/perimeter-basePhase+float64(offset)*0.11))
+	baseT := 0.06 + 0.12*baseWave
+	color := samplePalette(palette, baseT)
+
+	ambientDistance := math.Abs(signedCircularDelta(position, ambientHead, perimeter))
+	if ambientDistance <= ambientFadeHalfWidth {
+		// This broad, low-contrast wave is the shifting color fade of the
+		// outline itself. It never reaches the pale glint reserved for the knife
+		// edge, so the two motions remain visually distinct.
+		strength := 1.0 - smootherStep(ambientDistance/ambientFadeHalfWidth)
+		ambientT := baseT + (0.58-baseT)*strength
+		color = samplePalette(palette, ambientT)
+	}
+
+	delta := signedCircularDelta(position, glimmerHead, perimeter)
+	switch {
+	case delta >= 0 && delta <= glimmerLeadLength:
+		// A short, bright leading bevel gives the glimmer a crisp knife edge.
+		t := 1.0 - 0.22*smootherStep(delta/glimmerLeadLength)
+		return samplePalette(palette, t)
+	case delta < 0 && -delta <= glimmerTrailLength:
+		// Behind the bevel, blend continuously through pink shades down into
+		// the resting rose. This is a color fade, not an opacity fade.
+		remaining := 1.0 - (-delta / glimmerTrailLength)
+		t := baseT + (1.0-baseT)*smootherStep(remaining)
+		return samplePalette(palette, t)
+	default:
+		return color
+	}
 }
 
-func circularDistance(a, b, period int) int {
+func samplePalette(palette []color.Color, t float64) color.Color {
+	if len(palette) == 0 {
+		return lipgloss.Color("#FFFFFF")
+	}
+	if len(palette) == 1 || t <= 0 {
+		return palette[0]
+	}
+	if t >= 1 {
+		return palette[len(palette)-1]
+	}
+
+	scaled := t * float64(len(palette)-1)
+	index := int(math.Floor(scaled))
+	local := scaled - float64(index)
+	return fadeColor(palette[index], palette[index+1], local)
+}
+
+func smootherStep(t float64) float64 {
+	if t <= 0 {
+		return 0
+	}
+	if t >= 1 {
+		return 1
+	}
+	return t * t * t * (t*(t*6-15) + 10)
+}
+
+func signedCircularDelta(position, head, period float64) float64 {
 	if period <= 0 {
 		return 0
 	}
-	distance := positiveMod(a-b, period)
-	if distance > period/2 {
-		distance = period - distance
-	}
-	return distance
+	delta := positiveModFloat(position-head+period/2, period) - period/2
+	return delta
 }
 
-func positiveMod(value, modulus int) int {
+func positiveModFloat(value, modulus float64) float64 {
 	if modulus <= 0 {
 		return 0
 	}
-	value %= modulus
+	value = math.Mod(value, modulus)
 	if value < 0 {
 		value += modulus
 	}
 	return value
 }
 
-func ansiForeground(color lipgloss.Color) string {
-	r, g, b := hexRGB(string(color))
+func ansiForeground(value color.Color) string {
+	r, g, b := colorRGB(value)
 	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 }
 
-func brighten(color lipgloss.Color, amount float64) lipgloss.Color {
-	if amount < 0 {
-		amount = 0
-	}
-	if amount > 1 {
-		amount = 1
-	}
-	r, g, b := hexRGB(string(color))
-	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X",
-		lerpByte(r, 255, amount),
-		lerpByte(g, 255, amount),
-		lerpByte(b, 255, amount),
-	))
-}
-
-func fadeColor(from, to lipgloss.Color, t float64) lipgloss.Color {
+func fadeColor(from, to color.Color, t float64) color.Color {
 	if t < 0 {
 		t = 0
 	}
 	if t > 1 {
 		t = 1
 	}
-	fr, fg, fb := hexRGB(string(from))
-	tr, tg, tb := hexRGB(string(to))
-	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X",
-		lerpByte(fr, tr, t),
-		lerpByte(fg, tg, t),
-		lerpByte(fb, tb, t),
-	))
+	fr, fg, fb := colorRGB(from)
+	tr, tg, tb := colorRGB(to)
+	return color.RGBA{
+		R: uint8(lerpByte(fr, tr, t)),
+		G: uint8(lerpByte(fg, tg, t)),
+		B: uint8(lerpByte(fb, tb, t)),
+		A: 0xFF,
+	}
+}
+
+func colorRGB(value color.Color) (int, int, int) {
+	if value == nil {
+		return 255, 255, 255
+	}
+	rgba := color.NRGBAModel.Convert(value).(color.NRGBA)
+	return int(rgba.R), int(rgba.G), int(rgba.B)
 }
 
 func hexRGB(hex string) (int, int, int) {

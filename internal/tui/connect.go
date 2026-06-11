@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
+	"charm.land/bubbles/v2/textinput"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 )

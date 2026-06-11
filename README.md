@@ -8,8 +8,10 @@ and returns dense, useful answers through a rose-lit Bubble Tea TUI.
 
 ## Features
 
-- Native Go TUI using Bubble Tea, Bubbles, Lip Gloss, and Glamour
+- Native Go TUI using Bubble Tea v2, Bubbles v2, Lip Gloss v2, and Glamour
 - Rose-pink dark theme (`#FF69B4` / `#DB2777`) plus monochrome mode
+- 60 FPS elapsed-time pink outline fade with a moving knife glimmer
+- Cell-diff rendering, synchronized terminal updates, and a native terminal cursor
 - OpenCode-style command palette and autocomplete
 - Guided `/connect` flow with masked API-key input
 - Native Ollama, OpenAI, and Anthropic providers
@@ -23,7 +25,7 @@ and returns dense, useful answers through a rose-lit Bubble Tea TUI.
 
 ## Requirements
 
-- Go 1.22.8 or newer
+- Go 1.25.0 or newer
 - A terminal with ANSI color support
 - One model provider:
   - Ollama running locally
@@ -53,7 +55,7 @@ From PowerShell or Command Prompt, arguments are passed through to Ephemera:
 
 1. checks that Go is available,
 2. runs `go mod tidy` when `go.sum` is missing,
-3. builds `bin\ephemera.exe`,
+3. builds a temporary executable in `bin\`,
 4. launches the compiled executable.
 
 ## Linux and macOS

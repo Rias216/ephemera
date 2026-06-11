@@ -7,15 +7,15 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/ansi"
 	glamourStyles "github.com/charmbracelet/glamour/styles"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
@@ -63,7 +63,11 @@ type Model struct {
 
 	width                int
 	height               int
-	frame                int
+	focused              bool
+	animationGeneration  uint64
+	animationLastTick    time.Time
+	animationElapsed     time.Duration
+	paletteHeight        int
 	ready                bool
 	busy                 bool
 	status               string
@@ -86,10 +90,10 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 	input.CharLimit = 32_768
 	input.ShowSuggestions = false
 	input.Focus()
-	input.TextStyle = lipgloss.NewStyle().Foreground(styles.Text).Background(styles.Panel)
-	input.PlaceholderStyle = lipgloss.NewStyle().Foreground(styles.Muted).Background(styles.Panel)
-	input.CompletionStyle = lipgloss.NewStyle().Foreground(styles.Secondary).Background(styles.Panel)
-	input.Cursor.Style = lipgloss.NewStyle().Foreground(styles.Primary).Background(styles.Panel)
+	input.SetStyles(inputComponentStyles(styles))
+	// Let Bubble Tea v2 render the terminal cursor independently from the text.
+	// Cursor blinking therefore no longer repaints a character in the input box.
+	input.SetVirtualCursor(false)
 
 	spin := spinner.New()
 	spin.Spinner = spinner.MiniDot
@@ -106,20 +110,25 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 		session = history.New(sessionName, cfg.Provider, cfg.Model(), cfg.Mode)
 	}
 
+	now := time.Now()
+
 	return Model{
-		cfg:             cfg,
-		store:           store,
-		session:         session,
-		styles:          styles,
-		input:           input,
-		spinner:         spin,
-		status:          "Enter a prompt, or /help for the map.",
-		completionIndex: 0,
+		cfg:                 cfg,
+		store:               store,
+		session:             session,
+		styles:              styles,
+		input:               input,
+		spinner:             spin,
+		status:              "Enter a prompt, or /help for the map.",
+		completionIndex:     0,
+		focused:             true,
+		animationGeneration: 1,
+		animationLastTick:   now,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, animationTick())
+	return animationTick(m.animationGeneration)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -127,8 +136,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case animationTickMsg:
-		m.frame++
-		return m, animationTick()
+		if !m.focused || msg.generation != m.animationGeneration {
+			return m, nil
+		}
+		if m.animationLastTick.IsZero() {
+			m.animationLastTick = msg.at
+		} else {
+			m.animationElapsed += maxDuration(0, msg.at.Sub(m.animationLastTick))
+			m.animationLastTick = msg.at
+		}
+		return m, animationTick(m.animationGeneration)
+
+	case tea.BlurMsg:
+		if m.focused {
+			m.focused = false
+			m.animationGeneration++
+			m.animationLastTick = time.Time{}
+			m.input.Blur()
+		}
+		return m, nil
+
+	case tea.FocusMsg:
+		if !m.focused {
+			m.focused = true
+			m.animationGeneration++
+			m.animationLastTick = time.Now()
+			focusCmd := m.input.Focus()
+			resume := []tea.Cmd{focusCmd, animationTick(m.animationGeneration)}
+			if m.busy {
+				resume = append(resume, m.spinner.Tick)
+			}
+			return m, tea.Batch(resume...)
+		}
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -160,13 +200,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if m.busy {
+		if m.busy && m.focused {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
 		}
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		key := msg.String()
 		switch key {
 		case "ctrl+c":
@@ -181,16 +221,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport(true)
 			return m, cmd
 		case "pgup":
-			m.viewport.ViewUp()
+			m.viewport.PageUp()
 			return m, nil
 		case "pgdown":
-			m.viewport.ViewDown()
+			m.viewport.PageDown()
 			return m, nil
 		case "ctrl+u":
-			m.viewport.HalfViewUp()
+			m.viewport.HalfPageUp()
 			return m, nil
 		case "ctrl+d":
-			m.viewport.HalfViewDown()
+			m.viewport.HalfPageDown()
 			return m, nil
 		}
 
@@ -288,60 +328,86 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m Model) View() string {
-	if !m.ready {
-		return "\n  Ephemera is arranging the dark…\n"
-	}
-	if m.width < 40 || m.height < 15 {
-		return m.styles.Error.Render("Ephemera needs a terminal at least 40×15.")
+func (m Model) View() tea.View {
+	content := "\n  Ephemera is arranging the dark…\n"
+	var cursor *tea.Cursor
+
+	if m.ready && m.width >= 40 && m.height >= 15 {
+		prompt := m.styles.Prompt.Render(m.promptLabel())
+		inputLine := lipgloss.JoinHorizontal(lipgloss.Top, prompt, m.input.View())
+		inputBox := m.renderPanel(m.styles.Input.Width(max(1, m.width-4)), 3, inputLine)
+
+		leftStatus := m.status
+		if m.busy {
+			leftStatus = m.spinner.View() + " " + m.status
+		}
+		rightStatus := "Ctrl+R retry · Ctrl+Y copy · Ctrl+C quit"
+		if m.connect != nil {
+			rightStatus = "Enter next · Esc cancel · Tab complete · ↑/↓ select"
+		} else if len(m.suggestions) > 0 {
+			rightStatus = "Enter accept · Tab complete · ↑/↓ select"
+		} else if m.width < 88 {
+			rightStatus = "Ctrl+C quit"
+		}
+		if lipgloss.Width(leftStatus)+lipgloss.Width(rightStatus)+3 > m.width {
+			rightStatus = ""
+		}
+		leftStatus = clip(leftStatus, max(8, m.width-lipgloss.Width(rightStatus)-3))
+		space := max(0, m.width-lipgloss.Width(leftStatus)-lipgloss.Width(rightStatus)-2)
+		status := m.styles.Status.Render(leftStatus + strings.Repeat(" ", space) + rightStatus)
+
+		header := m.renderHeader()
+		viewportPanel := m.renderPanel(
+			m.styles.Viewport.Width(max(1, m.width-4)).Height(m.viewport.Height()),
+			1,
+			m.viewport.View(),
+		)
+		blocks := []string{header, viewportPanel, inputBox}
+		if palette := m.renderSuggestions(); palette != "" {
+			blocks = append(blocks, palette)
+		}
+		blocks = append(blocks, status)
+
+		content = lipgloss.NewStyle().
+			Foreground(m.styles.Text).
+			Width(m.width).
+			Render(strings.Join(blocks, "\n"))
+
+		if m.focused && !m.busy {
+			cursor = m.input.Cursor()
+			if cursor != nil {
+				// Border + horizontal padding precede the prompt. The input panel
+				// starts immediately after the header and viewport panel.
+				cursor.X += 2 + lipgloss.Width(prompt)
+				cursor.Y += lipgloss.Height(header) + lipgloss.Height(viewportPanel) + 1
+			}
+		}
+	} else if m.ready {
+		content = m.styles.Error.Render("Ephemera needs a terminal at least 40×15.")
 	}
 
-	prompt := m.styles.Prompt.Render(m.promptLabel())
-	inputLine := lipgloss.JoinHorizontal(lipgloss.Top, prompt, m.input.View())
-	inputBox := m.renderPanel(m.styles.Input.Width(max(1, m.width-4)), 3, inputLine)
-
-	leftStatus := m.status
-	if m.busy {
-		leftStatus = m.spinner.View() + " " + m.status
-	}
-	rightStatus := "Ctrl+R retry · Ctrl+Y copy · Ctrl+C quit"
-	if m.connect != nil {
-		rightStatus = "Enter next · Esc cancel · Tab complete · ↑/↓ select"
-	} else if len(m.suggestions) > 0 {
-		rightStatus = "Enter accept · Tab complete · ↑/↓ select"
-	} else if m.width < 88 {
-		rightStatus = "Ctrl+C quit"
-	}
-	if lipgloss.Width(leftStatus)+lipgloss.Width(rightStatus)+3 > m.width {
-		rightStatus = ""
-	}
-	leftStatus = clip(leftStatus, max(8, m.width-lipgloss.Width(rightStatus)-3))
-	space := max(0, m.width-lipgloss.Width(leftStatus)-lipgloss.Width(rightStatus)-2)
-	status := m.styles.Status.Render(leftStatus + strings.Repeat(" ", space) + rightStatus)
-
-	blocks := []string{
-		m.renderHeader(),
-		m.renderPanel(m.styles.Viewport.Width(max(1, m.width-4)).Height(m.viewport.Height), 1, m.viewport.View()),
-		inputBox,
-	}
-	if palette := m.renderSuggestions(); palette != "" {
-		blocks = append(blocks, palette)
-	}
-	blocks = append(blocks, status)
-
-	return lipgloss.NewStyle().
-		Background(m.styles.Background).
-		Foreground(m.styles.Text).
-		Width(m.width).
-		Render(strings.Join(blocks, "\n"))
+	view := tea.NewView(content)
+	view.AltScreen = true
+	view.MouseMode = tea.MouseModeCellMotion
+	view.ReportFocus = true
+	view.BackgroundColor = m.styles.Background
+	view.ForegroundColor = m.styles.Text
+	view.WindowTitle = "Ephemera"
+	view.Cursor = cursor
+	return view
 }
 
 func (m Model) renderSuggestions() string {
-	items, start := m.suggestionWindow()
-	if len(items) == 0 {
+	if !m.suggestionPaletteActive() {
 		return ""
 	}
-	var lines []string
+	capacity := m.suggestionCapacity()
+	if capacity <= 0 {
+		return ""
+	}
+
+	items, start := m.suggestionWindow()
+	lines := make([]string, 0, capacity)
 	for i, item := range items {
 		marker := "  "
 		style := lipgloss.NewStyle().Foreground(m.styles.Muted).Background(m.styles.Panel)
@@ -355,6 +421,21 @@ func (m Model) renderSuggestions() string {
 		}
 		lines = append(lines, style.Render(clip(line, max(8, m.width-8))))
 	}
+	if len(lines) == 0 {
+		message := "  No matching commands."
+		if m.connect != nil {
+			message = "  No matching choices."
+		}
+		lines = append(lines, lipgloss.NewStyle().
+			Foreground(m.styles.Muted).
+			Background(m.styles.Panel).
+			Render(message))
+	}
+	blank := lipgloss.NewStyle().Background(m.styles.Panel).Render(" ")
+	for len(lines) < capacity {
+		lines = append(lines, blank)
+	}
+
 	rendered := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.glowColor(2)).
@@ -370,16 +451,17 @@ func (m *Model) resize() {
 	// Header+meta (2), viewport borders (2), input borders (2), status (1),
 	// separators (4), and the optional autocomplete palette leave the rest for
 	// scrollable content.
-	viewportHeight := max(3, m.height-12-m.suggestionHeight())
+	m.paletteHeight = m.suggestionHeight()
+	viewportHeight := max(3, m.height-12-m.paletteHeight)
 	viewportWidth := max(10, m.width-6)
-	if m.viewport.Width == 0 {
-		m.viewport = viewport.New(viewportWidth, viewportHeight)
+	if m.viewport.Width() == 0 {
+		m.viewport = viewport.New(viewport.WithWidth(viewportWidth), viewport.WithHeight(viewportHeight))
 		m.viewport.MouseWheelEnabled = true
 	} else {
-		m.viewport.Width = viewportWidth
-		m.viewport.Height = viewportHeight
+		m.viewport.SetWidth(viewportWidth)
+		m.viewport.SetHeight(viewportHeight)
 	}
-	m.input.Width = max(8, m.width-12)
+	m.input.SetWidth(max(8, m.width-12))
 }
 
 func (m *Model) refreshViewport(bottom bool) {
@@ -453,7 +535,7 @@ func (m Model) renderTranscript() string {
 }
 
 func (m Model) transcriptWidth() int {
-	return max(20, m.viewport.Width-2)
+	return max(20, m.viewport.Width()-2)
 }
 
 func (m Model) transcriptLine(style lipgloss.Style, text string) string {
@@ -477,11 +559,11 @@ func markdownStyle(styles theme.Styles) ansi.StyleConfig {
 		cfg.CodeBlock.Chroma = &chroma
 	}
 
-	text := string(styles.Text)
-	muted := string(styles.Muted)
-	primary := string(styles.Primary)
-	secondary := string(styles.Secondary)
-	panel := string(styles.Panel)
+	text := theme.Hex(styles.Text)
+	muted := theme.Hex(styles.Muted)
+	primary := theme.Hex(styles.Primary)
+	secondary := theme.Hex(styles.Secondary)
+	panel := theme.Hex(styles.Panel)
 	bold := true
 
 	setPrimitive := func(primitive *ansi.StylePrimitive, color string) {
@@ -758,11 +840,31 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 }
 
 func (m *Model) applyThemeToComponents() {
-	m.input.TextStyle = lipgloss.NewStyle().Foreground(m.styles.Text).Background(m.styles.Panel)
-	m.input.PlaceholderStyle = lipgloss.NewStyle().Foreground(m.styles.Muted).Background(m.styles.Panel)
-	m.input.CompletionStyle = lipgloss.NewStyle().Foreground(m.styles.Secondary).Background(m.styles.Panel)
-	m.input.Cursor.Style = lipgloss.NewStyle().Foreground(m.styles.Primary).Background(m.styles.Panel)
+	m.input.SetStyles(inputComponentStyles(m.styles))
 	m.spinner.Style = lipgloss.NewStyle().Foreground(m.styles.Primary)
+}
+
+func inputComponentStyles(styles theme.Styles) textinput.Styles {
+	state := textinput.StyleState{
+		Prompt:      lipgloss.NewStyle().Foreground(styles.Primary).Background(styles.Panel),
+		Text:        lipgloss.NewStyle().Foreground(styles.Text).Background(styles.Panel),
+		Placeholder: lipgloss.NewStyle().Foreground(styles.Muted).Background(styles.Panel),
+		Suggestion:  lipgloss.NewStyle().Foreground(styles.Secondary).Background(styles.Panel),
+	}
+	inputStyles := textinput.DefaultDarkStyles()
+	inputStyles.Focused = state
+	inputStyles.Blurred = state
+	inputStyles.Cursor.Color = styles.Primary
+	inputStyles.Cursor.Shape = tea.CursorBar
+	inputStyles.Cursor.Blink = true
+	return inputStyles
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (m Model) promptLabel() string {

@@ -1,7 +1,12 @@
 // Package theme centralizes all terminal colors and component styles.
 package theme
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"fmt"
+	"image/color"
+
+	"charm.land/lipgloss/v2"
+)
 
 const (
 	RosePrimary   = "#FF69B4"
@@ -10,12 +15,12 @@ const (
 
 // Styles is a complete visual palette for the application.
 type Styles struct {
-	Primary        lipgloss.Color
-	Secondary      lipgloss.Color
-	Text           lipgloss.Color
-	Muted          lipgloss.Color
-	Background     lipgloss.Color
-	Panel          lipgloss.Color
+	Primary        color.Color
+	Secondary      color.Color
+	Text           color.Color
+	Muted          color.Color
+	Background     color.Color
+	Panel          color.Color
 	Banner         lipgloss.Style
 	Subtitle       lipgloss.Style
 	Meta           lipgloss.Style
@@ -54,7 +59,17 @@ func New(name string) Styles {
 	)
 }
 
-func build(primary, secondary, text, muted, background, panel lipgloss.Color) Styles {
+// Hex converts a palette color to the canonical RGB form expected by Glamour
+// and by Ephemera's gradient interpolator.
+func Hex(value color.Color) string {
+	if value == nil {
+		return ""
+	}
+	rgba := color.NRGBAModel.Convert(value).(color.NRGBA)
+	return fmt.Sprintf("#%02X%02X%02X", rgba.R, rgba.G, rgba.B)
+}
+
+func build(primary, secondary, text, muted, background, panel color.Color) Styles {
 	return Styles{
 		Primary:    primary,
 		Secondary:  secondary,

@@ -41,6 +41,7 @@ var commandSpecs = []commandSpec{
 }
 
 func (m *Model) rebuildSuggestions() {
+	previousHeight := m.paletteHeight
 	previous := ""
 	if m.completionIndex >= 0 && m.completionIndex < len(m.suggestions) {
 		previous = m.suggestions[m.completionIndex].Value
@@ -61,7 +62,7 @@ func (m *Model) rebuildSuggestions() {
 			}
 		}
 	}
-	if m.ready {
+	if m.ready && m.suggestionHeight() != previousHeight {
 		m.resize()
 	}
 }
@@ -306,16 +307,25 @@ func (m *Model) acceptSuggestion() bool {
 	return true
 }
 
-func (m Model) suggestionWindow() ([]suggestion, int) {
-	if len(m.suggestions) == 0 {
-		return nil, 0
-	}
+func (m Model) suggestionPaletteActive() bool {
+	return m.connect != nil || strings.HasPrefix(m.input.Value(), "/")
+}
+
+func (m Model) suggestionCapacity() int {
 	limit := 7
 	if m.height > 0 {
 		// Keep at least three transcript rows. A palette row costs one line,
 		// while its border and extra block separator cost three more.
 		limit = minInt(limit, maxInt(0, m.height-18))
 	}
+	return limit
+}
+
+func (m Model) suggestionWindow() ([]suggestion, int) {
+	if len(m.suggestions) == 0 {
+		return nil, 0
+	}
+	limit := m.suggestionCapacity()
 	if limit <= 0 {
 		return nil, 0
 	}
@@ -333,11 +343,17 @@ func (m Model) suggestionWindow() ([]suggestion, int) {
 }
 
 func (m Model) suggestionHeight() int {
-	items, _ := m.suggestionWindow()
-	if len(items) == 0 {
+	if !m.suggestionPaletteActive() {
 		return 0
 	}
-	return len(items) + 3
+	capacity := m.suggestionCapacity()
+	if capacity <= 0 {
+		return 0
+	}
+	// Reserve a fixed palette height for the entire command entry. Narrowing
+	// from seven matches to one no longer grows the viewport by six rows and
+	// forces a large terminal repaint on every keystroke.
+	return capacity + 3
 }
 
 func minInt(a, b int) int {

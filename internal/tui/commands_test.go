@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
@@ -123,7 +125,7 @@ func TestMarkdownStyleUsesPanelBackgroundForInlineText(t *testing.T) {
 		"h1":        &got.H1.BackgroundColor,
 		"code":      &got.Code.BackgroundColor,
 	}
-	want := string(styles.Panel)
+	want := theme.Hex(styles.Panel)
 	for name, background := range panelBackgrounds {
 		if background == nil || *background == nil || **background != want {
 			t.Fatalf("%s markdown background = %v, want %q", name, backgroundValue(background), want)
@@ -139,7 +141,7 @@ func TestTranscriptRowsDoNotPaintInlineBackgroundBoxes(t *testing.T) {
 	cfg := config.Default()
 	styles := theme.New("rose")
 	m := Model{cfg: cfg, styles: styles}
-	m.viewport.Width = 60
+	m.viewport.SetWidth(60)
 	m.session = history.New("current", cfg.Provider, cfg.Model(), reasoning.ModeNormal)
 	m.session.Append("user", "Hello")
 
@@ -162,35 +164,164 @@ func TestStripANSIBackgroundsRemovesResetsAndBackgrounds(t *testing.T) {
 	}
 }
 
-func TestLocalizedGradientBorderAnimatesOnlyNearbyRows(t *testing.T) {
+func TestGradientBorderAnimatesWithoutChangingGeometry(t *testing.T) {
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
-	base := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Width(72).Height(24)
-
-	// Put the glimmer on a vertical edge, where an implementation that repaints
-	// the full outline would make every content row differ.
+	base := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Width(72).Height(48)
 	rendered := base.Render("content")
-	m.frame = (lipgloss.Width(rendered) + 2) / 2
+
+	m.animationElapsed = 1500 * time.Millisecond
 	first := m.localizedGradientBorder(rendered, 0)
-	m.frame++
+	m.animationElapsed = 1500*time.Millisecond + time.Second/AnimationFPS
 	second := m.localizedGradientBorder(rendered, 0)
 
-	firstLines := strings.Split(first, "\n")
-	secondLines := strings.Split(second, "\n")
-	if len(firstLines) != len(secondLines) {
-		t.Fatalf("frame heights differ: %d and %d", len(firstLines), len(secondLines))
+	if first == second {
+		t.Fatal("gradient outline did not animate")
 	}
+	if lipgloss.Width(first) != lipgloss.Width(second) || lipgloss.Height(first) != lipgloss.Height(second) {
+		t.Fatalf("animation changed panel geometry: %dx%d -> %dx%d",
+			lipgloss.Width(first), lipgloss.Height(first), lipgloss.Width(second), lipgloss.Height(second))
+	}
+}
 
-	changed := 0
-	for i := range firstLines {
-		if firstLines[i] != secondLines[i] {
-			changed++
+func TestKnifeFadeUsesSmoothPinkGradient(t *testing.T) {
+	palette := roseGlow
+	const perimeter = 100.0
+	head := 40.25
+
+	colors := make(map[string]bool)
+	for position := 28.0; position <= 42.0; position++ {
+		shade := knifeFadeColor(palette, position, head, 82, 0.2, perimeter, 0)
+		colors[theme.Hex(shade)] = true
+		r, g, b := colorRGB(shade)
+		if r < b || g > b {
+			t.Fatalf("knife fade emitted non-pink color %s", theme.Hex(shade))
 		}
 	}
-	if changed == 0 {
-		t.Fatal("localized glimmer did not animate")
+	if len(colors) < 8 {
+		t.Fatalf("knife fade produced only %d distinct shades; want a smooth gradient", len(colors))
 	}
-	if changed > 2*glimmerRadius+4 {
-		t.Fatalf("localized glimmer changed %d rows; want at most %d", changed, 2*glimmerRadius+4)
+}
+
+func TestKnifeFadeMovesFractionallyBetweenCells(t *testing.T) {
+	const position = 34.0
+	first := knifeFadeColor(roseGlow, position, 40.00, 82, 0.2, 100, 0)
+	second := knifeFadeColor(roseGlow, position, 40.25, 82, 0.2, 100, 0)
+	if first == second {
+		t.Fatalf("fractional movement did not change color: %s", theme.Hex(first))
+	}
+}
+
+func TestAmbientFadeShiftsRestingOutlineThroughPinkShades(t *testing.T) {
+	const position = 24.0
+	near := knifeFadeColor(roseGlow, position, 80, position, 0.2, 120, 0)
+	far := knifeFadeColor(roseGlow, position, 80, position+40, 0.2, 120, 0)
+	if near == far {
+		t.Fatalf("ambient outline fade did not alter the resting color: %s", theme.Hex(near))
+	}
+	r, g, b := colorRGB(near)
+	if r < b || g > b {
+		t.Fatalf("ambient outline fade emitted non-pink color %s", theme.Hex(near))
+	}
+}
+
+func TestBaseOutlineGradientShiftsIndependentlyOfGlimmer(t *testing.T) {
+	const position = 7.0
+	first := knifeFadeColor(roseGlow, position, 70, 50, 0.10, 120, 0)
+	second := knifeFadeColor(roseGlow, position, 70, 50, 0.35, 120, 0)
+	if theme.Hex(first) == theme.Hex(second) {
+		t.Fatalf("base gradient phase did not shift color: %s", theme.Hex(first))
+	}
+}
+
+func TestSuggestionPaletteHeightStaysStableWhileTypingCommand(t *testing.T) {
+	m := Model{cfg: config.Default(), styles: theme.New("rose"), height: 32, width: 100}
+	m.input = textInputForTest("/")
+	m.suggestions = m.commandSuggestions(m.input.Value())
+	firstHeight := m.suggestionHeight()
+	firstRenderedHeight := lipgloss.Height(m.renderSuggestions())
+
+	m.input.SetValue("/help")
+	m.suggestions = m.commandSuggestions(m.input.Value())
+	secondHeight := m.suggestionHeight()
+	secondRenderedHeight := lipgloss.Height(m.renderSuggestions())
+
+	if firstHeight == 0 || firstHeight != secondHeight {
+		t.Fatalf("suggestion layout heights = %d and %d, want one stable non-zero height", firstHeight, secondHeight)
+	}
+	if firstRenderedHeight != secondRenderedHeight {
+		t.Fatalf("rendered palette heights = %d and %d, want stable height", firstRenderedHeight, secondRenderedHeight)
+	}
+}
+
+func TestBlurStopsAnimationAndFocusStartsFreshGeneration(t *testing.T) {
+	m := Model{focused: true, animationGeneration: 7, input: textInputForTest("")}
+	updated, cmd := m.Update(tea.BlurMsg{})
+	blurred := updated.(Model)
+	if blurred.focused {
+		t.Fatal("blur did not pause the model")
+	}
+	if blurred.animationGeneration != 8 {
+		t.Fatalf("blur generation = %d, want 8", blurred.animationGeneration)
+	}
+	if cmd != nil {
+		t.Fatal("blur unexpectedly scheduled another animation frame")
+	}
+
+	updated, cmd = blurred.Update(tea.FocusMsg{})
+	focused := updated.(Model)
+	if !focused.focused {
+		t.Fatal("focus did not resume the model")
+	}
+	if focused.animationGeneration != 9 {
+		t.Fatalf("focus generation = %d, want 9", focused.animationGeneration)
+	}
+	if cmd == nil {
+		t.Fatal("focus did not schedule animation resumption")
+	}
+}
+
+func TestAnimationUsesElapsedTimeAndKeepsRunningWhileTyping(t *testing.T) {
+	start := time.Now()
+	m := Model{
+		focused:             true,
+		animationGeneration: 3,
+		animationLastTick:   start,
+		input:               textInputForTest(""),
+	}
+
+	updated, cmd := m.Update(animationTickMsg{generation: 3, at: start.Add(250 * time.Millisecond)})
+	got := updated.(Model)
+	if got.animationElapsed != 250*time.Millisecond {
+		t.Fatalf("animation elapsed = %s, want 250ms", got.animationElapsed)
+	}
+	if cmd == nil {
+		t.Fatal("animation tick did not schedule the next frame")
+	}
+
+	updated, _ = got.Update(tea.KeyPressMsg{})
+	typed := updated.(Model)
+	if typed.animationElapsed != got.animationElapsed {
+		t.Fatalf("typing changed animation time: %s -> %s", got.animationElapsed, typed.animationElapsed)
+	}
+}
+
+func TestViewDeclaresV2ScreenFeaturesAndRealCursor(t *testing.T) {
+	m := New(config.Default(), nil, "")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = updated.(Model)
+
+	view := m.View()
+	if !view.AltScreen || !view.ReportFocus {
+		t.Fatalf("view flags: AltScreen=%v ReportFocus=%v", view.AltScreen, view.ReportFocus)
+	}
+	if view.MouseMode != tea.MouseModeCellMotion {
+		t.Fatalf("mouse mode = %v, want cell motion", view.MouseMode)
+	}
+	if view.BackgroundColor == nil || view.ForegroundColor == nil {
+		t.Fatal("view did not declare terminal foreground/background colors")
+	}
+	if view.Cursor == nil {
+		t.Fatal("focused input did not expose a real terminal cursor")
 	}
 }
 
@@ -402,6 +533,8 @@ func TestDoctorCommandShowsProviderState(t *testing.T) {
 
 func textInputForTest(value string) textinput.Model {
 	input := textinput.New()
+	input.SetVirtualCursor(false)
+	input.Focus()
 	input.SetValue(value)
 	input.CursorEnd()
 	return input

@@ -3,16 +3,32 @@ package tui
 import (
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
-// animationTickMsg advances only the small glimmer segments painted over the
-// otherwise stable panel outlines. Keeping the cadence modest gives the
-// renderer time to coalesce writes on slower terminals.
-type animationTickMsg struct{}
+const (
+	// Bubble Tea v2 coalesces model updates into renderer frames and writes only
+	// changed cells. Sixty frames per second keeps the gradient fluid without
+	// making animation speed depend on how many ticks the terminal can display.
+	AnimationFPS = 60
 
-func animationTick() tea.Cmd {
-	return tea.Tick(140*time.Millisecond, func(time.Time) tea.Msg {
-		return animationTickMsg{}
+	glimmerCellsPerSecond = 18.0
+	ambientCellsPerSecond = 4.5
+	logoCellsPerSecond    = 8.5
+	baseGradientCyclesPS  = 0.055
+)
+
+type animationTickMsg struct {
+	generation uint64
+	at         time.Time
+}
+
+func animationTick(generation uint64) tea.Cmd {
+	return tea.Tick(time.Second/AnimationFPS, func(now time.Time) tea.Msg {
+		return animationTickMsg{generation: generation, at: now}
 	})
+}
+
+func (m Model) animationSeconds() float64 {
+	return m.animationElapsed.Seconds()
 }
