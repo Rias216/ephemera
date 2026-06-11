@@ -171,6 +171,17 @@ func TestGlowColorChangesWithFrame(t *testing.T) {
 	}
 }
 
+func TestGradientBorderVariesAlongLength(t *testing.T) {
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+
+	first := m.gradientColorAt(0, 0, 0)
+	second := m.gradientColorAt(5, 0, 0)
+
+	if first == second {
+		t.Fatalf("gradientColorAt did not vary along border length: %q", first)
+	}
+}
+
 func TestRenderLogoGlowPreservesBrandText(t *testing.T) {
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
 

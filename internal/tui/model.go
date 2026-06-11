@@ -298,7 +298,7 @@ func (m Model) View() string {
 
 	prompt := m.styles.Prompt.Render(m.promptLabel())
 	inputLine := lipgloss.JoinHorizontal(lipgloss.Top, prompt, m.input.View())
-	inputBox := m.panelStyle(m.styles.Input, 3).Width(max(1, m.width-4)).Render(inputLine)
+	inputBox := m.renderPanel(m.styles.Input.Width(max(1, m.width-4)), 3, inputLine)
 
 	leftStatus := m.status
 	if m.busy {
@@ -321,7 +321,7 @@ func (m Model) View() string {
 
 	blocks := []string{
 		m.renderHeader(),
-		m.panelStyle(m.styles.Viewport, 1).Width(max(1, m.width-4)).Height(m.viewport.Height).Render(m.viewport.View()),
+		m.renderPanel(m.styles.Viewport.Width(max(1, m.width-4)).Height(m.viewport.Height), 1, m.viewport.View()),
 		inputBox,
 	}
 	if palette := m.renderSuggestions(); palette != "" {
@@ -356,13 +356,14 @@ func (m Model) renderSuggestions() string {
 		}
 		lines = append(lines, style.Render(clip(line, max(8, m.width-8))))
 	}
-	return lipgloss.NewStyle().
+	rendered := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.styles.Primary).
+		BorderForeground(m.glowColor(2)).
 		Background(m.styles.Panel).
 		Padding(0, 1).
 		Width(max(1, m.width-4)).
 		Render(strings.Join(lines, "\n"))
+	return m.gradientBorder(rendered, 2)
 }
 
 func (m *Model) resize() {
