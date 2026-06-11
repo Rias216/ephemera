@@ -316,7 +316,7 @@ func (m Model) suggestionCapacity() int {
 	if m.height > 0 {
 		// Keep at least three transcript rows. A palette row costs one line,
 		// while its border and extra block separator cost three more.
-		limit = minInt(limit, maxInt(0, m.height-18))
+		limit = minInt(limit, maxInt(0, m.height-19))
 	}
 	return limit
 }
@@ -350,10 +350,9 @@ func (m Model) suggestionHeight() int {
 	if capacity <= 0 {
 		return 0
 	}
-	// Reserve a fixed palette height for the entire command entry. Narrowing
-	// from seven matches to one no longer grows the viewport by six rows and
-	// forces a large terminal repaint on every keystroke.
-	return capacity + 3
+	// Reserve a fixed palette height for the entire command entry. The extra
+	// row is the palette header; narrowing matches never changes geometry.
+	return capacity + 4
 }
 
 func minInt(a, b int) int {

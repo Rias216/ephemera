@@ -11,64 +11,90 @@ import (
 )
 
 var roseGlow = []color.Color{
-	lipgloss.Color("#8F164D"), // deep rose
-	lipgloss.Color("#C21866"), // rich pink
-	lipgloss.Color("#F02D8A"), // hot pink
-	lipgloss.Color("#FF77B7"), // bright pink
-	lipgloss.Color("#FFD1E6"), // pale pink glint
+	lipgloss.Color("#72113D"), // wine rose
+	lipgloss.Color("#9E1555"), // deep rose
+	lipgloss.Color("#C51B69"), // rich pink
+	lipgloss.Color("#E82783"), // vivid pink
+	lipgloss.Color("#FF4FA3"), // hot pink
+	lipgloss.Color("#FF8FC8"), // soft highlight
+	lipgloss.Color("#FFE1F0"), // pale knife glint
 }
 
 var monoGlow = []color.Color{
-	lipgloss.Color("#4B5563"),
-	lipgloss.Color("#9CA3AF"),
+	lipgloss.Color("#3F4652"),
+	lipgloss.Color("#697180"),
+	lipgloss.Color("#AAB0BA"),
 	lipgloss.Color("#F9FAFB"),
 }
 
 const (
-	glimmerTrailLength   = 15.0
-	glimmerLeadLength    = 2.25
-	ambientFadeHalfWidth = 11.0
+	glimmerTrailLength   = 19.0
+	glimmerLeadLength    = 2.8
+	ambientFadeHalfWidth = 17.0
 )
 
 func (m Model) renderHeader() string {
-	banner := m.renderLogoGlow() + "  " +
-		m.styles.Subtitle.Render("what vanishes may still illuminate")
-	if m.width >= 72 {
-		meter := m.styles.Status.Render(m.renderContextMeter(m.currentContextStats(), 10))
-		if lipgloss.Width(banner)+lipgloss.Width(meter)+1 <= m.width {
-			gap := max(1, m.width-lipgloss.Width(banner)-lipgloss.Width(meter)-1)
-			banner += strings.Repeat(" ", gap) + meter
-		}
+	left := m.renderLogoGlow()
+	if m.width >= 58 {
+		left += "  " + m.styles.Subtitle.Render("what vanishes may still illuminate")
 	}
-	return banner + "\n" + m.renderMetaRail()
+
+	right := m.renderActivityBadge()
+	if m.width >= 78 {
+		right += "  " + m.renderContextMeter(m.currentContextStats(), 12)
+	}
+
+	line := left
+	if right != "" && lipgloss.Width(left)+lipgloss.Width(right)+2 <= m.width {
+		line += strings.Repeat(" ", max(2, m.width-lipgloss.Width(left)-lipgloss.Width(right))) + right
+	}
+
+	return line + "\n" + m.renderMetaRail()
+}
+
+func (m Model) renderActivityBadge() string {
+	label := "ready"
+	base := m.styles.Muted
+	if !m.focused {
+		label = "paused"
+		base = m.styles.Faint
+	} else if m.busy {
+		label = "thinking"
+		base = m.styles.Primary
+	}
+
+	if m.busy {
+		return m.spinner.View() + " " + lipgloss.NewStyle().Foreground(m.styles.Muted).Render(label)
+	}
+	pulse := 0.34 + 0.66*(0.5+0.5*math.Sin(m.animationSeconds()*math.Pi*2.0*1.25))
+	dot := fadeColor(m.styles.Faint, base, pulse)
+	return lipgloss.NewStyle().Foreground(dot).Render("●") + " " +
+		lipgloss.NewStyle().Foreground(m.styles.Muted).Render(label)
 }
 
 func (m Model) renderMetaRail() string {
 	stats := m.currentContextStats()
 	items := []string{
-		m.renderChip("provider", m.providerName()),
+		m.renderChip("route", m.providerName()),
 		m.renderChip("mode", string(m.cfg.Mode)),
-		m.renderChip("ctx", fmt.Sprintf("%s/%s", formatTokenCount(stats.EstimatedTokens), formatTokenCount(stats.Budget))),
 	}
-	if m.width >= 76 {
-		items = append(items, m.renderChip("model", clip(m.cfg.Model(), 28)))
+	if m.width >= 67 {
+		items = append(items, m.renderChip("model", clip(m.cfg.Model(), 26)))
 	}
-	if m.width >= 96 {
-		items = append(items, m.renderChip("session", clip(m.session.Name, 24)))
+	if m.width >= 92 {
+		items = append(items, m.renderChip("session", clip(m.session.Name, 22)))
 	}
-	if stats.DroppedMessages > 0 && m.width >= 64 {
-		items = append(items, m.styles.Status.Render(fmt.Sprintf("trimmed %d", stats.DroppedMessages)))
+	if stats.DroppedMessages > 0 && m.width >= 60 {
+		items = append(items, lipgloss.NewStyle().Foreground(m.styles.Warning).Render(fmt.Sprintf("trimmed %d", stats.DroppedMessages)))
 	}
-	return strings.Join(items, " ")
+	return strings.Join(items, "  ")
 }
 
 func (m Model) renderChip(label, value string) string {
-	text := label + " " + value
-	return lipgloss.NewStyle().
-		Foreground(m.styles.Text).
-		Background(m.styles.Panel).
-		Padding(0, 1).
-		Render(text)
+	labelStyle := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.PanelRaised)
+	valueStyle := lipgloss.NewStyle().Bold(true).Foreground(m.styles.Text).Background(m.styles.PanelRaised)
+	content := labelStyle.Render(strings.ToUpper(label)) + " " + valueStyle.Render(value)
+	return lipgloss.NewStyle().Background(m.styles.PanelRaised).Padding(0, 1).Render(content)
 }
 
 func (m Model) renderContextMeter(stats contextStats, cells int) string {
@@ -79,15 +105,28 @@ func (m Model) renderContextMeter(stats contextStats, cells int) string {
 	if stats.Budget > 0 {
 		ratio = float64(stats.EstimatedTokens) / float64(stats.Budget)
 	}
-	if ratio > 1 {
-		ratio = 1
-	}
+	ratio = math.Max(0, math.Min(1, ratio))
 	filled := int(ratio*float64(cells) + 0.5)
-	if filled > cells {
-		filled = cells
+	accent := m.styles.Primary
+	if ratio >= 0.84 {
+		accent = m.styles.Warning
 	}
-	bar := strings.Repeat("#", filled) + strings.Repeat("-", cells-filled)
-	return fmt.Sprintf("ctx [%s] %s/%s", bar, formatTokenCount(stats.EstimatedTokens), formatTokenCount(stats.Budget))
+
+	var bar strings.Builder
+	glint := int(positiveModFloat(m.animationSeconds()*contextGlintCellsPerSecond, float64(max(1, cells))))
+	for i := 0; i < cells; i++ {
+		if i < filled {
+			c := accent
+			if i == glint {
+				c = m.styles.AccentBright
+			}
+			bar.WriteString(lipgloss.NewStyle().Foreground(c).Render("━"))
+		} else {
+			bar.WriteString(lipgloss.NewStyle().Foreground(m.styles.Faint).Render("─"))
+		}
+	}
+	return lipgloss.NewStyle().Foreground(m.styles.Muted).Render("ctx ") + bar.String() +
+		lipgloss.NewStyle().Foreground(m.styles.Muted).Render(" "+formatTokenCount(stats.EstimatedTokens)+"/"+formatTokenCount(stats.Budget))
 }
 
 func (m Model) renderLogoGlow() string {
@@ -99,20 +138,22 @@ func (m Model) renderLogoGlow() string {
 
 	runes := []rune(logo)
 	period := float64(len(runes))
-	head := positiveModFloat(m.animationSeconds()*logoCellsPerSecond, period)
+	head := positiveModFloat(organicMotion(m.animationSeconds(), logoCellsPerSecond, 0.62, 0.9), period)
+	breath := 0.5 + 0.5*math.Sin(m.animationSeconds()*math.Pi*2*0.18)
 	var b strings.Builder
 	for i, r := range runes {
+		baseT := 0.18 + 0.16*(0.5+0.5*math.Sin(float64(i)*0.72-m.animationSeconds()*0.48))
+		baseT += breath * 0.05
 		delta := signedCircularDelta(float64(i), head, period)
-		color := samplePalette(palette, 0.12)
+		c := samplePalette(palette, baseT)
 		switch {
-		case delta >= 0 && delta <= 0.9:
-			t := 1.0 - 0.18*smootherStep(delta/0.9)
-			color = samplePalette(palette, t)
-		case delta < 0 && -delta <= 3.8:
-			t := 1.0 - (-delta / 3.8)
-			color = samplePalette(palette, smootherStep(t))
+		case delta >= 0 && delta <= 1.05:
+			c = samplePalette(palette, 1.0-0.12*smootherStep(delta/1.05))
+		case delta < 0 && -delta <= 4.6:
+			remaining := 1.0 - (-delta / 4.6)
+			c = samplePalette(palette, baseT+(0.92-baseT)*smootherStep(remaining))
 		}
-		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(color).Render(string(r)))
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(c).Render(string(r)))
 	}
 	return b.String()
 }
@@ -128,8 +169,8 @@ func (m Model) renderPanel(base lipgloss.Style, offset int, content string) stri
 
 // localizedGradientBorder gives the complete outline a slowly shifting pink
 // gradient, then layers a broad rose wave and a sharp pale-pink knife glimmer on
-// top. Bubble Tea v2 diffs terminal cells and uses synchronized updates where
-// supported, so this richer animation no longer depends on limiting changed rows.
+// top. The motion is elapsed-time based, so dropped renderer frames never alter
+// animation speed.
 func (m Model) localizedGradientBorder(rendered string, offset int) string {
 	width := lipgloss.Width(rendered)
 	height := lipgloss.Height(rendered)
@@ -146,11 +187,11 @@ func (m Model) localizedGradientBorder(rendered string, offset int) string {
 	period := float64(perimeter)
 	seconds := m.animationSeconds()
 	glimmerHead := positiveModFloat(
-		seconds*glimmerCellsPerSecond+float64(offset)*period/7.0,
+		organicMotion(seconds, glimmerCellsPerSecond, 1.35, 0.78)+float64(offset)*period/7.0,
 		period,
 	)
 	ambientHead := positiveModFloat(
-		seconds*ambientCellsPerSecond+float64(offset)*period/5.0+period*0.31,
+		organicMotion(seconds, ambientCellsPerSecond, 1.8, 0.31)+float64(offset)*period/5.0+period*0.31,
 		period,
 	)
 	basePhase := positiveModFloat(seconds*baseGradientCyclesPS+float64(offset)*0.071, 1)
@@ -177,14 +218,33 @@ func (m Model) localizedGradientBorder(rendered string, offset int) string {
 
 		if isOuterBorderRune(r, x, y, width, height) {
 			position := float64(borderPosition(x, y, width, height))
-			color := knifeFadeColor(palette, position, glimmerHead, ambientHead, basePhase, period, offset)
-			b.WriteString(ansiForeground(color))
+			c := knifeFadeColor(palette, position, glimmerHead, ambientHead, basePhase, period, offset)
+			b.WriteString(ansiForeground(c))
 		}
 		b.WriteRune(r)
 		x += lipgloss.Width(string(r))
 		i += size
 	}
 	return b.String()
+}
+
+func (m Model) animatedPromptGlyph() string {
+	palette := m.glowPalette()
+	pulse := 0.52 + 0.48*(0.5+0.5*math.Sin(m.animationSeconds()*math.Pi*2*0.82))
+	if m.busy {
+		pulse = 0.72 + 0.28*(0.5+0.5*math.Sin(m.animationSeconds()*math.Pi*2*1.8))
+	}
+	return lipgloss.NewStyle().Bold(true).Foreground(samplePalette(palette, pulse)).Background(m.styles.PanelRaised).Render("◆")
+}
+
+func (m Model) selectionGlow() color.Color {
+	palette := m.glowPalette()
+	pulse := 0.55 + 0.35*(0.5+0.5*math.Sin(m.animationSeconds()*math.Pi*2*1.15))
+	return samplePalette(palette, pulse)
+}
+
+func organicMotion(seconds, cellsPerSecond, wobbleCells, wobbleHz float64) float64 {
+	return seconds*cellsPerSecond + math.Sin(seconds*math.Pi*2*wobbleHz)*wobbleCells
 }
 
 func ansiEscapeEnd(value string, start int) int {
@@ -196,14 +256,14 @@ func ansiEscapeEnd(value string, start int) int {
 	}
 
 	switch value[start+1] {
-	case '[': // Control Sequence Introducer.
+	case '[':
 		for i := start + 2; i < len(value); i++ {
 			if value[i] >= '@' && value[i] <= '~' {
 				return i + 1
 			}
 		}
 		return len(value)
-	case ']': // Operating System Command, terminated by BEL or ST.
+	case ']':
 		for i := start + 2; i < len(value); i++ {
 			if value[i] == '\a' {
 				return i + 1
@@ -274,36 +334,31 @@ func knifeFadeColor(palette []color.Color, position, glimmerHead, ambientHead, b
 		return samplePalette(palette, 0)
 	}
 
-	// The resting outline is itself animated: a broad pink fade circulates slowly
-	// around the entire perimeter underneath the quicker glimmer.
-	baseWave := 0.5 + 0.5*math.Sin(2*math.Pi*(position/perimeter-basePhase+float64(offset)*0.11))
-	baseT := 0.06 + 0.12*baseWave
-	color := samplePalette(palette, baseT)
+	// Two slow waves create the ambient color drift. Their slightly different
+	// frequencies keep the outline from feeling like a simple rotating stripe.
+	waveA := 0.5 + 0.5*math.Sin(2*math.Pi*(position/perimeter-basePhase+float64(offset)*0.11))
+	waveB := 0.5 + 0.5*math.Sin(4*math.Pi*(position/perimeter+basePhase*0.43+float64(offset)*0.037))
+	baseT := 0.08 + 0.18*(waveA*0.72+waveB*0.28)
+	c := samplePalette(palette, baseT)
 
 	ambientDistance := math.Abs(signedCircularDelta(position, ambientHead, perimeter))
 	if ambientDistance <= ambientFadeHalfWidth {
-		// This broad, low-contrast wave is the shifting color fade of the
-		// outline itself. It never reaches the pale glint reserved for the knife
-		// edge, so the two motions remain visually distinct.
 		strength := 1.0 - smootherStep(ambientDistance/ambientFadeHalfWidth)
-		ambientT := baseT + (0.58-baseT)*strength
-		color = samplePalette(palette, ambientT)
+		ambientT := baseT + (0.64-baseT)*strength
+		c = samplePalette(palette, ambientT)
 	}
 
 	delta := signedCircularDelta(position, glimmerHead, perimeter)
 	switch {
 	case delta >= 0 && delta <= glimmerLeadLength:
-		// A short, bright leading bevel gives the glimmer a crisp knife edge.
-		t := 1.0 - 0.22*smootherStep(delta/glimmerLeadLength)
+		t := 1.0 - 0.16*smootherStep(delta/glimmerLeadLength)
 		return samplePalette(palette, t)
 	case delta < 0 && -delta <= glimmerTrailLength:
-		// Behind the bevel, blend continuously through pink shades down into
-		// the resting rose. This is a color fade, not an opacity fade.
 		remaining := 1.0 - (-delta / glimmerTrailLength)
 		t := baseT + (1.0-baseT)*smootherStep(remaining)
 		return samplePalette(palette, t)
 	default:
-		return color
+		return c
 	}
 }
 
@@ -338,8 +393,7 @@ func signedCircularDelta(position, head, period float64) float64 {
 	if period <= 0 {
 		return 0
 	}
-	delta := positiveModFloat(position-head+period/2, period) - period/2
-	return delta
+	return positiveModFloat(position-head+period/2, period) - period/2
 }
 
 func positiveModFloat(value, modulus float64) float64 {
@@ -359,12 +413,7 @@ func ansiForeground(value color.Color) string {
 }
 
 func fadeColor(from, to color.Color, t float64) color.Color {
-	if t < 0 {
-		t = 0
-	}
-	if t > 1 {
-		t = 1
-	}
+	t = math.Max(0, math.Min(1, t))
 	fr, fg, fb := colorRGB(from)
 	tr, tg, tb := colorRGB(to)
 	return color.RGBA{
@@ -408,6 +457,79 @@ func hexPair(pair string) int {
 
 func lerpByte(from, to int, t float64) int {
 	return from + int(float64(to-from)*t+0.5)
+}
+
+func (m Model) renderComposerMeta() string {
+	value := m.input.Value()
+	label := string(m.cfg.Mode)
+	if m.connect != nil {
+		label = "connect"
+	} else if strings.HasPrefix(value, "/") {
+		label = "command"
+	}
+	count := utf8.RuneCountInString(value)
+	text := fmt.Sprintf("%s  ·  %d", label, count)
+	return lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.PanelRaised).Render(text)
+}
+
+func (m Model) renderFooter() string {
+	stateColor := m.styles.Muted
+	stateGlyph := "◇"
+	if m.busy {
+		stateColor = m.selectionGlow()
+		stateGlyph = "◆"
+	} else if !m.focused {
+		stateColor = m.styles.Faint
+		stateGlyph = "○"
+	}
+
+	leftRaw := stateGlyph + " " + m.status
+	styleLeft := func(raw string) string {
+		if raw == "" {
+			return ""
+		}
+		prefix := []rune(raw)
+		glyph := string(prefix[:1])
+		rest := ""
+		if len(prefix) > 1 {
+			rest = string(prefix[1:])
+		}
+		return lipgloss.NewStyle().Foreground(stateColor).Render(glyph) +
+			lipgloss.NewStyle().Foreground(m.styles.Muted).Render(rest)
+	}
+
+	middleRaw := ""
+	if m.ready && !m.viewport.AtBottom() {
+		middleRaw = fmt.Sprintf("scroll %3.0f%%", m.viewport.ScrollPercent()*100)
+	}
+
+	rightRaw := "Ctrl+R retry  Ctrl+Y copy  Ctrl+C quit"
+	if m.connect != nil {
+		rightRaw = "Enter next  Esc cancel  Tab fill  ↑↓ select"
+	} else if len(m.suggestions) > 0 {
+		rightRaw = "Enter run  Tab fill  ↑↓ select"
+	} else if m.width < 90 {
+		rightRaw = "Ctrl+C quit"
+	}
+
+	available := max(8, m.width)
+	if middleRaw != "" && len([]rune(leftRaw))+len([]rune(middleRaw))+len([]rune(rightRaw))+6 <= available {
+		left := styleLeft(leftRaw)
+		middle := lipgloss.NewStyle().Foreground(m.styles.Faint).Render(middleRaw)
+		right := lipgloss.NewStyle().Foreground(m.styles.Faint).Render(rightRaw)
+		gapA := max(1, (available-lipgloss.Width(left)-lipgloss.Width(middle)-lipgloss.Width(right))/2)
+		gapB := max(1, available-lipgloss.Width(left)-lipgloss.Width(middle)-lipgloss.Width(right)-gapA)
+		return left + strings.Repeat(" ", gapA) + middle + strings.Repeat(" ", gapB) + right
+	}
+
+	if len([]rune(leftRaw))+len([]rune(rightRaw))+3 > available {
+		rightRaw = ""
+	}
+	leftRaw = clip(leftRaw, max(8, available-len([]rune(rightRaw))-2))
+	left := styleLeft(leftRaw)
+	right := lipgloss.NewStyle().Foreground(m.styles.Faint).Render(rightRaw)
+	gap := max(0, available-lipgloss.Width(left)-lipgloss.Width(right))
+	return left + strings.Repeat(" ", gap) + right
 }
 
 func (m Model) providerName() string {

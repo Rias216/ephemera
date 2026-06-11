@@ -7,15 +7,16 @@ import (
 )
 
 const (
-	// Bubble Tea v2 coalesces model updates into renderer frames and writes only
-	// changed cells. Sixty frames per second keeps the gradient fluid without
-	// making animation speed depend on how many ticks the terminal can display.
+	// Bubble Tea v2 coalesces updates into renderer frames and writes only cells
+	// that changed. 60 FPS matches the refresh cadence of most terminals while
+	// elapsed-time motion keeps the animation correct when frames are skipped.
 	AnimationFPS = 60
 
-	glimmerCellsPerSecond = 18.0
-	ambientCellsPerSecond = 4.5
-	logoCellsPerSecond    = 8.5
-	baseGradientCyclesPS  = 0.055
+	glimmerCellsPerSecond      = 22.0
+	ambientCellsPerSecond      = 5.2
+	logoCellsPerSecond         = 9.5
+	contextGlintCellsPerSecond = 4.0
+	baseGradientCyclesPS       = 0.045
 )
 
 type animationTickMsg struct {

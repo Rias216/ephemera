@@ -333,28 +333,14 @@ func (m Model) View() tea.View {
 	var cursor *tea.Cursor
 
 	if m.ready && m.width >= 40 && m.height >= 15 {
-		prompt := m.styles.Prompt.Render(m.promptLabel())
-		inputLine := lipgloss.JoinHorizontal(lipgloss.Top, prompt, m.input.View())
+		prompt := m.animatedPromptGlyph() + " " + m.styles.Prompt.Render(m.promptLabel())
+		inputValue := m.input.View()
+		composerMeta := m.renderComposerMeta()
+		inputLine := prompt + inputValue
+		if lipgloss.Width(inputLine)+lipgloss.Width(composerMeta)+2 <= m.width-8 {
+			inputLine += strings.Repeat(" ", max(1, m.width-8-lipgloss.Width(inputLine)-lipgloss.Width(composerMeta))) + composerMeta
+		}
 		inputBox := m.renderPanel(m.styles.Input.Width(max(1, m.width-4)), 3, inputLine)
-
-		leftStatus := m.status
-		if m.busy {
-			leftStatus = m.spinner.View() + " " + m.status
-		}
-		rightStatus := "Ctrl+R retry · Ctrl+Y copy · Ctrl+C quit"
-		if m.connect != nil {
-			rightStatus = "Enter next · Esc cancel · Tab complete · ↑/↓ select"
-		} else if len(m.suggestions) > 0 {
-			rightStatus = "Enter accept · Tab complete · ↑/↓ select"
-		} else if m.width < 88 {
-			rightStatus = "Ctrl+C quit"
-		}
-		if lipgloss.Width(leftStatus)+lipgloss.Width(rightStatus)+3 > m.width {
-			rightStatus = ""
-		}
-		leftStatus = clip(leftStatus, max(8, m.width-lipgloss.Width(rightStatus)-3))
-		space := max(0, m.width-lipgloss.Width(leftStatus)-lipgloss.Width(rightStatus)-2)
-		status := m.styles.Status.Render(leftStatus + strings.Repeat(" ", space) + rightStatus)
 
 		header := m.renderHeader()
 		viewportPanel := m.renderPanel(
@@ -366,7 +352,7 @@ func (m Model) View() tea.View {
 		if palette := m.renderSuggestions(); palette != "" {
 			blocks = append(blocks, palette)
 		}
-		blocks = append(blocks, status)
+		blocks = append(blocks, m.renderFooter())
 
 		content = lipgloss.NewStyle().
 			Foreground(m.styles.Text).
@@ -406,33 +392,54 @@ func (m Model) renderSuggestions() string {
 		return ""
 	}
 
+	innerWidth := max(8, m.width-8)
+	title := "COMMAND PALETTE"
+	if m.connect != nil {
+		title = "CONNECTION FLOW"
+	}
+	counter := "0 / 0"
+	if len(m.suggestions) > 0 {
+		counter = fmt.Sprintf("%d / %d", minInt(m.completionIndex+1, len(m.suggestions)), len(m.suggestions))
+	}
+	headerLeft := lipgloss.NewStyle().Bold(true).Foreground(m.styles.AccentSoft).Background(m.styles.Panel).Render(title)
+	headerRight := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.Panel).Render(counter)
+	headerGap := max(1, innerWidth-lipgloss.Width(headerLeft)-lipgloss.Width(headerRight))
+	lines := []string{headerLeft + strings.Repeat(" ", headerGap) + headerRight}
+
 	items, start := m.suggestionWindow()
-	lines := make([]string, 0, capacity)
 	for i, item := range items {
+		selected := start+i == m.completionIndex
+		background := m.styles.Panel
+		markerColor := m.styles.Faint
+		labelColor := m.styles.Text
 		marker := "  "
-		style := lipgloss.NewStyle().Foreground(m.styles.Muted).Background(m.styles.Panel)
-		if start+i == m.completionIndex {
-			marker = "› "
-			style = lipgloss.NewStyle().Bold(true).Foreground(m.styles.Primary).Background(m.styles.Panel)
+		if selected {
+			background = m.styles.PanelRaised
+			markerColor = m.selectionGlow()
+			labelColor = m.styles.AccentBright
+			marker = "◆ "
 		}
-		line := marker + item.Label
+
+		prefix := fmt.Sprintf("%02d ", start+i+1)
+		body := prefix + item.Label
 		if item.Description != "" && m.width >= 68 {
-			line += "  " + item.Description
+			body += "  ·  " + item.Description
 		}
-		lines = append(lines, style.Render(clip(line, max(8, m.width-8))))
+		body = clip(body, max(1, innerWidth-2))
+		markerView := lipgloss.NewStyle().Foreground(markerColor).Background(background).Render(marker)
+		bodyView := lipgloss.NewStyle().Foreground(labelColor).Background(background).Width(max(1, innerWidth-2)).Render(body)
+		lines = append(lines, markerView+bodyView)
 	}
-	if len(lines) == 0 {
-		message := "  No matching commands."
+
+	if len(items) == 0 {
+		message := "No matching commands"
 		if m.connect != nil {
-			message = "  No matching choices."
+			message = "No matching choices"
 		}
-		lines = append(lines, lipgloss.NewStyle().
-			Foreground(m.styles.Muted).
-			Background(m.styles.Panel).
-			Render(message))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.Muted).Background(m.styles.Panel).Width(innerWidth).Render("  "+message))
 	}
-	blank := lipgloss.NewStyle().Background(m.styles.Panel).Render(" ")
-	for len(lines) < capacity {
+	blank := lipgloss.NewStyle().Background(m.styles.Panel).Render(strings.Repeat(" ", innerWidth))
+	for len(lines) < capacity+1 {
 		lines = append(lines, blank)
 	}
 
@@ -461,7 +468,11 @@ func (m *Model) resize() {
 		m.viewport.SetWidth(viewportWidth)
 		m.viewport.SetHeight(viewportHeight)
 	}
-	m.input.SetWidth(max(8, m.width-12))
+	// Reserve stable space for the animated prompt and composer metadata so the
+	// input never pushes the right edge of its panel while typing.
+	composerReserve := 18
+	promptReserve := lipgloss.Width(m.promptLabel()) + 4
+	m.input.SetWidth(max(8, m.width-8-promptReserve-composerReserve))
 }
 
 func (m *Model) refreshViewport(bottom bool) {
@@ -488,11 +499,16 @@ func (m Model) renderTranscript() string {
 	if len(m.session.Messages) == 0 {
 		out.WriteString(m.transcriptLine(m.styles.NoticeLabel, "signal"))
 		out.WriteString("\n")
-		welcome, _ := renderer.Render(fmt.Sprintf(`### Ready
+		welcome, _ := renderer.Render(fmt.Sprintf(`### The signal is open
 
-- Ask normally, or type **/** for the command palette.
-- Start fast with **/connect**, **/models**, **/mode concise**, or **/doctor**.
-- Current route: **%s** · **%s** · context **%s** tokens.`,
+Ask naturally, or press **/** to reveal the command palette.
+
+- **/connect** — configure a provider
+- **/models** — switch intelligence
+- **/mode concise** — change response character
+- **/doctor** — inspect the active route
+
+Current route: **%s** · **%s** · context **%s** tokens.`,
 			m.providerName(),
 			m.cfg.Model(),
 			formatTokenCount(m.cfg.ContextTokens),
@@ -539,7 +555,20 @@ func (m Model) transcriptWidth() int {
 }
 
 func (m Model) transcriptLine(style lipgloss.Style, text string) string {
-	return style.Background(m.styles.Panel).Width(m.transcriptWidth()).Render(text)
+	glyph := "◇"
+	label := strings.ToUpper(text)
+	switch text {
+	case "you":
+		glyph = "◆"
+	case "ephemera":
+		glyph = "✦"
+	case "signal":
+		glyph = "·"
+	}
+	prefix := style.Background(m.styles.Panel).Render(glyph + " " + label)
+	ruleWidth := max(0, m.transcriptWidth()-lipgloss.Width(prefix)-1)
+	rule := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.Panel).Render(strings.Repeat("─", ruleWidth))
+	return prefix + " " + rule
 }
 
 func (m Model) transcriptBlock(text string) string {
@@ -547,7 +576,11 @@ func (m Model) transcriptBlock(text string) string {
 	style := lipgloss.NewStyle().Foreground(m.styles.Text).Background(m.styles.Panel).Width(width)
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		lines[i] = style.Render(stripANSIBackgrounds(line))
+		clean := stripANSIBackgrounds(line)
+		if strings.TrimSpace(clean) != "" {
+			clean = "  " + clean
+		}
+		lines[i] = style.Render(clean)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -846,10 +879,10 @@ func (m *Model) applyThemeToComponents() {
 
 func inputComponentStyles(styles theme.Styles) textinput.Styles {
 	state := textinput.StyleState{
-		Prompt:      lipgloss.NewStyle().Foreground(styles.Primary).Background(styles.Panel),
-		Text:        lipgloss.NewStyle().Foreground(styles.Text).Background(styles.Panel),
-		Placeholder: lipgloss.NewStyle().Foreground(styles.Muted).Background(styles.Panel),
-		Suggestion:  lipgloss.NewStyle().Foreground(styles.Secondary).Background(styles.Panel),
+		Prompt:      lipgloss.NewStyle().Foreground(styles.Primary).Background(styles.PanelRaised),
+		Text:        lipgloss.NewStyle().Foreground(styles.Text).Background(styles.PanelRaised),
+		Placeholder: lipgloss.NewStyle().Foreground(styles.Muted).Background(styles.PanelRaised),
+		Suggestion:  lipgloss.NewStyle().Foreground(styles.Secondary).Background(styles.PanelRaised),
 	}
 	inputStyles := textinput.DefaultDarkStyles()
 	inputStyles.Focused = state

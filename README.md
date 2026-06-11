@@ -323,3 +323,7 @@ session; Ephemera reports a non-fatal status message when copying is unavailable
 ## License
 
 MIT
+
+## UI rendering
+
+Ephemera uses Bubble Tea v2's cell-diff renderer with synchronized terminal updates when the terminal supports them. The rose interface uses elapsed-time animation, fixed component geometry, a native terminal cursor, and localized micro-animation so visual detail does not require full-screen redraws.
