@@ -327,3 +327,9 @@ MIT
 ## UI rendering
 
 Ephemera uses Bubble Tea v2's cell-diff renderer with synchronized terminal updates when the terminal supports them. The rose interface uses elapsed-time animation, fixed component geometry, a native terminal cursor, and localized micro-animation so visual detail does not require full-screen redraws.
+
+## Guided workflow quality of life
+
+The provider wizard uses a reversible five-stage flow with a live route preview,
+inline validation, environment-key detection, a final review gate, and fast
+keyboard navigation. See `UI_POLISH_V9.md` for the complete interaction notes.

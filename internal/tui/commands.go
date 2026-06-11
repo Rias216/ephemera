@@ -10,11 +10,21 @@ import (
 	"github.com/ephemera-ai/ephemera/internal/llm"
 )
 
+type commandExample struct {
+	Input       string
+	Description string
+}
+
 type commandSpec struct {
 	Name        string
 	Usage       string
 	Description string
+	Category    string
+	Aliases     []string
+	Introduced  string
+	Permission  string
 	Choices     []string
+	Examples    []commandExample
 }
 
 type suggestion struct {
@@ -24,20 +34,86 @@ type suggestion struct {
 }
 
 var commandSpecs = []commandSpec{
-	{Name: "/help", Description: "show the command map"},
-	{Name: "/connect", Usage: "[provider]", Description: "guided provider connection", Choices: config.ConnectNames()},
-	{Name: "/clear", Description: "clear the current conversation"},
-	{Name: "/new", Usage: "[name]", Description: "begin a new session"},
-	{Name: "/save", Usage: "[name]", Description: "save or rename this session"},
-	{Name: "/load", Usage: "<name>", Description: "load a saved session"},
-	{Name: "/sessions", Description: "list saved sessions"},
-	{Name: "/provider", Usage: "<provider>", Description: "switch provider", Choices: config.ProviderNames()},
-	{Name: "/model", Usage: "<model-id>", Description: "switch model"},
-	{Name: "/models", Description: "open model chooser"},
-	{Name: "/mode", Usage: "<mode>", Description: "change reasoning mode", Choices: []string{"normal", "deep-reason", "concise", "creative"}},
-	{Name: "/theme", Usage: "<theme>", Description: "change palette", Choices: []string{"rose", "mono"}},
-	{Name: "/copy", Description: "copy the last answer"},
-	{Name: "/quit", Description: "save and leave Ephemera"},
+	{
+		Name: "/help", Usage: "[command]", Description: "show the command map and contextual help", Category: "CORE", Aliases: []string{"?"}, Introduced: "v0.1.0", Permission: "local",
+		Examples: []commandExample{{"/help", "show all commands"}, {"/help connect", "inspect one command"}, {"/help mode", "see mode usage"}},
+	},
+	{
+		Name: "/connect", Usage: "[provider]", Description: "guided provider and credential setup", Category: "ROUTE", Introduced: "v0.2.0", Permission: "credentials", Choices: config.ConnectNames(),
+		Examples: []commandExample{{"/connect", "start guided setup"}, {"/connect openai", "configure OpenAI"}, {"/connect openrouter", "use a compatible preset"}},
+	},
+	{
+		Name: "/clear", Description: "clear the current conversation", Category: "SESSION", Introduced: "v0.1.0", Permission: "local",
+		Examples: []commandExample{{"/clear", "remove visible conversation"}},
+	},
+	{
+		Name: "/new", Usage: "[name]", Description: "begin a new named session", Category: "SESSION", Introduced: "v0.1.0", Permission: "local",
+		Examples: []commandExample{{"/new", "create an automatic name"}, {"/new launch-notes", "create a named session"}},
+	},
+	{
+		Name: "/save", Usage: "[name]", Description: "save or rename this session", Category: "SESSION", Introduced: "v0.1.0", Permission: "filesystem",
+		Examples: []commandExample{{"/save", "save current session"}, {"/save research", "save under a new name"}},
+	},
+	{
+		Name: "/load", Usage: "<name>", Description: "load a saved session", Category: "SESSION", Introduced: "v0.1.0", Permission: "filesystem",
+		Examples: []commandExample{{"/load research", "open a saved session"}},
+	},
+	{
+		Name: "/sessions", Description: "list saved sessions", Category: "SESSION", Introduced: "v0.1.0", Permission: "filesystem",
+		Examples: []commandExample{{"/sessions", "show session names"}},
+	},
+	{
+		Name: "/provider", Usage: "<provider>", Description: "switch the active provider", Category: "ROUTE", Introduced: "v0.1.0", Permission: "local", Choices: config.ProviderNames(),
+		Examples: []commandExample{{"/provider openai", "select OpenAI"}, {"/provider ollama", "select local Ollama"}},
+	},
+	{
+		Name: "/model", Usage: "<model-id>", Description: "switch the active model", Category: "ROUTE", Introduced: "v0.1.0", Permission: "local",
+		Examples: []commandExample{{"/model gpt-4.1-mini", "select a model by ID"}},
+	},
+	{
+		Name: "/models", Description: "open the provider model chooser", Category: "ROUTE", Introduced: "v0.2.0", Permission: "network",
+		Examples: []commandExample{{"/models", "browse available models"}},
+	},
+	{
+		Name: "/mode", Usage: "<mode>", Description: "change the reasoning profile", Category: "RESPONSE", Introduced: "v0.1.0", Permission: "local", Choices: []string{"normal", "deep-reason", "concise", "creative"},
+		Examples: []commandExample{{"/mode concise", "prefer brief responses"}, {"/mode deep-reason", "use the deeper profile"}},
+	},
+	{
+		Name: "/usage", Description: "inspect context and message usage", Category: "CONTEXT", Introduced: "v0.3.0", Permission: "local",
+		Examples: []commandExample{{"/usage", "show current context usage"}},
+	},
+	{
+		Name: "/budget", Usage: "<tokens>", Description: "set the context token budget", Category: "CONTEXT", Introduced: "v0.3.0", Permission: "local",
+		Examples: []commandExample{{"/budget 8192", "set an 8k token budget"}},
+	},
+	{
+		Name: "/retry", Description: "retry the latest user prompt", Category: "RESPONSE", Introduced: "v0.3.0", Permission: "network",
+		Examples: []commandExample{{"/retry", "regenerate the last answer"}},
+	},
+	{
+		Name: "/undo", Description: "remove the latest message", Category: "SESSION", Introduced: "v0.3.0", Permission: "filesystem",
+		Examples: []commandExample{{"/undo", "remove the latest message"}},
+	},
+	{
+		Name: "/export", Usage: "[path]", Description: "export the transcript as Markdown", Category: "OUTPUT", Introduced: "v0.3.0", Permission: "filesystem",
+		Examples: []commandExample{{"/export", "export to the default folder"}, {"/export notes.md", "export to a chosen path"}},
+	},
+	{
+		Name: "/doctor", Description: "inspect route, credentials, and context", Category: "SYSTEM", Introduced: "v0.3.0", Permission: "local",
+		Examples: []commandExample{{"/doctor", "open a diagnostic report"}},
+	},
+	{
+		Name: "/theme", Usage: "<theme>", Description: "change the terminal palette", Category: "VIEW", Introduced: "v0.1.0", Permission: "local", Choices: []string{"rose", "mono"},
+		Examples: []commandExample{{"/theme rose", "use the pink palette"}, {"/theme mono", "use monochrome"}},
+	},
+	{
+		Name: "/copy", Description: "copy the last answer", Category: "OUTPUT", Introduced: "v0.1.0", Permission: "clipboard",
+		Examples: []commandExample{{"/copy", "copy the latest answer"}},
+	},
+	{
+		Name: "/quit", Description: "save and leave Ephemera", Category: "CORE", Aliases: []string{"/exit"}, Introduced: "v0.1.0", Permission: "local",
+		Examples: []commandExample{{"/quit", "save and exit"}},
+	},
 }
 
 func (m *Model) rebuildSuggestions() {
@@ -91,7 +167,7 @@ func (m *Model) commandSuggestions(raw string) []suggestion {
 				containsMatches = append(containsMatches, item)
 			}
 		}
-		return limitSuggestions(append(prefixMatches, containsMatches...), 7)
+		return append(prefixMatches, containsMatches...)
 	}
 
 	spec, ok := findCommandSpec(command)
@@ -128,6 +204,19 @@ func (m *Model) commandSuggestions(raw string) []suggestion {
 
 func (m *Model) commandChoiceSuggestions(spec commandSpec) []suggestion {
 	switch spec.Name {
+	case "/help":
+		out := make([]suggestion, 0, len(commandSpecs)-1)
+		for _, command := range commandSpecs {
+			if command.Name == "/help" {
+				continue
+			}
+			out = append(out, suggestion{
+				Value:       strings.TrimPrefix(command.Name, "/"),
+				Label:       command.Name + usageSuffix(command.Usage),
+				Description: command.Description,
+			})
+		}
+		return out
 	case "/load":
 		names, err := m.listSessions()
 		if err != nil {
@@ -198,11 +287,18 @@ func modelCacheKey(cfg config.Config) string {
 		cfg.OllamaURL,
 		cfg.CompatibleName,
 		cfg.CompatibleURL,
-		cfg.OpenAIKey,
-		cfg.AnthropicKey,
-		cfg.CompatibleKey,
+		credentialPresence(cfg.OpenAIKey),
+		credentialPresence(cfg.AnthropicKey),
+		credentialPresence(cfg.CompatibleKey),
 		cfg.Model(),
 	}, "\x00")
+}
+
+func credentialPresence(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "unset"
+	}
+	return "set"
 }
 
 func (m *Model) acceptCommandSuggestionForEnter() bool {
@@ -312,13 +408,32 @@ func (m Model) suggestionPaletteActive() bool {
 }
 
 func (m Model) suggestionCapacity() int {
-	limit := 7
-	if m.height > 0 {
-		// Keep at least three transcript rows. A palette row costs one line,
-		// while its border and extra block separator cost three more.
-		limit = minInt(limit, maxInt(0, m.height-19))
+	paletteHeight := m.effectivePaletteHeight()
+	if paletteHeight <= panelBorderRows {
+		return 0
 	}
-	return limit
+	innerHeight := paletteHeight - panelBorderRows
+	// Reserve enough detail space to explain the active field, but favor a
+	// larger visible result set during provider/model selection. Seeing only
+	// two choices at a time made the wizard feel unnecessarily cramped.
+	detailReserve := 5
+	maxVisible := 6
+	if m.connect != nil {
+		detailReserve = 6
+		maxVisible = 7
+	}
+	capacity := innerHeight - detailReserve - 2 // header + divider
+	if capacity < 1 {
+		capacity = 1
+	}
+	return minInt(maxVisible, capacity)
+}
+
+func (m Model) effectivePaletteHeight() int {
+	if m.paletteHeight > 0 {
+		return m.paletteHeight
+	}
+	return m.suggestionHeight()
 }
 
 func (m Model) suggestionWindow() ([]suggestion, int) {
@@ -332,7 +447,9 @@ func (m Model) suggestionWindow() ([]suggestion, int) {
 	if len(m.suggestions) <= limit {
 		return m.suggestions, 0
 	}
-	start := m.completionIndex - limit + 1
+	// Keep the active row near the middle of the viewport so moving through a
+	// long provider/model list preserves spatial context in both directions.
+	start := m.completionIndex - limit/2
 	if start < 0 {
 		start = 0
 	}
@@ -346,13 +463,7 @@ func (m Model) suggestionHeight() int {
 	if !m.suggestionPaletteActive() {
 		return 0
 	}
-	capacity := m.suggestionCapacity()
-	if capacity <= 0 {
-		return 0
-	}
-	// Reserve a fixed palette height for the entire command entry. The extra
-	// row is the palette header; narrowing matches never changes geometry.
-	return capacity + 4
+	return m.layoutMetrics().paletteOuterHeight
 }
 
 func minInt(a, b int) int {

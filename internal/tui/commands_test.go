@@ -575,3 +575,169 @@ func hasSuggestion(items []suggestion, value string) bool {
 	}
 	return false
 }
+
+func TestCommandPaletteUsesRemainingSpaceForInspector(t *testing.T) {
+	m := Model{cfg: config.Default(), styles: theme.New("rose"), height: 34, width: 120, focused: true}
+	m.input = textInputForTest("/help")
+	m.suggestions = m.commandSuggestions(m.input.Value())
+	m.resize()
+
+	got := m.renderSuggestions()
+	for _, want := range []string{"USAGE", "EXAMPLES", "Category", "/help"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("command inspector missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestViewUsesFullTerminalHeightWithAndWithoutPalette(t *testing.T) {
+	m := New(config.Default(), nil, "")
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m = updated.(Model)
+	if got := lipgloss.Height(m.View().Content); got != 36 {
+		t.Fatalf("plain view height = %d, want 36", got)
+	}
+
+	m.input.SetValue("/help")
+	m.rebuildSuggestions()
+	m.resize()
+	m.refreshViewport(true)
+	if got := lipgloss.Height(m.View().Content); got != 36 {
+		t.Fatalf("palette view height = %d, want 36", got)
+	}
+}
+
+func TestBackgroundTextureIsStaticAndVisible(t *testing.T) {
+	m := Model{styles: theme.New("rose")}
+	first := m.textureLine(100, 4, 17, m.styles.Panel)
+	second := m.textureLine(100, 4, 17, m.styles.Panel)
+	if first != second {
+		t.Fatal("background texture changed between identical renders")
+	}
+	if !strings.ContainsAny(first, "·∙╱") {
+		t.Fatalf("texture line contains no visible texture marks: %q", first)
+	}
+}
+
+func TestConnectModelAdvancesToReviewBeforeActivating(t *testing.T) {
+	cfg := config.Default()
+	originalProvider := cfg.Provider
+	m := Model{
+		cfg:    cfg,
+		styles: theme.New("rose"),
+		connect: &connectFlow{
+			Provider: "openai",
+			APIKey:   "runtime-secret",
+			Step:     connectModel,
+			History:  []connectStep{connectProvider, connectAPIKey},
+		},
+	}
+	m.input = textInputForTest("gpt-4.1-mini")
+
+	m.submitConnectStep()
+
+	if m.connect == nil || m.connect.Step != connectReview {
+		t.Fatalf("connect step = %#v, want review", m.connect)
+	}
+	if m.cfg.Provider != originalProvider {
+		t.Fatalf("provider changed before review: %q -> %q", originalProvider, m.cfg.Provider)
+	}
+	if m.connect.Model != "gpt-4.1-mini" {
+		t.Fatalf("review model = %q, want gpt-4.1-mini", m.connect.Model)
+	}
+}
+
+func TestConnectReviewActivatesRoute(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+	m := Model{
+		cfg:    config.Default(),
+		styles: theme.New("rose"),
+		connect: &connectFlow{
+			Provider: "openai",
+			APIKey:   "runtime-secret",
+			Model:    "gpt-4.1-mini",
+			Step:     connectReview,
+		},
+	}
+	m.input = textInputForTest("")
+
+	m.submitConnectStep()
+
+	if m.connect != nil {
+		t.Fatalf("connect flow still active after review: %#v", m.connect)
+	}
+	if m.cfg.Provider != "openai" || m.cfg.Model() != "gpt-4.1-mini" {
+		t.Fatalf("activated route = %s/%s", m.cfg.Provider, m.cfg.Model())
+	}
+	if m.cfg.OpenAIKey != "runtime-secret" {
+		t.Fatal("runtime API key was not applied")
+	}
+}
+
+func TestConnectBackPreservesPreviouslyEnteredValues(t *testing.T) {
+	m := Model{
+		cfg:    config.Default(),
+		styles: theme.New("rose"),
+		connect: &connectFlow{
+			Provider: "compatible",
+			Name:     "custom-route",
+			BaseURL:  "https://example.test/v1",
+			Step:     connectAPIKey,
+			History:  []connectStep{connectProvider, connectName, connectBaseURL},
+		},
+	}
+	m.input = textInputForTest("")
+
+	if !m.retreatConnect() {
+		t.Fatal("retreatConnect() returned false")
+	}
+	if m.connect.Step != connectBaseURL {
+		t.Fatalf("step = %q, want base URL", m.connect.Step)
+	}
+	if got := m.input.Value(); got != "https://example.test/v1" {
+		t.Fatalf("restored input = %q", got)
+	}
+}
+
+func TestSuggestionWindowKeepsSelectionNearCenter(t *testing.T) {
+	m := Model{height: 40, width: 120, paletteHeight: 14}
+	for i := 0; i < 12; i++ {
+		m.suggestions = append(m.suggestions, suggestion{Value: fmt.Sprintf("item-%02d", i)})
+	}
+	m.completionIndex = 6
+
+	items, start := m.suggestionWindow()
+	if len(items) < 3 {
+		t.Fatalf("window too small: %d", len(items))
+	}
+	position := m.completionIndex - start
+	if position <= 0 || position >= len(items)-1 {
+		t.Fatalf("selection position = %d in %d rows; want contextual rows above and below", position, len(items))
+	}
+}
+
+func TestBackgroundTextureAvoidsSlashArtifacts(t *testing.T) {
+	m := Model{styles: theme.New("rose")}
+	for row := 0; row < 30; row++ {
+		line := m.textureLine(180, row, 41, m.styles.Background)
+		if strings.ContainsAny(line, "╱╲/\\") {
+			t.Fatalf("texture row contains slash-like artifact: %q", line)
+		}
+	}
+}
+
+func TestModelCacheKeyDoesNotRetainCredentialValue(t *testing.T) {
+	first := config.Default()
+	first.Provider = "openai"
+	first.OpenAIKey = "secret-one"
+	second := first
+	second.OpenAIKey = "secret-two"
+
+	if modelCacheKey(first) != modelCacheKey(second) {
+		t.Fatal("model cache key should depend on credential presence, not secret contents")
+	}
+	if strings.Contains(modelCacheKey(first), "secret-one") {
+		t.Fatal("model cache key retained raw credential material")
+	}
+}

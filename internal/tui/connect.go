@@ -19,6 +19,7 @@ const (
 	connectBaseURL  connectStep = "base-url"
 	connectAPIKey   connectStep = "api-key"
 	connectModel    connectStep = "model"
+	connectReview   connectStep = "review"
 )
 
 type connectFlow struct {
@@ -28,13 +29,12 @@ type connectFlow struct {
 	APIKey   string
 	Model    string
 	Step     connectStep
+	History  []connectStep
 }
 
 func (m *Model) startConnect(provider string) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	m.connect = &connectFlow{Step: connectProvider}
-	m.notice = "### Connect\n\nChoose a provider. **Tab** completes, **↑/↓** selects, **Enter** advances, and **Esc** cancels. API keys are kept in memory only."
-	m.status = "Connection wizard · choose a provider."
 	m.prepareConnectInput()
 
 	if provider != "" {
@@ -63,7 +63,7 @@ func (m *Model) submitConnectStep() {
 	switch m.connect.Step {
 	case connectProvider:
 		if !m.applyConnectProvider(value) {
-			m.status = "Choose a provider or preset from the suggestions."
+			m.status = "Choose one of the provider or preset options below."
 			m.rebuildSuggestions()
 			return
 		}
@@ -85,14 +85,14 @@ func (m *Model) submitConnectStep() {
 		}
 		m.connect.BaseURL = strings.TrimRight(value, "/")
 		if m.connect.Provider == "ollama" {
-			m.connect.Step = connectModel
+			m.advanceConnect(connectModel)
 		} else {
-			m.connect.Step = connectAPIKey
+			m.advanceConnect(connectAPIKey)
 		}
 
 	case connectAPIKey:
 		m.connect.APIKey = value
-		m.connect.Step = connectModel
+		m.advanceConnect(connectModel)
 
 	case connectModel:
 		if value == "" {
@@ -103,6 +103,9 @@ func (m *Model) submitConnectStep() {
 			return
 		}
 		m.connect.Model = value
+		m.advanceConnect(connectReview)
+
+	case connectReview:
 		m.finishConnect()
 		return
 	}
@@ -116,19 +119,19 @@ func (m *Model) applyConnectProvider(value string) bool {
 	switch name {
 	case "ollama":
 		m.connect.Provider = "ollama"
-		m.connect.Step = connectBaseURL
+		m.advanceConnect(connectBaseURL)
 		return true
 	case "openai":
 		m.connect.Provider = "openai"
-		m.connect.Step = connectAPIKey
+		m.advanceConnect(connectAPIKey)
 		return true
 	case "anthropic":
 		m.connect.Provider = "anthropic"
-		m.connect.Step = connectAPIKey
+		m.advanceConnect(connectAPIKey)
 		return true
 	case "compatible":
 		m.connect.Provider = "compatible"
-		m.connect.Step = connectName
+		m.advanceConnect(connectName)
 		return true
 	default:
 		preset, ok := config.Preset(name)
@@ -138,7 +141,7 @@ func (m *Model) applyConnectProvider(value string) bool {
 		m.connect.Provider = "compatible"
 		m.connect.Name = name
 		m.connect.BaseURL = strings.TrimRight(preset.BaseURL, "/")
-		m.connect.Step = connectAPIKey
+		m.advanceConnect(connectAPIKey)
 		return true
 	}
 }
@@ -151,10 +154,31 @@ func (m *Model) applyConnectName(value string) {
 	m.connect.Name = name
 	if preset, ok := config.Preset(name); ok && preset.Protocol == config.ProtocolOpenAICompatible && strings.TrimSpace(preset.BaseURL) != "" {
 		m.connect.BaseURL = strings.TrimRight(preset.BaseURL, "/")
-		m.connect.Step = connectAPIKey
+		m.advanceConnect(connectAPIKey)
 		return
 	}
-	m.connect.Step = connectBaseURL
+	m.advanceConnect(connectBaseURL)
+}
+
+func (m *Model) advanceConnect(next connectStep) {
+	if m.connect == nil || next == "" || m.connect.Step == next {
+		return
+	}
+	m.connect.History = append(m.connect.History, m.connect.Step)
+	m.connect.Step = next
+}
+
+func (m *Model) retreatConnect() bool {
+	if m.connect == nil || len(m.connect.History) == 0 {
+		return false
+	}
+	last := len(m.connect.History) - 1
+	m.connect.Step = m.connect.History[last]
+	m.connect.History = m.connect.History[:last]
+	m.prepareConnectInput()
+	m.rebuildSuggestions()
+	m.status = "Back to " + strings.ToLower(m.connectStepTitle()) + "."
+	return true
 }
 
 func (m *Model) acceptConnectSuggestionForEnter() bool {
@@ -211,13 +235,15 @@ func (m *Model) prepareConnectInput() {
 	if m.connect == nil {
 		return
 	}
-	m.input.SetValue("")
+	m.input.SetValue(m.connectStepValue())
 	m.input.EchoMode = textinput.EchoNormal
 	m.input.EchoCharacter = '•'
 	m.input.Placeholder = m.connectPlaceholder()
 	if m.connect.Step == connectAPIKey {
 		m.input.EchoMode = textinput.EchoPassword
 	}
+	m.input.CursorEnd()
+	m.syncConnectNotice()
 }
 
 func (m *Model) restorePromptInput() {
@@ -266,8 +292,108 @@ func (m Model) connectPlaceholder() string {
 		}
 	case connectModel:
 		return "Model ID [" + m.defaultConnectModel() + "]"
+	case connectReview:
+		return "Press Enter to activate · Shift+Tab returns to model"
 	default:
 		return "Connection value"
+	}
+}
+
+func (m Model) connectStepValue() string {
+	if m.connect == nil {
+		return ""
+	}
+	switch m.connect.Step {
+	case connectProvider:
+		if m.connect.Provider == "compatible" && m.connect.Name != "" {
+			return m.connect.Name
+		}
+		return m.connect.Provider
+	case connectName:
+		return m.connect.Name
+	case connectBaseURL:
+		return m.connect.BaseURL
+	case connectAPIKey:
+		return m.connect.APIKey
+	case connectModel:
+		return m.connect.Model
+	default:
+		return ""
+	}
+}
+
+func (m *Model) syncConnectNotice() {
+	if m.connect == nil {
+		return
+	}
+	step, total := m.connectProgress()
+	title := m.connectStepTitle()
+	body := m.connectStepGuidance()
+	m.notice = fmt.Sprintf("### Connect · %d/%d · %s\n\n%s\n\nThe active route is not changed until the review step is confirmed.", step, total, title, body)
+	m.status = fmt.Sprintf("Connection setup · %s · step %d of %d", strings.ToLower(title), step, total)
+}
+
+func (m Model) connectProgress() (int, int) {
+	if m.connect == nil {
+		return 0, 0
+	}
+	switch m.connect.Step {
+	case connectProvider:
+		return 1, 5
+	case connectName, connectBaseURL:
+		return 2, 5
+	case connectAPIKey:
+		return 3, 5
+	case connectModel:
+		return 4, 5
+	case connectReview:
+		return 5, 5
+	default:
+		return 1, 5
+	}
+}
+
+func (m Model) connectStepTitle() string {
+	if m.connect == nil {
+		return "Connection"
+	}
+	switch m.connect.Step {
+	case connectProvider:
+		return "Provider"
+	case connectName:
+		return "Connection name"
+	case connectBaseURL:
+		return "Endpoint"
+	case connectAPIKey:
+		return "Credentials"
+	case connectModel:
+		return "Model"
+	case connectReview:
+		return "Review"
+	default:
+		return "Connection"
+	}
+}
+
+func (m Model) connectStepGuidance() string {
+	if m.connect == nil {
+		return ""
+	}
+	switch m.connect.Step {
+	case connectProvider:
+		return "Choose a direct provider, a hosted preset, or a custom OpenAI-compatible endpoint."
+	case connectName:
+		return "Name this compatible route. Selecting a known preset fills its endpoint automatically."
+	case connectBaseURL:
+		return "Enter the API base URL. Press Enter to accept the suggested default shown in brackets."
+	case connectAPIKey:
+		return "Enter an API key, or press Enter to use the detected environment variable when available. The value is never written to config.json."
+	case connectModel:
+		return "Select a discovered model or type an exact model ID. Provider catalogs are queried with a short timeout."
+	case connectReview:
+		return "Review the route summary below. Press Enter to activate it, or Shift+Tab to revise the model."
+	default:
+		return "Complete the current connection field."
 	}
 }
 
@@ -344,7 +470,7 @@ func (m *Model) connectModelListConfig() config.Config {
 }
 
 func (m *Model) connectSuggestions() []suggestion {
-	if m.connect == nil || m.connect.Step == connectAPIKey {
+	if m.connect == nil || m.connect.Step == connectAPIKey || m.connect.Step == connectReview {
 		return nil
 	}
 	query := strings.ToLower(strings.TrimSpace(m.input.Value()))

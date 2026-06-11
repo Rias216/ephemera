@@ -33,17 +33,20 @@ const helpText = `### Commands
 - **/save [name]** — save, optionally renaming the session
 - **/load <name>** — load a saved session
 - **/sessions** — list saved sessions
-- **/provider <ollama|openai|anthropic|compatible>** — select backend
-- **/model <id>** — select the active provider's model
-- **/models** — open the model chooser
-- **/mode <normal|deep-reason|concise|creative>** — change reasoning mode
+- **/provider <provider>** — select backend
+- **/model <id>** / **/models** — select intelligence
+- **/mode <profile>** — change response character
+- **/usage** / **/budget <tokens>** — inspect or set context
+- **/retry** / **/undo** — revise the latest exchange
+- **/export [path]** — export the transcript
+- **/doctor** — inspect the active route
 - **/theme <rose|mono>** — change palette
 - **/copy** — copy the last answer
 - **/quit** — leave Ephemera
 
-Autocomplete: type **/**, use **↑/↓** to select, and press **Enter** to run or **Tab** to complete.
+Autocomplete: type **/**, use **↑/↓** or **Ctrl+N/P** to select, **PgUp/PgDn** to jump, **Enter** to run, **Tab** to complete, and **Esc** to close.
 
-Keys: **Enter** send · **Ctrl+R** retry · **PgUp/PgDn** scroll · **Ctrl+Y** copy · **Ctrl+C** quit`
+Keys: **Enter** send · **Ctrl+L** clear composer · **Ctrl+R** retry · **PgUp/PgDn** scroll · **Ctrl+Y** copy · **Ctrl+C** quit`
 
 type responseMsg struct {
 	text  string
@@ -221,17 +224,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport(true)
 			return m, cmd
 		case "pgup":
-			m.viewport.PageUp()
+			if len(m.suggestions) > 0 && m.suggestionPaletteActive() {
+				m.moveSuggestion(-max(1, m.suggestionCapacity()))
+			} else {
+				m.viewport.PageUp()
+			}
 			return m, nil
 		case "pgdown":
-			m.viewport.PageDown()
+			if len(m.suggestions) > 0 && m.suggestionPaletteActive() {
+				m.moveSuggestion(max(1, m.suggestionCapacity()))
+			} else {
+				m.viewport.PageDown()
+			}
 			return m, nil
 		case "ctrl+u":
-			m.viewport.HalfPageUp()
-			return m, nil
+			if m.input.Value() == "" && !m.suggestionPaletteActive() {
+				m.viewport.HalfPageUp()
+				return m, nil
+			}
 		case "ctrl+d":
-			m.viewport.HalfPageDown()
-			return m, nil
+			if m.input.Value() == "" && !m.suggestionPaletteActive() {
+				m.viewport.HalfPageDown()
+				return m, nil
+			}
 		}
 
 		if m.connect != nil {
@@ -240,18 +255,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancelConnect()
 				m.refreshViewport(true)
 				return m, nil
+			case "shift+tab":
+				if !m.retreatConnect() {
+					m.status = "Already at the first connection step."
+				}
+				m.refreshViewport(true)
+				return m, nil
+			case "backspace":
+				if m.input.Value() == "" && m.retreatConnect() {
+					m.refreshViewport(true)
+					return m, nil
+				}
+			case "ctrl+l":
+				m.input.SetValue("")
+				m.rebuildSuggestions()
+				return m, nil
 			case "tab":
 				if m.acceptSuggestion() {
 					return m, nil
 				}
-			case "up":
+			case "up", "ctrl+p":
 				if len(m.suggestions) > 0 {
 					m.moveSuggestion(-1)
 					return m, nil
 				}
-			case "down":
+			case "down", "ctrl+n":
 				if len(m.suggestions) > 0 {
 					m.moveSuggestion(1)
+					return m, nil
+				}
+			case "home":
+				if len(m.suggestions) > 0 {
+					m.completionIndex = 0
+					return m, nil
+				}
+			case "end":
+				if len(m.suggestions) > 0 {
+					m.completionIndex = len(m.suggestions) - 1
 					return m, nil
 				}
 			case "enter":
@@ -262,18 +302,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			switch key {
+			case "esc":
+				if m.suggestionPaletteActive() {
+					m.input.SetValue("")
+					m.rebuildSuggestions()
+					m.status = "Command palette closed."
+					return m, nil
+				}
+			case "ctrl+l":
+				m.input.SetValue("")
+				m.rebuildSuggestions()
+				m.status = "Composer cleared."
+				return m, nil
 			case "tab":
 				if m.acceptSuggestion() {
 					return m, nil
 				}
-			case "up":
+			case "up", "ctrl+p":
 				if len(m.suggestions) > 0 {
 					m.moveSuggestion(-1)
 					return m, nil
 				}
-			case "down":
+			case "down", "ctrl+n":
 				if len(m.suggestions) > 0 {
 					m.moveSuggestion(1)
+					return m, nil
+				}
+			case "home":
+				if len(m.suggestions) > 0 {
+					m.completionIndex = 0
+					return m, nil
+				}
+			case "end":
+				if len(m.suggestions) > 0 {
+					m.completionIndex = len(m.suggestions) - 1
 					return m, nil
 				}
 			case "enter":
@@ -332,7 +394,8 @@ func (m Model) View() tea.View {
 	content := "\n  Ephemera is arranging the dark…\n"
 	var cursor *tea.Cursor
 
-	if m.ready && m.width >= 40 && m.height >= 15 {
+	if m.ready && m.width >= 40 && m.height >= 16 {
+		metrics := m.layoutMetrics()
 		prompt := m.animatedPromptGlyph() + " " + m.styles.Prompt.Render(m.promptLabel())
 		inputValue := m.input.View()
 		composerMeta := m.renderComposerMeta()
@@ -340,36 +403,38 @@ func (m Model) View() tea.View {
 		if lipgloss.Width(inputLine)+lipgloss.Width(composerMeta)+2 <= m.width-8 {
 			inputLine += strings.Repeat(" ", max(1, m.width-8-lipgloss.Width(inputLine)-lipgloss.Width(composerMeta))) + composerMeta
 		}
-		inputBox := m.renderPanel(m.styles.Input.Width(max(1, m.width-4)), 3, inputLine)
+		inputBox := m.insetBlock(m.renderPanel(m.styles.Input.Width(max(1, m.width-4)), 3, inputLine))
 
 		header := m.renderHeader()
-		viewportPanel := m.renderPanel(
-			m.styles.Viewport.Width(max(1, m.width-4)).Height(m.viewport.Height()),
+		viewportPanel := m.insetBlock(m.renderPanel(
+			m.styles.Viewport.Width(max(1, m.width-4)).Height(metrics.viewportOuterHeight),
 			1,
-			m.viewport.View(),
-		)
-		blocks := []string{header, viewportPanel, inputBox}
-		if palette := m.renderSuggestions(); palette != "" {
-			blocks = append(blocks, palette)
-		}
-		blocks = append(blocks, m.renderFooter())
+			m.texturedViewport(),
+		))
+		footerPanel := m.insetBlock(m.renderPanel(
+			m.styles.Footer.Width(max(1, m.width-4)),
+			4,
+			m.renderFooter(),
+		))
 
-		content = lipgloss.NewStyle().
-			Foreground(m.styles.Text).
-			Width(m.width).
-			Render(strings.Join(blocks, "\n"))
+		blocks := []string{header, m.gapLine(1), viewportPanel, m.gapLine(2), inputBox}
+		if palette := m.renderSuggestions(); palette != "" {
+			blocks = append(blocks, m.gapLine(3), m.insetBlock(palette))
+		}
+		blocks = append(blocks, m.gapLine(4), footerPanel)
+		content = m.fitScreen(strings.Join(blocks, "\n"))
 
 		if m.focused && !m.busy {
 			cursor = m.input.Cursor()
 			if cursor != nil {
-				// Border + horizontal padding precede the prompt. The input panel
-				// starts immediately after the header and viewport panel.
-				cursor.X += 2 + lipgloss.Width(prompt)
-				cursor.Y += lipgloss.Height(header) + lipgloss.Height(viewportPanel) + 1
+				// Header, textured separator, viewport panel, separator, and the
+				// composer's top border all precede the real terminal cursor.
+				cursor.X += 4 + lipgloss.Width(prompt)
+				cursor.Y += lipgloss.Height(header) + lipgloss.Height(viewportPanel) + 3
 			}
 		}
 	} else if m.ready {
-		content = m.styles.Error.Render("Ephemera needs a terminal at least 40×15.")
+		content = m.styles.Error.Render("Ephemera needs a terminal at least 40×16.")
 	}
 
 	view := tea.NewView(content)
@@ -383,84 +448,27 @@ func (m Model) View() tea.View {
 	return view
 }
 
-func (m Model) renderSuggestions() string {
-	if !m.suggestionPaletteActive() {
-		return ""
+func (m Model) fitScreen(content string) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) > m.height {
+		lines = lines[:m.height]
 	}
-	capacity := m.suggestionCapacity()
-	if capacity <= 0 {
-		return ""
+	for len(lines) < m.height {
+		lines = append(lines, m.textureLine(max(1, m.width), len(lines), 211, m.styles.Background))
 	}
-
-	innerWidth := max(8, m.width-8)
-	title := "COMMAND PALETTE"
-	if m.connect != nil {
-		title = "CONNECTION FLOW"
-	}
-	counter := "0 / 0"
-	if len(m.suggestions) > 0 {
-		counter = fmt.Sprintf("%d / %d", minInt(m.completionIndex+1, len(m.suggestions)), len(m.suggestions))
-	}
-	headerLeft := lipgloss.NewStyle().Bold(true).Foreground(m.styles.AccentSoft).Background(m.styles.Panel).Render(title)
-	headerRight := lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.Panel).Render(counter)
-	headerGap := max(1, innerWidth-lipgloss.Width(headerLeft)-lipgloss.Width(headerRight))
-	lines := []string{headerLeft + strings.Repeat(" ", headerGap) + headerRight}
-
-	items, start := m.suggestionWindow()
-	for i, item := range items {
-		selected := start+i == m.completionIndex
-		background := m.styles.Panel
-		markerColor := m.styles.Faint
-		labelColor := m.styles.Text
-		marker := "  "
-		if selected {
-			background = m.styles.PanelRaised
-			markerColor = m.selectionGlow()
-			labelColor = m.styles.AccentBright
-			marker = "◆ "
-		}
-
-		prefix := fmt.Sprintf("%02d ", start+i+1)
-		body := prefix + item.Label
-		if item.Description != "" && m.width >= 68 {
-			body += "  ·  " + item.Description
-		}
-		body = clip(body, max(1, innerWidth-2))
-		markerView := lipgloss.NewStyle().Foreground(markerColor).Background(background).Render(marker)
-		bodyView := lipgloss.NewStyle().Foreground(labelColor).Background(background).Width(max(1, innerWidth-2)).Render(body)
-		lines = append(lines, markerView+bodyView)
-	}
-
-	if len(items) == 0 {
-		message := "No matching commands"
-		if m.connect != nil {
-			message = "No matching choices"
-		}
-		lines = append(lines, lipgloss.NewStyle().Foreground(m.styles.Muted).Background(m.styles.Panel).Width(innerWidth).Render("  "+message))
-	}
-	blank := lipgloss.NewStyle().Background(m.styles.Panel).Render(strings.Repeat(" ", innerWidth))
-	for len(lines) < capacity+1 {
-		lines = append(lines, blank)
-	}
-
-	rendered := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.glowColor(2)).
-		Background(m.styles.Panel).
-		Padding(0, 1).
-		Width(max(1, m.width-4)).
+	return lipgloss.NewStyle().
+		Foreground(m.styles.Text).
+		Background(m.styles.Background).
+		Width(max(1, m.width)).
 		Render(strings.Join(lines, "\n"))
-	return m.localizedGradientBorder(rendered, 2)
 }
 
 func (m *Model) resize() {
 	m.ready = true
-	// Header+meta (2), viewport borders (2), input borders (2), status (1),
-	// separators (4), and the optional autocomplete palette leave the rest for
-	// scrollable content.
-	m.paletteHeight = m.suggestionHeight()
-	viewportHeight := max(3, m.height-12-m.paletteHeight)
-	viewportWidth := max(10, m.width-6)
+	metrics := m.layoutMetrics()
+	m.paletteHeight = metrics.paletteOuterHeight
+	viewportHeight := max(3, metrics.viewportInnerHeight)
+	viewportWidth := max(10, m.width-8)
 	if m.viewport.Width() == 0 {
 		m.viewport = viewport.New(viewport.WithWidth(viewportWidth), viewport.WithHeight(viewportHeight))
 		m.viewport.MouseWheelEnabled = true
@@ -471,6 +479,9 @@ func (m *Model) resize() {
 	// Reserve stable space for the animated prompt and composer metadata so the
 	// input never pushes the right edge of its panel while typing.
 	composerReserve := 18
+	if m.connect != nil {
+		composerReserve = max(24, lipgloss.Width(m.renderComposerMeta())+2)
+	}
 	promptReserve := lipgloss.Width(m.promptLabel()) + 4
 	m.input.SetWidth(max(8, m.width-8-promptReserve-composerReserve))
 }
@@ -505,10 +516,8 @@ Ask naturally, or press **/** to reveal the command palette.
 
 - **/connect** — configure a provider
 - **/models** — switch intelligence
-- **/mode concise** — change response character
-- **/doctor** — inspect the active route
 
-Current route: **%s** · **%s** · context **%s** tokens.`,
+Route: **%s** · **%s** · **%s** token context.`,
 			m.providerName(),
 			m.cfg.Model(),
 			formatTokenCount(m.cfg.ContextTokens),
@@ -683,6 +692,19 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 
 	switch command {
 	case "/help":
+		if len(args) > 0 {
+			name := args[0]
+			if !strings.HasPrefix(name, "/") {
+				name = "/" + name
+			}
+			if spec, ok := findCommandSpec(name); ok {
+				m.notice = commandHelpNotice(spec)
+				m.status = "Help opened · " + spec.Name
+				break
+			}
+			m.status = "Unknown command for help: " + name
+			break
+		}
 		m.notice = helpText
 		m.status = "Command map opened."
 
@@ -901,6 +923,22 @@ func maxDuration(a, b time.Duration) time.Duration {
 }
 
 func (m Model) promptLabel() string {
+	if m.connect != nil {
+		switch m.connect.Step {
+		case connectProvider:
+			return "provider→ "
+		case connectName:
+			return "name→ "
+		case connectBaseURL:
+			return "endpoint→ "
+		case connectAPIKey:
+			return "secret→ "
+		case connectModel:
+			return "model→ "
+		case connectReview:
+			return "confirm→ "
+		}
+	}
 	switch m.cfg.Theme {
 	case "mono":
 		return "mono→ "

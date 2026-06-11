@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	RosePrimary   = "#FF69B4"
-	RoseSecondary = "#DB2777"
+	RosePrimary   = "#F43F9A"
+	RoseSecondary = "#D61F72"
 )
 
 // Styles is a complete visual palette for the application.
@@ -25,6 +25,9 @@ type Styles struct {
 	Background     color.Color
 	Panel          color.Color
 	PanelRaised    color.Color
+	PanelDeep      color.Color
+	Texture        color.Color
+	Divider        color.Color
 	Success        color.Color
 	Warning        color.Color
 	Banner         lipgloss.Style
@@ -34,6 +37,7 @@ type Styles struct {
 	Input          lipgloss.Style
 	Prompt         lipgloss.Style
 	Status         lipgloss.Style
+	Footer         lipgloss.Style
 	UserLabel      lipgloss.Style
 	AssistantLabel lipgloss.Style
 	NoticeLabel    lipgloss.Style
@@ -57,23 +61,29 @@ func New(name string) Styles {
 			lipgloss.Color("#09090B"),
 			lipgloss.Color("#18181B"),
 			lipgloss.Color("#222226"),
+			lipgloss.Color("#101013"),
+			lipgloss.Color("#34343B"),
+			lipgloss.Color("#3F4652"),
 			lipgloss.Color("#D1FAE5"),
 			lipgloss.Color("#FDE68A"),
 		)
 	}
 	return build(
-		lipgloss.Color(RosePrimary),
-		lipgloss.Color(RoseSecondary),
-		lipgloss.Color("#FF9ACB"),
-		lipgloss.Color("#FFE3F0"),
-		lipgloss.Color("#FCE7F3"),
-		lipgloss.Color("#A88E9F"),
-		lipgloss.Color("#705B69"),
-		lipgloss.Color("#09070A"),
-		lipgloss.Color("#21101D"),
-		lipgloss.Color("#2B1425"),
+		lipgloss.Color("#F43F9A"),
+		lipgloss.Color("#D61F72"),
+		lipgloss.Color("#FF82BC"),
+		lipgloss.Color("#FFE1F0"),
+		lipgloss.Color("#F9EAF2"),
+		lipgloss.Color("#B58DA3"),
+		lipgloss.Color("#765468"),
+		lipgloss.Color("#08050A"),
+		lipgloss.Color("#140A12"),
+		lipgloss.Color("#1E0D19"),
+		lipgloss.Color("#0E0710"),
+		lipgloss.Color("#3A1830"),
+		lipgloss.Color("#5B2948"),
 		lipgloss.Color("#86EFAC"),
-		lipgloss.Color("#FBCFE8"),
+		lipgloss.Color("#F5A7C7"),
 	)
 }
 
@@ -87,7 +97,7 @@ func Hex(value color.Color) string {
 	return fmt.Sprintf("#%02X%02X%02X", rgba.R, rgba.G, rgba.B)
 }
 
-func build(primary, secondary, accentSoft, accentBright, text, muted, faint, background, panel, panelRaised, success, warning color.Color) Styles {
+func build(primary, secondary, accentSoft, accentBright, text, muted, faint, background, panel, panelRaised, panelDeep, texture, divider, success, warning color.Color) Styles {
 	return Styles{
 		Primary:      primary,
 		Secondary:    secondary,
@@ -99,6 +109,9 @@ func build(primary, secondary, accentSoft, accentBright, text, muted, faint, bac
 		Background:   background,
 		Panel:        panel,
 		PanelRaised:  panelRaised,
+		PanelDeep:    panelDeep,
+		Texture:      texture,
+		Divider:      divider,
 		Success:      success,
 		Warning:      warning,
 		Banner:       lipgloss.NewStyle().Bold(true).Foreground(primary),
@@ -117,8 +130,13 @@ func build(primary, secondary, accentSoft, accentBright, text, muted, faint, bac
 			BorderForeground(primary).
 			Background(panelRaised).
 			Padding(0, 1),
-		Prompt:         lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panelRaised),
-		Status:         lipgloss.NewStyle().Foreground(muted),
+		Prompt: lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panelRaised),
+		Status: lipgloss.NewStyle().Foreground(muted),
+		Footer: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(divider).
+			Background(panelDeep).
+			Padding(0, 1),
 		UserLabel:      lipgloss.NewStyle().Bold(true).Foreground(primary).Background(panel),
 		AssistantLabel: lipgloss.NewStyle().Bold(true).Foreground(secondary).Background(panel),
 		NoticeLabel:    lipgloss.NewStyle().Bold(true).Foreground(muted).Background(panel),

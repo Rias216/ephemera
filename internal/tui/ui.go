@@ -11,13 +11,15 @@ import (
 )
 
 var roseGlow = []color.Color{
-	lipgloss.Color("#72113D"), // wine rose
-	lipgloss.Color("#9E1555"), // deep rose
-	lipgloss.Color("#C51B69"), // rich pink
-	lipgloss.Color("#E82783"), // vivid pink
-	lipgloss.Color("#FF4FA3"), // hot pink
-	lipgloss.Color("#FF8FC8"), // soft highlight
-	lipgloss.Color("#FFE1F0"), // pale knife glint
+	lipgloss.Color("#5A0A2F"), // black cherry
+	lipgloss.Color("#74103D"), // wine rose
+	lipgloss.Color("#92144D"), // deep rose
+	lipgloss.Color("#B31A60"), // saturated rose
+	lipgloss.Color("#D82178"), // vivid magenta-pink
+	lipgloss.Color("#F23C91"), // hot pink
+	lipgloss.Color("#FF69AE"), // luminous pink
+	lipgloss.Color("#FF91C4"), // soft highlight
+	lipgloss.Color("#FFC4DF"), // pale pink knife glint
 }
 
 var monoGlow = []color.Color{
@@ -58,14 +60,14 @@ func (m Model) renderActivityBadge() string {
 	if !m.focused {
 		label = "paused"
 		base = m.styles.Faint
+	} else if m.connect != nil {
+		label = "setup"
+		base = m.styles.AccentSoft
 	} else if m.busy {
 		label = "thinking"
 		base = m.styles.Primary
 	}
 
-	if m.busy {
-		return m.spinner.View() + " " + lipgloss.NewStyle().Foreground(m.styles.Muted).Render(label)
-	}
 	pulse := 0.34 + 0.66*(0.5+0.5*math.Sin(m.animationSeconds()*math.Pi*2.0*1.25))
 	dot := fadeColor(m.styles.Faint, base, pulse)
 	return lipgloss.NewStyle().Foreground(dot).Render("●") + " " +
@@ -75,17 +77,26 @@ func (m Model) renderActivityBadge() string {
 func (m Model) renderMetaRail() string {
 	stats := m.currentContextStats()
 	items := []string{
-		m.renderChip("route", m.providerName()),
-		m.renderChip("mode", string(m.cfg.Mode)),
+		m.renderChip("route", clip(m.providerName(), 16)),
+		m.renderChip("mode", clip(string(m.cfg.Mode), 14)),
 	}
-	if m.width >= 67 {
-		items = append(items, m.renderChip("model", clip(m.cfg.Model(), 26)))
+	candidates := []string{
+		m.renderChip("model", clip(m.cfg.Model(), 26)),
+		m.renderChip("session", clip(m.session.Name, 22)),
 	}
-	if m.width >= 92 {
-		items = append(items, m.renderChip("session", clip(m.session.Name, 22)))
+	if m.connect != nil {
+		step, total := m.connectProgress()
+		candidates = append(candidates, m.renderChip("setup", fmt.Sprintf("%d/%d %s", step, total, strings.ToLower(m.connectStepTitle()))))
 	}
-	if stats.DroppedMessages > 0 && m.width >= 60 {
-		items = append(items, lipgloss.NewStyle().Foreground(m.styles.Warning).Render(fmt.Sprintf("trimmed %d", stats.DroppedMessages)))
+	if stats.DroppedMessages > 0 {
+		candidates = append(candidates, lipgloss.NewStyle().Foreground(m.styles.Warning).Render(fmt.Sprintf("trimmed %d", stats.DroppedMessages)))
+	}
+	for _, candidate := range candidates {
+		current := strings.Join(items, "  ")
+		if lipgloss.Width(current)+2+lipgloss.Width(candidate) > m.width {
+			continue
+		}
+		items = append(items, candidate)
 	}
 	return strings.Join(items, "  ")
 }
@@ -186,15 +197,18 @@ func (m Model) localizedGradientBorder(rendered string, offset int) string {
 
 	period := float64(perimeter)
 	seconds := m.animationSeconds()
+	// Keep all panel gradients in the same visual current. Small fixed offsets
+	// prevent exact synchronization without making adjacent panels look as if
+	// they belong to unrelated palettes.
 	glimmerHead := positiveModFloat(
-		organicMotion(seconds, glimmerCellsPerSecond, 1.35, 0.78)+float64(offset)*period/7.0,
+		organicMotion(seconds, glimmerCellsPerSecond, 1.15, 0.72)+float64(offset)*5.0,
 		period,
 	)
 	ambientHead := positiveModFloat(
-		organicMotion(seconds, ambientCellsPerSecond, 1.8, 0.31)+float64(offset)*period/5.0+period*0.31,
+		organicMotion(seconds, ambientCellsPerSecond, 1.45, 0.27)+float64(offset)*7.0+period*0.31,
 		period,
 	)
-	basePhase := positiveModFloat(seconds*baseGradientCyclesPS+float64(offset)*0.071, 1)
+	basePhase := positiveModFloat(seconds*baseGradientCyclesPS+float64(offset)*0.018, 1)
 
 	var b strings.Builder
 	b.Grow(len(rendered) + perimeter*24)
@@ -338,13 +352,13 @@ func knifeFadeColor(palette []color.Color, position, glimmerHead, ambientHead, b
 	// frequencies keep the outline from feeling like a simple rotating stripe.
 	waveA := 0.5 + 0.5*math.Sin(2*math.Pi*(position/perimeter-basePhase+float64(offset)*0.11))
 	waveB := 0.5 + 0.5*math.Sin(4*math.Pi*(position/perimeter+basePhase*0.43+float64(offset)*0.037))
-	baseT := 0.08 + 0.18*(waveA*0.72+waveB*0.28)
+	baseT := 0.12 + 0.22*(waveA*0.74+waveB*0.26)
 	c := samplePalette(palette, baseT)
 
 	ambientDistance := math.Abs(signedCircularDelta(position, ambientHead, perimeter))
 	if ambientDistance <= ambientFadeHalfWidth {
 		strength := 1.0 - smootherStep(ambientDistance/ambientFadeHalfWidth)
-		ambientT := baseT + (0.64-baseT)*strength
+		ambientT := baseT + (0.66-baseT)*strength
 		c = samplePalette(palette, ambientT)
 	}
 
@@ -375,7 +389,7 @@ func samplePalette(palette []color.Color, t float64) color.Color {
 
 	scaled := t * float64(len(palette)-1)
 	index := int(math.Floor(scaled))
-	local := scaled - float64(index)
+	local := smootherStep(scaled - float64(index))
 	return fadeColor(palette[index], palette[index+1], local)
 }
 
@@ -463,7 +477,12 @@ func (m Model) renderComposerMeta() string {
 	value := m.input.Value()
 	label := string(m.cfg.Mode)
 	if m.connect != nil {
-		label = "connect"
+		step, total := m.connectProgress()
+		text := fmt.Sprintf("%d/%d %s  ·  %s", step, total, strings.ToLower(m.connectStepTitle()), strings.ToLower(m.connectRequirement()))
+		if m.connect.Step == connectAPIKey && utf8.RuneCountInString(value) > 0 {
+			text = fmt.Sprintf("%d/%d credentials  ·  secret entered", step, total)
+		}
+		return lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.PanelRaised).Render(text)
 	} else if strings.HasPrefix(value, "/") {
 		label = "command"
 	}
@@ -473,15 +492,7 @@ func (m Model) renderComposerMeta() string {
 }
 
 func (m Model) renderFooter() string {
-	stateColor := m.styles.Muted
-	stateGlyph := "◇"
-	if m.busy {
-		stateColor = m.selectionGlow()
-		stateGlyph = "◆"
-	} else if !m.focused {
-		stateColor = m.styles.Faint
-		stateGlyph = "○"
-	}
+	stateColor, stateGlyph := m.statusPresentation()
 
 	leftRaw := stateGlyph + " " + m.status
 	styleLeft := func(raw string) string {
@@ -499,20 +510,26 @@ func (m Model) renderFooter() string {
 	}
 
 	middleRaw := ""
-	if m.ready && !m.viewport.AtBottom() {
+	if m.connect != nil {
+		step, total := m.connectProgress()
+		middleRaw = fmt.Sprintf("setup %d/%d", step, total)
+	} else if m.ready && !m.viewport.AtBottom() {
 		middleRaw = fmt.Sprintf("scroll %3.0f%%", m.viewport.ScrollPercent()*100)
 	}
 
-	rightRaw := "Ctrl+R retry  Ctrl+Y copy  Ctrl+C quit"
+	rightRaw := "Ctrl+R retry  Ctrl+Y copy  Ctrl+L clear  Ctrl+C quit"
 	if m.connect != nil {
-		rightRaw = "Enter next  Esc cancel  Tab fill  ↑↓ select"
+		rightRaw = "Enter next  Shift+Tab back  Esc cancel  Tab fill  ↑↓ select"
+		if m.connect.Step == connectReview {
+			rightRaw = "Enter activate  Shift+Tab revise  Esc cancel"
+		}
 	} else if len(m.suggestions) > 0 {
-		rightRaw = "Enter run  Tab fill  ↑↓ select"
+		rightRaw = "Enter run  Tab fill  Esc close  ↑↓ select"
 	} else if m.width < 90 {
 		rightRaw = "Ctrl+C quit"
 	}
 
-	available := max(8, m.width)
+	available := max(8, m.width-8)
 	if middleRaw != "" && len([]rune(leftRaw))+len([]rune(middleRaw))+len([]rune(rightRaw))+6 <= available {
 		left := styleLeft(leftRaw)
 		middle := lipgloss.NewStyle().Foreground(m.styles.Faint).Render(middleRaw)
@@ -530,6 +547,27 @@ func (m Model) renderFooter() string {
 	right := lipgloss.NewStyle().Foreground(m.styles.Faint).Render(rightRaw)
 	gap := max(0, available-lipgloss.Width(left)-lipgloss.Width(right))
 	return left + strings.Repeat(" ", gap) + right
+}
+
+func (m Model) statusPresentation() (color.Color, string) {
+	if m.busy {
+		return m.selectionGlow(), "◆"
+	}
+	if !m.focused {
+		return m.styles.Faint, "○"
+	}
+
+	lower := strings.ToLower(m.status)
+	switch {
+	case strings.Contains(lower, "failed"), strings.Contains(lower, "broke"), strings.Contains(lower, "invalid"), strings.Contains(lower, "required"):
+		return m.styles.Warning, "!"
+	case strings.Contains(lower, "connected"), strings.Contains(lower, "saved"), strings.Contains(lower, "copied"), strings.Contains(lower, "exported"):
+		return m.styles.AccentSoft, "✓"
+	case m.connect != nil:
+		return m.styles.AccentSoft, "◆"
+	default:
+		return m.styles.Muted, "◇"
+	}
 }
 
 func (m Model) providerName() string {

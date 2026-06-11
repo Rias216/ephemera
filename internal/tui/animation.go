@@ -12,11 +12,11 @@ const (
 	// elapsed-time motion keeps the animation correct when frames are skipped.
 	AnimationFPS = 60
 
-	glimmerCellsPerSecond      = 22.0
-	ambientCellsPerSecond      = 5.2
+	glimmerCellsPerSecond      = 19.5
+	ambientCellsPerSecond      = 3.8
 	logoCellsPerSecond         = 9.5
 	contextGlintCellsPerSecond = 4.0
-	baseGradientCyclesPS       = 0.045
+	baseGradientCyclesPS       = 0.028
 )
 
 type animationTickMsg struct {
