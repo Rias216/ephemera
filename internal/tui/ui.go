@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"unicode/utf8"
 
@@ -9,18 +10,8 @@ import (
 )
 
 var roseGlow = []lipgloss.Color{
-	lipgloss.Color("#FCE7F3"),
-	lipgloss.Color("#FFD1EA"),
-	lipgloss.Color("#FFB3DC"),
-	lipgloss.Color("#FF8AC8"),
 	lipgloss.Color("#FF69B4"),
-	lipgloss.Color("#FF3FA4"),
-	lipgloss.Color("#FF1493"),
-	lipgloss.Color("#DB2777"),
-	lipgloss.Color("#E879F9"),
-	lipgloss.Color("#F0ABFC"),
-	lipgloss.Color("#FDA4D8"),
-	lipgloss.Color("#FFC1E3"),
+	lipgloss.Color("#DDA0DD"),
 }
 
 var monoGlow = []lipgloss.Color{
@@ -139,11 +130,30 @@ func (m Model) gradientBorder(rendered string, offset int) string {
 }
 
 func (m Model) gradientColorAt(x, y, offset int) lipgloss.Color {
-	return paletteColor(m.glowPalette(), m.frame+offset+x+(y*3))
+	palette := m.glowPalette()
+	t := 0.5 + 0.5*math.Sin(2*math.Pi*float64(m.frame+x+y)/90)
+	r, g, b := hexRGB(string(fadeColor(palette[0], palette[1], t)))
+
+	glow := float64(m.frame*2 % 180)
+	d := math.Abs(float64(x+y) - glow)
+	if d > 90 {
+		d = 180 - d
+	}
+	if d < 20 {
+		boost := 1.0 - d/20.0
+		boost *= boost * boost
+		r = lerpByte(r, 255, boost*0.8)
+		g = lerpByte(g, 255, boost*0.8)
+		b = lerpByte(b, 255, boost*0.8)
+	}
+
+	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", r, g, b))
 }
 
 func (m Model) glowColor(offset int) lipgloss.Color {
-	return paletteColor(m.glowPalette(), m.frame+offset)
+	palette := m.glowPalette()
+	t := 0.5 + 0.5*math.Sin(2*math.Pi*float64(m.frame+offset)/90)
+	return fadeColor(palette[0], palette[1], t)
 }
 
 func (m Model) glowPalette() []lipgloss.Color {
@@ -151,26 +161,6 @@ func (m Model) glowPalette() []lipgloss.Color {
 		return monoGlow
 	}
 	return roseGlow
-}
-
-func paletteColor(palette []lipgloss.Color, frame int) lipgloss.Color {
-	if len(palette) == 0 {
-		return lipgloss.Color("#FFFFFF")
-	}
-	if len(palette) == 1 {
-		return palette[0]
-	}
-	const framesPerStop = 5
-	period := len(palette) * framesPerStop
-	phase := frame % period
-	if phase < 0 {
-		phase += period
-	}
-	index := phase / framesPerStop
-	next := (index + 1) % len(palette)
-	t := float64(phase%framesPerStop) / framesPerStop
-
-	return fadeColor(palette[index], palette[next], t)
 }
 
 func isBorderRune(r rune) bool {

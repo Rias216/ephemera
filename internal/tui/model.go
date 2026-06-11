@@ -333,7 +333,6 @@ func (m Model) View() string {
 		Background(m.styles.Background).
 		Foreground(m.styles.Text).
 		Width(m.width).
-		Height(m.height).
 		Render(strings.Join(blocks, "\n"))
 }
 
