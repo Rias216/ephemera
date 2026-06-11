@@ -19,8 +19,10 @@ var monoGlow = []lipgloss.Color{
 	lipgloss.Color("#F9FAFB"),
 }
 
+const glimmerRadius = 3
+
 func (m Model) renderHeader() string {
-	banner := m.styles.Banner.Render("✦ EPHEMERA") + "  " +
+	banner := m.renderLogoGlow() + "  " +
 		m.styles.Subtitle.Render("what vanishes may still illuminate")
 	if m.width >= 72 {
 		meter := m.styles.Status.Render(m.renderContextMeter(m.currentContextStats(), 10))
@@ -80,7 +82,25 @@ func (m Model) renderContextMeter(stats contextStats, cells int) string {
 }
 
 func (m Model) renderLogoGlow() string {
-	return m.styles.Banner.Render("✦ EPHEMERA")
+	const logo = "✦ EPHEMERA"
+	palette := m.glowPalette()
+	if len(palette) < 2 {
+		return m.styles.Banner.Render(logo)
+	}
+
+	runes := []rune(logo)
+	position := positiveMod(m.frame, len(runes))
+	var b strings.Builder
+	for i, r := range runes {
+		color := palette[0]
+		distance := circularDistance(i, position, len(runes))
+		if distance <= 1 {
+			boost := 1.0 - float64(distance)/2.0
+			color = brighten(fadeColor(palette[0], palette[1], 0.65), boost*0.75)
+		}
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(color).Render(string(r)))
+	}
+	return b.String()
 }
 
 func (m Model) panelStyle(base lipgloss.Style, offset int) lipgloss.Style {
@@ -88,24 +108,36 @@ func (m Model) panelStyle(base lipgloss.Style, offset int) lipgloss.Style {
 }
 
 func (m Model) renderPanel(base lipgloss.Style, offset int, content string) string {
-	return m.gradientBorder(m.panelStyle(base, offset).Render(content), offset)
+	rendered := m.panelStyle(base, offset).Render(content)
+	return m.localizedGradientBorder(rendered, offset)
 }
 
-func (m Model) gradientBorder(rendered string, offset int) string {
+// localizedGradientBorder paints a stable two-tone outline and then brightens
+// only a short segment that travels around its perimeter. Bubble Tea compares
+// frames line-by-line, so at most a handful of rows differ on each tick instead
+// of every row in a tall viewport.
+func (m Model) localizedGradientBorder(rendered string, offset int) string {
+	width := lipgloss.Width(rendered)
+	height := lipgloss.Height(rendered)
+	perimeter := borderPerimeter(width, height)
+	if width < 2 || height < 2 || perimeter == 0 {
+		return rendered
+	}
+
+	glimmer := positiveMod(m.frame*2+offset*max(1, perimeter/7), perimeter)
+	palette := m.glowPalette()
+	if len(palette) < 2 {
+		return rendered
+	}
+
 	var b strings.Builder
+	b.Grow(len(rendered) + perimeter*24)
 	x, y := 0, 0
 	for i := 0; i < len(rendered); {
-		if rendered[i] == '\x1b' && i+1 < len(rendered) && rendered[i+1] == '[' {
-			end := i + 2
-			for end < len(rendered) && (rendered[end] < '@' || rendered[end] > '~') {
-				end++
-			}
-			if end >= len(rendered) {
-				b.WriteString(rendered[i:])
-				break
-			}
-			b.WriteString(rendered[i : end+1])
-			i = end + 1
+		if rendered[i] == '\x1b' {
+			end := ansiEscapeEnd(rendered, i)
+			b.WriteString(rendered[i:end])
+			i = end
 			continue
 		}
 
@@ -117,43 +149,65 @@ func (m Model) gradientBorder(rendered string, offset int) string {
 			i += size
 			continue
 		}
-		if isBorderRune(r) {
-			color := m.gradientColorAt(x, y, offset)
-			b.WriteString(lipgloss.NewStyle().Foreground(color).Render(string(r)))
-		} else {
-			b.WriteRune(r)
+
+		if isOuterBorderRune(r, x, y, width, height) {
+			position := borderPosition(x, y, width, height)
+			color := perimeterColor(palette[0], palette[1], position, perimeter, offset)
+			distance := circularDistance(position, glimmer, perimeter)
+			if distance <= glimmerRadius {
+				boost := 1.0 - float64(distance)/float64(glimmerRadius+1)
+				color = brighten(color, boost*boost*0.92)
+			}
+			b.WriteString(ansiForeground(color))
 		}
+		b.WriteRune(r)
 		x += lipgloss.Width(string(r))
 		i += size
 	}
 	return b.String()
 }
 
-func (m Model) gradientColorAt(x, y, offset int) lipgloss.Color {
-	palette := m.glowPalette()
-	t := 0.5 + 0.5*math.Sin(2*math.Pi*float64(m.frame+x+y)/90)
-	r, g, b := hexRGB(string(fadeColor(palette[0], palette[1], t)))
-
-	glow := float64(m.frame*2 % 180)
-	d := math.Abs(float64(x+y) - glow)
-	if d > 90 {
-		d = 180 - d
+func ansiEscapeEnd(value string, start int) int {
+	if start < 0 || start >= len(value) || value[start] != '\x1b' {
+		return min(len(value), start+1)
 	}
-	if d < 20 {
-		boost := 1.0 - d/20.0
-		boost *= boost * boost
-		r = lerpByte(r, 255, boost*0.8)
-		g = lerpByte(g, 255, boost*0.8)
-		b = lerpByte(b, 255, boost*0.8)
+	if start+1 >= len(value) {
+		return len(value)
 	}
 
-	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", r, g, b))
+	switch value[start+1] {
+	case '[': // Control Sequence Introducer.
+		for i := start + 2; i < len(value); i++ {
+			if value[i] >= '@' && value[i] <= '~' {
+				return i + 1
+			}
+		}
+		return len(value)
+	case ']': // Operating System Command, terminated by BEL or ST.
+		for i := start + 2; i < len(value); i++ {
+			if value[i] == '\a' {
+				return i + 1
+			}
+			if value[i] == '\x1b' && i+1 < len(value) && value[i+1] == '\\' {
+				return i + 2
+			}
+		}
+		return len(value)
+	default:
+		return min(len(value), start+2)
+	}
 }
 
 func (m Model) glowColor(offset int) lipgloss.Color {
 	palette := m.glowPalette()
-	t := 0.5 + 0.5*math.Sin(2*math.Pi*float64(m.frame+offset)/90)
-	return fadeColor(palette[0], palette[1], t)
+	if len(palette) == 0 {
+		return lipgloss.Color("#FFFFFF")
+	}
+	index := offset % len(palette)
+	if index < 0 {
+		index += len(palette)
+	}
+	return palette[index]
 }
 
 func (m Model) glowPalette() []lipgloss.Color {
@@ -163,7 +217,30 @@ func (m Model) glowPalette() []lipgloss.Color {
 	return roseGlow
 }
 
-func isBorderRune(r rune) bool {
+func borderPerimeter(width, height int) int {
+	if width < 2 || height < 2 {
+		return 0
+	}
+	return 2*width + 2*height - 4
+}
+
+func borderPosition(x, y, width, height int) int {
+	switch {
+	case y == 0:
+		return x
+	case x == width-1:
+		return width - 1 + y
+	case y == height-1:
+		return width - 1 + height - 1 + width - 1 - x
+	default:
+		return width - 1 + height - 1 + width - 1 + height - 1 - y
+	}
+}
+
+func isOuterBorderRune(r rune, x, y, width, height int) bool {
+	if y != 0 && y != height-1 && x != 0 && x != width-1 {
+		return false
+	}
 	switch r {
 	case '─', '│', '╭', '╮', '╰', '╯', '┌', '┐', '└', '┘', '═', '║', '╔', '╗', '╚', '╝':
 		return true
@@ -172,7 +249,64 @@ func isBorderRune(r rune) bool {
 	}
 }
 
+func perimeterColor(from, to lipgloss.Color, position, perimeter, offset int) lipgloss.Color {
+	if perimeter <= 0 {
+		return from
+	}
+	phase := float64(position)/float64(perimeter) + float64(offset)*0.11
+	t := 0.5 + 0.5*math.Sin(2*math.Pi*phase)
+	return fadeColor(from, to, t)
+}
+
+func circularDistance(a, b, period int) int {
+	if period <= 0 {
+		return 0
+	}
+	distance := positiveMod(a-b, period)
+	if distance > period/2 {
+		distance = period - distance
+	}
+	return distance
+}
+
+func positiveMod(value, modulus int) int {
+	if modulus <= 0 {
+		return 0
+	}
+	value %= modulus
+	if value < 0 {
+		value += modulus
+	}
+	return value
+}
+
+func ansiForeground(color lipgloss.Color) string {
+	r, g, b := hexRGB(string(color))
+	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
+}
+
+func brighten(color lipgloss.Color, amount float64) lipgloss.Color {
+	if amount < 0 {
+		amount = 0
+	}
+	if amount > 1 {
+		amount = 1
+	}
+	r, g, b := hexRGB(string(color))
+	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X",
+		lerpByte(r, 255, amount),
+		lerpByte(g, 255, amount),
+		lerpByte(b, 255, amount),
+	))
+}
+
 func fadeColor(from, to lipgloss.Color, t float64) lipgloss.Color {
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
 	fr, fg, fb := hexRGB(string(from))
 	tr, tg, tb := hexRGB(string(to))
 	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X",

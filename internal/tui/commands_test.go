@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
@@ -161,34 +162,78 @@ func TestStripANSIBackgroundsRemovesResetsAndBackgrounds(t *testing.T) {
 	}
 }
 
-func TestGlowColorChangesWithFrame(t *testing.T) {
+func TestLocalizedGradientBorderAnimatesOnlyNearbyRows(t *testing.T) {
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
-	first := m.glowColor(0)
-	m.frame = 1
+	base := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Width(72).Height(24)
 
-	if got := m.glowColor(0); got == first {
-		t.Fatalf("glowColor did not shift with frame: %q", got)
+	// Put the glimmer on a vertical edge, where an implementation that repaints
+	// the full outline would make every content row differ.
+	rendered := base.Render("content")
+	m.frame = (lipgloss.Width(rendered) + 2) / 2
+	first := m.localizedGradientBorder(rendered, 0)
+	m.frame++
+	second := m.localizedGradientBorder(rendered, 0)
+
+	firstLines := strings.Split(first, "\n")
+	secondLines := strings.Split(second, "\n")
+	if len(firstLines) != len(secondLines) {
+		t.Fatalf("frame heights differ: %d and %d", len(firstLines), len(secondLines))
+	}
+
+	changed := 0
+	for i := range firstLines {
+		if firstLines[i] != secondLines[i] {
+			changed++
+		}
+	}
+	if changed == 0 {
+		t.Fatal("localized glimmer did not animate")
+	}
+	if changed > 2*glimmerRadius+4 {
+		t.Fatalf("localized glimmer changed %d rows; want at most %d", changed, 2*glimmerRadius+4)
 	}
 }
 
-func TestGradientBorderVariesAlongLength(t *testing.T) {
-	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+func TestBorderPositionsCoverPerimeterOnce(t *testing.T) {
+	const width, height = 17, 9
+	want := borderPerimeter(width, height)
+	seen := make(map[int]bool, want)
 
-	first := m.gradientColorAt(0, 0, 0)
-	second := m.gradientColorAt(5, 0, 0)
+	for x := 0; x < width; x++ {
+		seen[borderPosition(x, 0, width, height)] = true
+		seen[borderPosition(x, height-1, width, height)] = true
+	}
+	for y := 1; y < height-1; y++ {
+		seen[borderPosition(0, y, width, height)] = true
+		seen[borderPosition(width-1, y, width, height)] = true
+	}
 
-	if first == second {
-		t.Fatalf("gradientColorAt did not vary along border length: %q", first)
+	if len(seen) != want {
+		t.Fatalf("unique perimeter positions = %d, want %d", len(seen), want)
+	}
+	for position := 0; position < want; position++ {
+		if !seen[position] {
+			t.Fatalf("perimeter position %d was not assigned", position)
+		}
 	}
 }
 
-func TestRenderLogoGlowPreservesBrandText(t *testing.T) {
+func TestInteriorBorderLikeRuneIsNotAnimated(t *testing.T) {
+	if isOuterBorderRune('│', 5, 2, 20, 6) {
+		t.Fatal("interior border-like rune was treated as the panel outline")
+	}
+	if !isOuterBorderRune('│', 0, 2, 20, 6) {
+		t.Fatal("outer vertical border was not recognized")
+	}
+}
+
+func TestRenderLogoGlowPreservesBrandWidth(t *testing.T) {
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
 
 	got := m.renderLogoGlow()
 
-	if !strings.Contains(got, "EPHEMERA") {
-		t.Fatalf("renderLogoGlow() = %q, want brand text", got)
+	if lipgloss.Width(got) != lipgloss.Width("✦ EPHEMERA") {
+		t.Fatalf("renderLogoGlow() width = %d, want %d", lipgloss.Width(got), lipgloss.Width("✦ EPHEMERA"))
 	}
 }
 

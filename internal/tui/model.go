@@ -362,7 +362,7 @@ func (m Model) renderSuggestions() string {
 		Padding(0, 1).
 		Width(max(1, m.width-4)).
 		Render(strings.Join(lines, "\n"))
-	return m.gradientBorder(rendered, 2)
+	return m.localizedGradientBorder(rendered, 2)
 }
 
 func (m *Model) resize() {
