@@ -1,0 +1,2 @@
+# Ephemera is a pure Go application. No Python packages are required.
+# This file exists only because some deployment templates expect it.

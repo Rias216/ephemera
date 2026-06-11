@@ -1,0 +1,588 @@
+// Package tui implements Ephemera's Bubble Tea terminal interface.
+package tui
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/ephemera-ai/ephemera/internal/config"
+	"github.com/ephemera-ai/ephemera/internal/history"
+	"github.com/ephemera-ai/ephemera/internal/llm"
+	"github.com/ephemera-ai/ephemera/internal/reasoning"
+	"github.com/ephemera-ai/ephemera/internal/theme"
+)
+
+const helpText = `### Commands
+
+- **/help** — show this command map
+- **/clear** — clear the current conversation
+- **/new [name]** — begin a new named session
+- **/save [name]** — save, optionally renaming the session
+- **/load <name>** — load a saved session
+- **/sessions** — list saved sessions
+- **/provider <ollama|openai|anthropic>** — select backend
+- **/model <id>** — select the active provider's model
+- **/mode <normal|deep-reason|concise|creative>** — change reasoning mode
+- **/theme <rose|mono>** — change palette
+- **/copy** — copy the last answer
+- **/quit** — leave Ephemera
+
+Keys: **Enter** send · **PgUp/PgDn** scroll · **Ctrl+Y** copy · **Ctrl+C** quit`
+
+type responseMsg struct {
+	text string
+	err  error
+}
+
+// Model is the complete Bubble Tea state machine.
+type Model struct {
+	cfg      config.Config
+	store    *history.Store
+	session  history.Session
+	styles   theme.Styles
+	viewport viewport.Model
+	input    textinput.Model
+	spinner  spinner.Model
+
+	width         int
+	height        int
+	ready         bool
+	busy          bool
+	status        string
+	notice        string
+	lastAssistant string
+}
+
+// New creates a TUI model. When sessionName exists it is loaded; otherwise a
+// new session with that name is created.
+func New(cfg config.Config, store *history.Store, sessionName string) Model {
+	styles := theme.New(cfg.Theme)
+
+	input := textinput.New()
+	input.Prompt = ""
+	input.Placeholder = "Ask what must be seen…"
+	input.CharLimit = 32_768
+	input.Focus()
+	input.TextStyle = lipgloss.NewStyle().Foreground(styles.Text)
+	input.PlaceholderStyle = lipgloss.NewStyle().Foreground(styles.Muted)
+	input.Cursor.Style = lipgloss.NewStyle().Foreground(styles.Primary)
+
+	spin := spinner.New()
+	spin.Spinner = spinner.MiniDot
+	spin.Style = lipgloss.NewStyle().Foreground(styles.Primary)
+
+	var session history.Session
+	if sessionName != "" {
+		loaded, err := store.Load(sessionName)
+		if err == nil {
+			session = loaded
+			cfg.Provider = loaded.Provider
+			cfg.SetModel(loaded.Model)
+			if loaded.Mode.Valid() {
+				cfg.Mode = loaded.Mode
+			}
+		}
+	}
+	if session.Name == "" {
+		session = history.New(sessionName, cfg.Provider, cfg.Model(), cfg.Mode)
+	}
+
+	return Model{
+		cfg:     cfg,
+		store:   store,
+		session: session,
+		styles:  styles,
+		input:   input,
+		spinner: spin,
+		status:  "Enter a prompt, or /help for the map.",
+	}
+}
+
+func (m Model) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resize()
+		m.refreshViewport(true)
+		return m, nil
+
+	case responseMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status = "The signal broke: " + msg.err.Error()
+			m.notice = "**Request failed:** " + escapeMarkdown(msg.err.Error())
+			m.refreshViewport(true)
+			return m, nil
+		}
+		m.session.Append("assistant", msg.text)
+		m.lastAssistant = msg.text
+		m.session.Provider = m.cfg.Provider
+		m.session.Model = m.cfg.Model()
+		m.session.Mode = m.cfg.Mode
+		if err := m.store.Save(m.session); err != nil {
+			m.status = "Answered, but session save failed: " + err.Error()
+		} else {
+			m.status = "Saved · the answer has settled."
+		}
+		m.refreshViewport(true)
+		return m, nil
+
+	case spinner.TickMsg:
+		if m.busy {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c":
+			_ = m.store.Save(m.session)
+			_ = config.Save(m.cfg)
+			return m, tea.Quit
+		case "ctrl+y":
+			m.copyLast()
+			return m, nil
+		case "pgup":
+			m.viewport.ViewUp()
+			return m, nil
+		case "pgdown":
+			m.viewport.ViewDown()
+			return m, nil
+		case "ctrl+u":
+			m.viewport.HalfViewUp()
+			return m, nil
+		case "ctrl+d":
+			m.viewport.HalfViewDown()
+			return m, nil
+		case "enter":
+			if m.busy {
+				m.status = "One thought at a time."
+				return m, nil
+			}
+			value := strings.TrimSpace(m.input.Value())
+			if value == "" {
+				return m, nil
+			}
+			m.input.SetValue("")
+			if strings.HasPrefix(value, "/") {
+				quit := m.handleCommand(value)
+				m.refreshViewport(true)
+				if quit {
+					return m, tea.Quit
+				}
+				return m, nil
+			}
+			m.notice = ""
+			m.session.Append("user", value)
+			// Persist the prompt before starting a potentially long network call.
+			// A crash or interrupted request should not erase the user's thought.
+			_ = m.store.Save(m.session)
+			m.busy = true
+			m.status = "Reasoning beneath the surface…"
+			m.refreshViewport(true)
+			return m, tea.Batch(m.spinner.Tick, m.generateCmd())
+		}
+	}
+
+	if _, ok := msg.(tea.MouseMsg); ok && m.ready {
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+	if !m.busy {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) View() string {
+	if !m.ready {
+		return "\n  Ephemera is arranging the dark…\n"
+	}
+	if m.width < 40 || m.height < 15 {
+		return m.styles.Error.Render("Ephemera needs a terminal at least 40×15.")
+	}
+
+	banner := m.styles.Banner.Render("✦ EPHEMERA") + "  " +
+		m.styles.Subtitle.Render("what vanishes may still illuminate")
+	metaText := fmt.Sprintf(
+		"%s · %s · %s · %s",
+		m.cfg.Provider,
+		m.cfg.Model(),
+		m.cfg.Mode,
+		m.session.Name,
+	)
+	meta := m.styles.Meta.Render(clip(metaText, m.width-2))
+
+	prompt := m.styles.Prompt.Render("rose→ ")
+	inputLine := lipgloss.JoinHorizontal(lipgloss.Top, prompt, m.input.View())
+	inputBox := m.styles.Input.Width(max(1, m.width-4)).Render(inputLine)
+
+	leftStatus := m.status
+	if m.busy {
+		leftStatus = m.spinner.View() + " " + m.status
+	}
+	rightStatus := "PgUp/PgDn scroll · Ctrl+Y copy · Ctrl+C quit"
+	if m.width < 88 {
+		rightStatus = "Ctrl+C quit"
+	}
+	if lipgloss.Width(leftStatus)+lipgloss.Width(rightStatus)+3 > m.width {
+		rightStatus = ""
+	}
+	leftStatus = clip(leftStatus, max(8, m.width-lipgloss.Width(rightStatus)-3))
+	space := max(0, m.width-lipgloss.Width(leftStatus)-lipgloss.Width(rightStatus)-2)
+	status := m.styles.Status.Render(leftStatus + strings.Repeat(" ", space) + rightStatus)
+
+	return lipgloss.NewStyle().
+		Background(m.styles.Background).
+		Foreground(m.styles.Text).
+		Width(m.width).
+		Height(m.height).
+		Render(strings.Join([]string{
+			banner,
+			meta,
+			m.styles.Viewport.Width(max(1, m.width-4)).Height(m.viewport.Height).Render(m.viewport.View()),
+			inputBox,
+			status,
+		}, "\n"))
+}
+
+func (m *Model) resize() {
+	m.ready = true
+	// Header+meta (2), viewport borders (2), input borders (2), status (1),
+	// and the separators between the five rendered blocks (4) leave the
+	// remainder for scrollable content.
+	viewportHeight := max(3, m.height-12)
+	viewportWidth := max(10, m.width-6)
+	if m.viewport.Width == 0 {
+		m.viewport = viewport.New(viewportWidth, viewportHeight)
+		m.viewport.MouseWheelEnabled = true
+	} else {
+		m.viewport.Width = viewportWidth
+		m.viewport.Height = viewportHeight
+	}
+	m.input.Width = max(8, m.width-12)
+}
+
+func (m *Model) refreshViewport(bottom bool) {
+	if !m.ready {
+		return
+	}
+	m.viewport.SetContent(m.renderTranscript())
+	if bottom {
+		m.viewport.GotoBottom()
+	}
+}
+
+func (m Model) renderTranscript() string {
+	width := max(20, m.viewport.Width-2)
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return "renderer error: " + err.Error()
+	}
+
+	var out strings.Builder
+	if len(m.session.Messages) == 0 {
+		out.WriteString(m.styles.NoticeLabel.Render("signal"))
+		out.WriteString("\n")
+		welcome, _ := renderer.Render("A quiet reasoning harness. Ask plainly; Ephemera will do the hidden work.")
+		out.WriteString(strings.TrimSpace(welcome))
+		out.WriteString("\n")
+	}
+
+	for _, message := range m.session.Messages {
+		switch message.Role {
+		case "user":
+			out.WriteString(m.styles.UserLabel.Render("you"))
+		case "assistant":
+			out.WriteString(m.styles.AssistantLabel.Render("ephemera"))
+		default:
+			continue
+		}
+		out.WriteString("\n")
+		rendered, renderErr := renderer.Render(message.Content)
+		if renderErr != nil {
+			out.WriteString(message.Content)
+		} else {
+			out.WriteString(strings.TrimSpace(rendered))
+		}
+		out.WriteString("\n\n")
+	}
+
+	if m.notice != "" {
+		out.WriteString(m.styles.NoticeLabel.Render("signal"))
+		out.WriteString("\n")
+		rendered, renderErr := renderer.Render(m.notice)
+		if renderErr != nil {
+			out.WriteString(m.notice)
+		} else {
+			out.WriteString(strings.TrimSpace(rendered))
+		}
+		out.WriteString("\n")
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func (m Model) generateCmd() tea.Cmd {
+	cfg := m.cfg
+	session := m.session
+	return func() tea.Msg {
+		provider, err := llm.New(cfg)
+		if err != nil {
+			return responseMsg{err: err}
+		}
+
+		messages := make([]llm.Message, 0, len(session.Messages))
+		for _, message := range session.Messages {
+			if message.Role == "user" || message.Role == "assistant" {
+				messages = append(messages, llm.Message{Role: message.Role, Content: message.Content})
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		text, err := provider.Generate(ctx, llm.Request{
+			Model:       cfg.Model(),
+			System:      reasoning.SystemPrompt(cfg.Mode),
+			Messages:    messages,
+			MaxTokens:   cfg.MaxTokens,
+			Temperature: cfg.Mode.Temperature(),
+		})
+		return responseMsg{text: text, err: err}
+	}
+}
+
+func (m *Model) handleCommand(raw string) bool {
+	parts := strings.Fields(raw)
+	command := strings.ToLower(parts[0])
+	args := parts[1:]
+
+	requireArg := func(usage string) (string, bool) {
+		if len(args) == 0 {
+			m.status = "Usage: " + usage
+			return "", false
+		}
+		return strings.Join(args, " "), true
+	}
+
+	switch command {
+	case "/help":
+		m.notice = helpText
+		m.status = "Command map opened."
+
+	case "/clear":
+		m.session.Messages = nil
+		m.lastAssistant = ""
+		m.notice = ""
+		m.status = "The surface is clear."
+		_ = m.store.Save(m.session)
+
+	case "/new":
+		name := ""
+		if len(args) > 0 {
+			name = strings.Join(args, " ")
+		}
+		_ = m.store.Save(m.session)
+		m.session = history.New(name, m.cfg.Provider, m.cfg.Model(), m.cfg.Mode)
+		_ = m.store.Save(m.session)
+		m.notice = ""
+		m.lastAssistant = ""
+		m.status = "New session: " + m.session.Name
+
+	case "/save":
+		if len(args) > 0 {
+			m.session.Name = history.Sanitize(strings.Join(args, " "))
+		}
+		if err := m.store.Save(m.session); err != nil {
+			m.status = "Save failed: " + err.Error()
+		} else {
+			m.status = "Saved session " + m.session.Name
+		}
+
+	case "/load":
+		name, ok := requireArg("/load <name>")
+		if !ok {
+			break
+		}
+		loaded, err := m.store.Load(name)
+		if err != nil {
+			m.status = err.Error()
+			break
+		}
+		_ = m.store.Save(m.session)
+		m.session = loaded
+		m.cfg.Provider = loaded.Provider
+		m.cfg.SetModel(loaded.Model)
+		if loaded.Mode.Valid() {
+			m.cfg.Mode = loaded.Mode
+		}
+		m.lastAssistant = findLastAssistant(loaded.Messages)
+		m.notice = ""
+		m.status = "Loaded session " + loaded.Name
+		_ = config.Save(m.cfg)
+
+	case "/sessions":
+		names, err := m.store.List()
+		if err != nil {
+			m.status = "List failed: " + err.Error()
+			break
+		}
+		if len(names) == 0 {
+			m.notice = "No saved sessions yet."
+		} else {
+			var b strings.Builder
+			b.WriteString("### Saved sessions\n\n")
+			for _, name := range names {
+				fmt.Fprintf(&b, "- `%s`\n", name)
+			}
+			m.notice = b.String()
+		}
+		m.status = fmt.Sprintf("%d session(s).", len(names))
+
+	case "/provider":
+		provider, ok := requireArg("/provider <ollama|openai|anthropic>")
+		if !ok {
+			break
+		}
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider != "ollama" && provider != "openai" && provider != "anthropic" {
+			m.status = "Unknown provider: " + provider
+			break
+		}
+		m.cfg.Provider = provider
+		m.session.Provider = provider
+		m.session.Model = m.cfg.Model()
+		m.status = fmt.Sprintf("Provider → %s · model → %s", provider, m.cfg.Model())
+		_ = config.Save(m.cfg)
+
+	case "/model":
+		model, ok := requireArg("/model <model-id>")
+		if !ok {
+			break
+		}
+		m.cfg.SetModel(strings.TrimSpace(model))
+		m.session.Model = m.cfg.Model()
+		m.status = "Model → " + m.cfg.Model()
+		_ = config.Save(m.cfg)
+
+	case "/mode":
+		value, ok := requireArg("/mode <normal|deep-reason|concise|creative>")
+		if !ok {
+			break
+		}
+		mode, err := reasoning.Parse(value)
+		if err != nil {
+			m.status = err.Error()
+			break
+		}
+		m.cfg.Mode = mode
+		m.session.Mode = mode
+		m.status = "Mode → " + string(mode)
+		_ = config.Save(m.cfg)
+
+	case "/theme":
+		value, ok := requireArg("/theme <rose|mono>")
+		if !ok {
+			break
+		}
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "rose" && value != "mono" {
+			m.status = "Unknown theme: " + value
+			break
+		}
+		m.cfg.Theme = value
+		m.styles = theme.New(value)
+		m.applyThemeToComponents()
+		m.status = "Theme → " + value
+		_ = config.Save(m.cfg)
+
+	case "/copy":
+		m.copyLast()
+
+	case "/quit", "/exit":
+		_ = m.store.Save(m.session)
+		_ = config.Save(m.cfg)
+		return true
+
+	default:
+		m.status = "Unknown command. /help reveals the map."
+	}
+	return false
+}
+
+func (m *Model) applyThemeToComponents() {
+	m.input.TextStyle = lipgloss.NewStyle().Foreground(m.styles.Text)
+	m.input.PlaceholderStyle = lipgloss.NewStyle().Foreground(m.styles.Muted)
+	m.input.Cursor.Style = lipgloss.NewStyle().Foreground(m.styles.Primary)
+	m.spinner.Style = lipgloss.NewStyle().Foreground(m.styles.Primary)
+}
+
+func (m *Model) copyLast() {
+	if strings.TrimSpace(m.lastAssistant) == "" {
+		m.status = "Nothing to copy yet."
+		return
+	}
+	if err := clipboard.WriteAll(m.lastAssistant); err != nil {
+		m.status = "Clipboard unavailable: " + err.Error()
+		return
+	}
+	m.status = "Last answer copied."
+}
+
+func findLastAssistant(messages []history.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			return messages[i].Content
+		}
+	}
+	return ""
+}
+
+func escapeMarkdown(s string) string {
+	replacer := strings.NewReplacer("`", "'", "*", "\\*", "_", "\\_")
+	return replacer.Replace(s)
+}
+
+func clip(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= width {
+		return value
+	}
+	if width == 1 {
+		return "…"
+	}
+	return string(runes[:width-1]) + "…"
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
