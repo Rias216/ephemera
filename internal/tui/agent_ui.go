@@ -15,21 +15,18 @@ import (
 )
 
 func (m Model) renderAgentTimeline() string {
-	width := m.transcriptWidth()
-	var out strings.Builder
-	out.WriteString(m.transcriptLine(m.styles.NoticeLabel, "agent"))
-	out.WriteString("\n")
+	renderer := newCLIRenderer(m.styles, m.transcriptWidth())
+	rows := []string{m.transcriptLine(m.styles.NoticeLabel, "agent")}
 	for _, event := range m.session.Events {
 		if event.Type == "reasoning_summary" && !m.cfg.ShowThinking {
 			continue
 		}
-		out.WriteString(m.renderAgentEvent(event, width))
-		out.WriteString("\n")
+		rows = append(rows, m.renderAgentEvent(event, renderer)...)
 	}
-	return strings.TrimSpace(out.String())
+	return strings.Join(rows, "\n")
 }
 
-func (m Model) renderAgentEvent(event history.Event, width int) string {
+func (m Model) renderAgentEvent(event history.Event, renderer cliRenderer) []string {
 	titleColor := m.styles.Muted
 	switch event.Type {
 	case "approval_request":
@@ -47,6 +44,7 @@ func (m Model) renderAgentEvent(event history.Event, width int) string {
 	case "final":
 		titleColor = m.styles.Text
 	}
+
 	title := event.Title
 	if event.Type == "reasoning_summary" {
 		title = "thinking"
@@ -54,26 +52,40 @@ func (m Model) renderAgentEvent(event history.Event, width int) string {
 	if event.Type == "tool_call" && event.Tool != "" {
 		title = "tool " + event.Tool
 	}
-
 	status := event.Status
 	if status == "" {
 		status = "done"
 	}
-	header := lipgloss.NewStyle().Bold(true).Foreground(titleColor).Background(m.styles.Panel).Render("  "+agentGlyph(event.Type)+" "+title) +
-		lipgloss.NewStyle().Foreground(m.styles.Faint).Background(m.styles.Panel).Render(" · "+status)
 
-	bodyStyle := lipgloss.NewStyle().Foreground(m.styles.Muted).Background(m.styles.Panel).Width(width)
-	body := ""
-	showBody := strings.TrimSpace(event.Content) != "" && (m.cfg.ToolDetails || (event.Type != "tool_call" && event.Type != "tool_result"))
+	prefix := "  " + agentGlyph(event.Type) + " "
+	statusText := " · " + status
+	available := max(1, renderer.width-lipgloss.Width(prefix)-lipgloss.Width(statusText))
+	title = cliClipCells(title, available)
+	header := renderer.paintRow(cliLine{
+		{text: prefix + title, style: cliStyle{foreground: titleColor, bold: true}},
+		{text: statusText, style: cliStyle{foreground: m.styles.Faint}},
+	})
+	rows := []string{header}
+
+	showBody := strings.TrimSpace(event.Content) != "" &&
+		(m.cfg.ToolDetails || (event.Type != "tool_call" && event.Type != "tool_result")) &&
+		!m.agentBodyAlreadyShown(event.Content)
 	if showBody {
-		for _, line := range strings.Split(event.Content, "\n") {
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-			body += bodyStyle.Render("    "+line) + "\n"
-		}
+		bodyRenderer := renderer
+		bodyRenderer.body = cliStyle{foreground: m.styles.Muted}
+		bodyRenderer.strong = cliStyle{foreground: m.styles.Text, bold: true}
+		rows = append(rows, strings.Split(bodyRenderer.Render(event.Content), "\n")...)
 	}
-	return strings.TrimRight(header+"\n"+body, "\n")
+	return rows
+}
+
+func (m Model) agentBodyAlreadyShown(content string) bool {
+	content = strings.TrimSpace(content)
+	answer := strings.TrimSpace(m.lastAssistant)
+	if len(content) < 48 || answer == "" {
+		return false
+	}
+	return content == answer || strings.Contains(answer, content)
 }
 
 func agentGlyph(kind string) string {

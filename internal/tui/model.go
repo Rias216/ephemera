@@ -13,9 +13,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/glamour/ansi"
-	glamourStyles "github.com/charmbracelet/glamour/styles"
 
 	"github.com/ephemera-ai/ephemera/internal/agent"
 	"github.com/ephemera-ai/ephemera/internal/config"
@@ -553,20 +550,18 @@ func (m *Model) refreshViewport(bottom bool) {
 }
 
 func (m Model) renderTranscript() string {
-	width := m.transcriptWidth()
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(markdownStyle(m.styles)),
-		glamour.WithWordWrap(max(1, width-2)),
-	)
-	if err != nil {
-		return "renderer error: " + err.Error()
+	renderer := newCLIRenderer(m.styles, m.transcriptWidth())
+	var rows []string
+	appendSectionGap := func() {
+		if len(rows) == 0 || rows[len(rows)-1] == renderer.blankRow() {
+			return
+		}
+		rows = append(rows, renderer.blankRow())
 	}
 
-	var out strings.Builder
 	if len(m.session.Messages) == 0 {
-		out.WriteString(m.transcriptLine(m.styles.NoticeLabel, "signal"))
-		out.WriteString("\n")
-		welcome, _ := renderer.Render(fmt.Sprintf(`### The signal is open
+		rows = append(rows, m.transcriptLine(m.styles.NoticeLabel, "signal"))
+		rows = append(rows, strings.Split(renderer.Render(fmt.Sprintf(`### The signal is open
 
 Ask naturally, or press **/** to reveal the command palette.
 
@@ -577,46 +572,35 @@ Route: **%s** · **%s** · **%s** token context.`,
 			m.providerName(),
 			m.cfg.Model(),
 			formatTokenCount(m.cfg.ContextTokens),
-		))
-		out.WriteString(m.transcriptBlock(strings.TrimSpace(welcome)))
-		out.WriteString("\n")
+		)), "\n")...)
 	}
 
 	for _, message := range m.session.Messages {
+		var label string
+		var style lipgloss.Style
 		switch message.Role {
 		case "user":
-			out.WriteString(m.transcriptLine(m.styles.UserLabel, "you"))
+			label, style = "you", m.styles.UserLabel
 		case "assistant":
-			out.WriteString(m.transcriptLine(m.styles.AssistantLabel, "ephemera"))
+			label, style = "ephemera", m.styles.AssistantLabel
 		default:
 			continue
 		}
-		out.WriteString("\n")
-		rendered, renderErr := renderer.Render(message.Content)
-		if renderErr != nil {
-			out.WriteString(m.transcriptBlock(message.Content))
-		} else {
-			out.WriteString(m.transcriptBlock(strings.TrimSpace(rendered)))
-		}
-		out.WriteString("\n\n")
+		appendSectionGap()
+		rows = append(rows, m.transcriptLine(style, label))
+		rows = append(rows, strings.Split(renderer.Render(message.Content), "\n")...)
 	}
 
 	if m.notice != "" {
-		out.WriteString(m.transcriptLine(m.styles.NoticeLabel, "signal"))
-		out.WriteString("\n")
-		rendered, renderErr := renderer.Render(m.notice)
-		if renderErr != nil {
-			out.WriteString(m.transcriptBlock(m.notice))
-		} else {
-			out.WriteString(m.transcriptBlock(strings.TrimSpace(rendered)))
-		}
-		out.WriteString("\n")
+		appendSectionGap()
+		rows = append(rows, m.transcriptLine(m.styles.NoticeLabel, "signal"))
+		rows = append(rows, strings.Split(renderer.Render(m.notice), "\n")...)
 	}
 	if len(m.session.Events) > 0 {
-		out.WriteString("\n")
-		out.WriteString(m.renderAgentTimeline())
+		appendSectionGap()
+		rows = append(rows, strings.Split(m.renderAgentTimeline(), "\n")...)
 	}
-	return strings.TrimSpace(out.String())
+	return strings.Join(rows, "\n")
 }
 
 func (m Model) transcriptWidth() int {
@@ -634,81 +618,14 @@ func (m Model) transcriptLine(style lipgloss.Style, text string) string {
 	case "signal":
 		glyph = "·"
 	}
-	return style.Render(glyph + " " + label)
-}
 
-func (m Model) transcriptBlock(text string) string {
 	width := m.transcriptWidth()
-	style := lipgloss.NewStyle().Foreground(m.styles.Text).Background(m.styles.Panel).Width(width)
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		clean := stripANSIBackgrounds(line)
-		if strings.TrimSpace(clean) != "" {
-			clean = "  " + clean
-		}
-		clean = ensurePanelForeground(clean, m.styles.Text)
-		lines[i] = style.Render(clean)
-	}
-	return strings.Join(lines, "\n")
+	labelText := glyph + " " + label + " "
+	divider := strings.Repeat("─", max(0, width-lipgloss.Width(labelText)))
+	labelStyle := style.Background(m.styles.Panel)
+	dividerStyle := lipgloss.NewStyle().Foreground(m.styles.Divider).Background(m.styles.Panel)
+	return labelStyle.Render(labelText) + dividerStyle.Render(divider)
 }
-
-func markdownStyle(styles theme.Styles) ansi.StyleConfig {
-	cfg := glamourStyles.DarkStyleConfig
-	if cfg.CodeBlock.Chroma != nil {
-		chroma := *cfg.CodeBlock.Chroma
-		cfg.CodeBlock.Chroma = &chroma
-	}
-
-	text := theme.Hex(styles.Text)
-	muted := theme.Hex(styles.Muted)
-	primary := theme.Hex(styles.Primary)
-	secondary := theme.Hex(styles.Secondary)
-	panel := theme.Hex(styles.Panel)
-	bold := true
-
-	setPrimitive := func(primitive *ansi.StylePrimitive, color string) {
-		primitive.Color = stringPtr(color)
-		primitive.BackgroundColor = stringPtr(panel)
-	}
-	setBlock := func(block *ansi.StyleBlock, color string) {
-		setPrimitive(&block.StylePrimitive, color)
-	}
-
-	setBlock(&cfg.Document, text)
-	setBlock(&cfg.Paragraph, text)
-	setBlock(&cfg.BlockQuote, muted)
-	setBlock(&cfg.Heading, primary)
-	setBlock(&cfg.H1, primary)
-	setBlock(&cfg.H2, primary)
-	setBlock(&cfg.H3, primary)
-	setBlock(&cfg.H4, primary)
-	setBlock(&cfg.H5, primary)
-	setBlock(&cfg.H6, primary)
-	setBlock(&cfg.Code, secondary)
-	setBlock(&cfg.CodeBlock.StyleBlock, text)
-	setBlock(&cfg.List.StyleBlock, text)
-	setBlock(&cfg.Table.StyleBlock, text)
-	setPrimitive(&cfg.Text, text)
-	setPrimitive(&cfg.Item, text)
-	setPrimitive(&cfg.Enumeration, text)
-	setPrimitive(&cfg.Strong, text)
-	setPrimitive(&cfg.Emph, text)
-	setPrimitive(&cfg.Link, secondary)
-	setPrimitive(&cfg.LinkText, secondary)
-	setPrimitive(&cfg.HorizontalRule, muted)
-	cfg.Heading.Bold = &bold
-	cfg.H1.Bold = &bold
-	cfg.H2.Bold = &bold
-	cfg.H3.Bold = &bold
-	if cfg.CodeBlock.Chroma != nil {
-		cfg.CodeBlock.Chroma.Text.Color = stringPtr(text)
-		cfg.CodeBlock.Chroma.Text.BackgroundColor = stringPtr(panel)
-		cfg.CodeBlock.Chroma.Background.BackgroundColor = stringPtr(panel)
-	}
-	return cfg
-}
-
-func stringPtr(value string) *string { return &value }
 
 func (m Model) generateCmd() tea.Cmd {
 	cfg := m.cfg

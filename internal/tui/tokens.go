@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"image/color"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -122,87 +121,4 @@ func parseContextBudget(value string) (int, error) {
 		return 0, fmt.Errorf("Budget must be at least 512 tokens")
 	}
 	return budget, nil
-}
-
-func stripANSIBackgrounds(text string) string {
-	var b strings.Builder
-	for i := 0; i < len(text); {
-		if text[i] != '\x1b' || i+1 >= len(text) || text[i+1] != '[' {
-			b.WriteByte(text[i])
-			i++
-			continue
-		}
-
-		end := i + 2
-		for end < len(text) && (text[end] < '@' || text[end] > '~') {
-			end++
-		}
-		if end >= len(text) {
-			b.WriteString(text[i:])
-			break
-		}
-		if text[end] != 'm' {
-			b.WriteString(text[i : end+1])
-			i = end + 1
-			continue
-		}
-
-		params := stripBackgroundParams(text[i+2 : end])
-		if params != "" {
-			b.WriteString("\x1b[")
-			b.WriteString(params)
-			b.WriteByte('m')
-		}
-		i = end + 1
-	}
-	return b.String()
-}
-
-func stripBackgroundParams(params string) string {
-	if params == "" {
-		return params
-	}
-
-	parts := strings.Split(params, ";")
-	filtered := make([]string, 0, len(parts))
-	for i := 0; i < len(parts); i++ {
-		code, err := strconv.Atoi(parts[i])
-		if err != nil {
-			filtered = append(filtered, parts[i])
-			continue
-		}
-		switch {
-		case code == 0:
-			continue
-		case code == 48:
-			if i+1 < len(parts) {
-				mode, _ := strconv.Atoi(parts[i+1])
-				if mode == 2 && i+4 < len(parts) {
-					i += 4
-					continue
-				}
-				if mode == 5 && i+2 < len(parts) {
-					i += 2
-					continue
-				}
-			}
-		case code == 49, code >= 40 && code <= 47, code >= 100 && code <= 107:
-			continue
-		default:
-			filtered = append(filtered, parts[i])
-		}
-	}
-	return strings.Join(filtered, ";")
-}
-
-func ensurePanelForeground(text string, foreground color.Color) string {
-	if strings.TrimSpace(text) == "" {
-		return text
-	}
-	return "\x1b[38;2;" + rgbParams(foreground) + "m" + text
-}
-
-func rgbParams(value color.Color) string {
-	rgba := color.NRGBAModel.Convert(value).(color.NRGBA)
-	return fmt.Sprintf("%d;%d;%d", rgba.R, rgba.G, rgba.B)
 }

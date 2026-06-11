@@ -8,7 +8,7 @@ and returns dense, useful answers through a rose-lit Bubble Tea TUI.
 
 ## Features
 
-- Native Go TUI using Bubble Tea v2, Bubbles v2, Lip Gloss v2, and Glamour
+- Native Go TUI using Bubble Tea v2, Bubbles v2, Lip Gloss v2, and a fixed-cell CLI renderer
 - Rose-pink dark theme (`#FF69B4` / `#DB2777`) plus monochrome mode
 - 60 FPS elapsed-time pink outline fade with a moving knife glimmer
 - Cell-diff rendering, synchronized terminal updates, and a native terminal cursor
@@ -18,7 +18,7 @@ and returns dense, useful answers through a rose-lit Bubble Tea TUI.
 - Any OpenAI-compatible API, including local servers
 - Named JSON sessions with automatic persistence
 - Normal, deep-reason, concise, and creative reasoning modes
-- Scrollable Markdown answers and mouse-wheel support
+- Scrollable CLI-rendered answers with framed code, tables, lists, and mouse-wheel support
 - Clipboard copy through `/copy` or `Ctrl+Y`
 - Single Windows launcher that resolves modules, compiles, and runs
 - One static binary when built with `make static`

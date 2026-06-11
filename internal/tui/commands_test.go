@@ -168,29 +168,6 @@ func TestConnectRequiredCredentialDoesNotAdvance(t *testing.T) {
 	}
 }
 
-func TestMarkdownStyleUsesPanelBackgroundForInlineText(t *testing.T) {
-	styles := theme.New("rose")
-	got := markdownStyle(styles)
-
-	panelBackgrounds := map[string]**string{
-		"document":  &got.Document.BackgroundColor,
-		"paragraph": &got.Paragraph.BackgroundColor,
-		"heading":   &got.Heading.BackgroundColor,
-		"h1":        &got.H1.BackgroundColor,
-		"code":      &got.Code.BackgroundColor,
-	}
-	want := theme.Hex(styles.Panel)
-	for name, background := range panelBackgrounds {
-		if background == nil || *background == nil || **background != want {
-			t.Fatalf("%s markdown background = %v, want %q", name, backgroundValue(background), want)
-		}
-	}
-
-	if got.CodeBlock.Chroma == nil || got.CodeBlock.Chroma.Background.BackgroundColor == nil || *got.CodeBlock.Chroma.Background.BackgroundColor != want {
-		t.Fatalf("code block chroma background = %v, want %q", got.CodeBlock.Chroma, want)
-	}
-}
-
 func TestTranscriptRowsUseThemeBackgroundInsteadOfBlack(t *testing.T) {
 	cfg := config.Default()
 	styles := theme.New("rose")
@@ -206,19 +183,6 @@ func TestTranscriptRowsUseThemeBackgroundInsteadOfBlack(t *testing.T) {
 	panel := "48;2;20;10;18"
 	if !strings.Contains(got, panel) {
 		t.Fatalf("transcript did not use panel background %q: %q", panel, got)
-	}
-}
-
-func TestStripANSIBackgroundsRemovesResetsAndBackgrounds(t *testing.T) {
-	input := "\x1b[0;38;2;252;231;243;48;2;0;0;0mHello\x1b[0m"
-
-	got := stripANSIBackgrounds(input)
-
-	if strings.Contains(got, "48;2") || strings.Contains(got, "\x1b[0") {
-		t.Fatalf("stripANSIBackgrounds() = %q, want no background or reset escapes", got)
-	}
-	if !strings.Contains(got, "38;2;252;231;243") {
-		t.Fatalf("stripANSIBackgrounds() = %q, want foreground preserved", got)
 	}
 }
 
@@ -710,13 +674,6 @@ func failingModelListServer(t *testing.T, status int, body string) *httptest.Ser
 	}))
 	t.Cleanup(server.Close)
 	return server
-}
-
-func backgroundValue(value **string) string {
-	if value == nil || *value == nil {
-		return "<nil>"
-	}
-	return **value
 }
 
 func hasSuggestion(items []suggestion, value string) bool {
