@@ -97,8 +97,12 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/usage", "show current context usage"}},
 	},
 	{
-		Name: "/agent", Usage: "<on|off|status>", Description: "toggle or inspect project-agent mode", Category: "AGENT", Introduced: "v0.4.0", Permission: "local", Choices: []string{"on", "off", "status"},
-		Examples: []commandExample{{"/agent on", "enable project-agent mode"}, {"/agent status", "show agent settings"}},
+		Name: "/agent", Usage: "<on|auto|safe|read-only|status>", Description: "control project-agent mode and approval behavior", Category: "AGENT", Introduced: "v0.4.0", Permission: "local", Choices: []string{"on", "auto", "safe", "read-only", "status"},
+		Examples: []commandExample{{"/agent auto", "run every requested tool immediately"}, {"/agent safe", "require approval for writes and shell"}, {"/agent status", "show agent settings"}},
+	},
+	{
+		Name: "/approval", Usage: "<auto|safe|read-only|workspace-write|chat>", Description: "set the agent approval policy", Category: "AGENT", Introduced: "v0.4.1", Permission: "workspace", Choices: config.ApprovalPolicyChoices(),
+		Examples: []commandExample{{"/approval auto", "approve and run every agent tool"}, {"/approval safe", "prompt before writes and shell"}},
 	},
 	{
 		Name: "/approve", Description: "run the pending agent action", Category: "AGENT", Introduced: "v0.4.0", Permission: "workspace",
@@ -117,8 +121,8 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/tools", "show tool names and risk levels"}},
 	},
 	{
-		Name: "/thinking", Description: "toggle visible reasoning blocks", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
-		Examples: []commandExample{{"/thinking", "show or hide reasoning summaries"}},
+		Name: "/thinking", Usage: "<on|off|toggle>", Description: "show or hide Beneath the Surface decision traces", Category: "AGENT", Introduced: "v0.4.0", Permission: "local", Choices: []string{"on", "off", "toggle"},
+		Examples: []commandExample{{"/thinking on", "show goal, assumptions, approach, tool rationale, and verification"}, {"/thinking off", "hide visible reasoning traces"}},
 	},
 	{
 		Name: "/details", Description: "toggle detailed tool call output", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",

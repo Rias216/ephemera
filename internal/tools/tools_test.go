@@ -83,3 +83,16 @@ func TestShellBlocksDestructiveCommands(t *testing.T) {
 		t.Fatalf("destructive shell result = %#v, want blocked", result)
 	}
 }
+
+func TestAutoApproveNeverCreatesApprovalPrompts(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	registry := NewRegistry(cfg)
+
+	for _, name := range []string{"read_file", "apply_patch", "shell", "go_test", "unknown_tool"} {
+		if registry.RequiresApproval(name) {
+			t.Fatalf("%s unexpectedly requires approval in auto mode", name)
+		}
+	}
+}

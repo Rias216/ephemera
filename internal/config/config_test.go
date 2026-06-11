@@ -148,3 +148,20 @@ func TestCompatiblePresets(t *testing.T) {
 		}
 	}
 }
+
+func TestParseApprovalPolicyAliases(t *testing.T) {
+	cases := map[string]ApprovalPolicy{
+		"auto":            ApprovalAutoApprove,
+		"auto-approve":    ApprovalAutoApprove,
+		"safe":            ApprovalApproveWrites,
+		"read-only":       ApprovalReadOnly,
+		"workspace-write": ApprovalWorkspaceWrite,
+		"chat":            ApprovalChat,
+	}
+	for input, want := range cases {
+		got, ok := ParseApprovalPolicy(input)
+		if !ok || got != want {
+			t.Fatalf("ParseApprovalPolicy(%q) = %q, %t; want %q, true", input, got, ok, want)
+		}
+	}
+}

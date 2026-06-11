@@ -1,0 +1,719 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-06-11 21:23:30.468925493 +0000
++++ b/README.md	2026-06-11 21:39:13.736415117 +0000
+@@ -333,3 +333,20 @@
+ The provider wizard uses a reversible five-stage flow with a live route preview,
+ inline validation, environment-key detection, a final review gate, and fast
+ keyboard navigation. See `UI_POLISH_V9.md` for the complete interaction notes.
++
++
++## Auto-approve agent mode
++
++Run `/agent auto` or `/approval auto` to execute every built-in agent tool immediately without approval prompts. Run `/agent safe` or `/approval safe` to restore confirmation for writes and shell commands. Workspace path guards and destructive-command checks remain active.
++
++## Renderer, auto-approve, and Beneath the Surface
++
++The transcript renderer now paints the complete viewport itself, preventing the
++unstyled final-column padding that appeared as a black strip in some terminals.
++
++- `/agent auto` or `/approval auto` automatically executes supported agent tools.
++- `/agent safe` restores write and shell confirmations.
++- `/thinking on` shows the structured **Beneath the Surface** decision trace.
++- `/thinking off` hides visible reasoning traces.
++
++See `RENDERER_AUTO_APPROVE_REASONING.md` for implementation and safety details.
+diff -ruN a/RENDERER_AUTO_APPROVE_REASONING.md b/RENDERER_AUTO_APPROVE_REASONING.md
+--- a/RENDERER_AUTO_APPROVE_REASONING.md	1970-01-01 00:00:00.000000000 +0000
++++ b/RENDERER_AUTO_APPROVE_REASONING.md	2026-06-11 21:39:13.727822442 +0000
+@@ -0,0 +1,47 @@
++# Renderer, auto-approve, and Beneath the Surface upgrade
++
++## Right-edge artifact fix
++
++The transcript no longer delegates visible-row padding to `viewport.View()`.
++Ephemera now selects the viewport's visible content directly, clips it with an
++ANSI-aware cell cutter, and paints every missing cell with the panel background.
++This removes the one-cell black strip that could appear after nested ANSI resets.
++
++The renderer also targets the complete viewport width instead of leaving two
++cells for Bubbles to fill with unstyled spaces.
++
++## Auto-approve
++
++Use either command:
++
++```text
++/agent auto
++/approval auto
++```
++
++Every supported tool request is executed immediately without an approval prompt.
++Use `/agent safe` or `/approval safe` to restore approval prompts for writes,
++shell commands, and tests.
++
++Auto-approve removes the confirmation gate; normal workspace path validation,
++unknown-tool handling, and destructive-command checks still apply.
++
++## Beneath the Surface
++
++Use:
++
++```text
++/thinking on
++```
++
++The agent timeline will show a concise structured decision trace:
++
++- goal;
++- material assumptions;
++- approach;
++- tool rationale;
++- verification method.
++
++This is an intentionally compact, user-facing rationale rather than raw private
++chain-of-thought. Use `/thinking off` to hide it or `/thinking toggle` to switch
++its state.
+diff -ruN a/internal/agent/agent.go b/internal/agent/agent.go
+--- a/internal/agent/agent.go	2026-06-11 21:11:13.561863558 +0000
++++ b/internal/agent/agent.go	2026-06-11 21:38:26.982107245 +0000
+@@ -110,9 +110,9 @@
+ 	var b strings.Builder
+ 	b.WriteString(reasoning.SystemPrompt(r.Config.Mode))
+ 	b.WriteString("\n\nYou are now operating as Ephemera's local project agent.\n")
+-	b.WriteString("Expose a concise visible reasoning trace: goal, assumptions, plan, tool rationale, and verification summary. Keep private chain-of-thought private.\n")
++	b.WriteString("Expose a concise visible decision trace for the UI, never private chain-of-thought. Include the goal, material assumptions, approach, why each tool is useful, and how the result will be verified.\n")
+ 	b.WriteString("When action is useful, respond with only JSON in this shape:\n")
+-	b.WriteString(`{"summary":"brief reason","plan":["step 1","step 2"],"actions":[{"tool":"read_file","arguments":{"path":"go.mod"}}],"final":""}`)
++	b.WriteString(`{"reasoning":{"goal":"what success means","assumptions":["only material assumptions"],"approach":["short step"],"tool_rationale":"why these tools are needed","verification":"how success will be checked"},"summary":"brief decision summary","plan":["step 1","step 2"],"actions":[{"tool":"read_file","arguments":{"path":"go.mod"}}],"final":""}`)
+ 	b.WriteString("\nUse actions only from this catalog:\n")
+ 	for _, tool := range tools.Builtins() {
+ 		fmt.Fprintf(&b, "- %s [%s]: %s\n", tool.Name, tool.Risk, tool.Description)
+@@ -121,7 +121,7 @@
+ 	b.WriteString("- Inspect before editing unless the target file and change are already obvious.\n")
+ 	b.WriteString("- For apply_patch, provide complete replacement file content in arguments.content.\n")
+ 	b.WriteString("- Use shell/go_test only when verification is needed.\n")
+-	b.WriteString("- Always include summary and plan so the CLI can show your reasoning trace.\n")
++	b.WriteString("- Always include reasoning, summary, and plan so the CLI can show Beneath the Surface. Keep it concise and outcome-focused.\n")
+ 	b.WriteString("- If done, return JSON with summary, plan, final, and no actions.\n")
+ 	b.WriteString("- If the user asks for normal explanation only, still prefer JSON with final so the reasoning trace is visible.\n")
+ 	fmt.Fprintf(&b, "\nWorkspace root: %s\n", r.Tools.WorkspaceRoot)
+@@ -151,10 +151,64 @@
+ }
+ 
+ type modelAction struct {
+-	Summary string            `json:"summary"`
+-	Plan    []string          `json:"plan"`
+-	Actions []modelToolAction `json:"actions"`
+-	Final   string            `json:"final"`
++	Reasoning modelReasoning    `json:"reasoning"`
++	Summary   string            `json:"summary"`
++	Plan      []string          `json:"plan"`
++	Actions   []modelToolAction `json:"actions"`
++	Final     string            `json:"final"`
++}
++
++type modelReasoning struct {
++	Goal          reasoningText  `json:"goal"`
++	Assumptions   reasoningItems `json:"assumptions"`
++	Approach      reasoningItems `json:"approach"`
++	ToolRationale reasoningText  `json:"tool_rationale"`
++	Verification  reasoningText  `json:"verification"`
++}
++
++type reasoningText string
++
++type reasoningItems []string
++
++func (value *reasoningText) UnmarshalJSON(data []byte) error {
++	var text string
++	if err := json.Unmarshal(data, &text); err == nil {
++		*value = reasoningText(strings.TrimSpace(text))
++		return nil
++	}
++	var items []string
++	if err := json.Unmarshal(data, &items); err == nil {
++		*value = reasoningText(strings.Join(compactReasoningItems(reasoningItems(items)), "; "))
++		return nil
++	}
++	if string(data) == "null" {
++		*value = ""
++		return nil
++	}
++	return fmt.Errorf("reasoning field must be text or a text list")
++}
++
++func (values *reasoningItems) UnmarshalJSON(data []byte) error {
++	var items []string
++	if err := json.Unmarshal(data, &items); err == nil {
++		*values = reasoningItems(items)
++		return nil
++	}
++	var text string
++	if err := json.Unmarshal(data, &text); err == nil {
++		text = strings.TrimSpace(text)
++		if text == "" {
++			*values = nil
++		} else {
++			*values = reasoningItems{text}
++		}
++		return nil
++	}
++	if string(data) == "null" {
++		*values = nil
++		return nil
++	}
++	return fmt.Errorf("reasoning list must be text or a text list")
+ }
+ 
+ type modelToolAction struct {
+@@ -193,8 +247,12 @@
+ 
+ func actionEvents(action modelAction) []history.Event {
+ 	var events []history.Event
+-	if strings.TrimSpace(action.Summary) != "" {
+-		events = append(events, newEvent("reasoning_summary", "Reasoning", action.Summary, "", "done"))
++	if trace := formatReasoningTrace(action.Reasoning); trace != "" {
++		events = append(events, newEvent("reasoning_trace", "Beneath the Surface", trace, "", "done"))
++	} else if strings.TrimSpace(action.Summary) != "" {
++		// Older or less capable providers may omit the structured reasoning object.
++		// Keep the visible summary rather than hiding all decision context.
++		events = append(events, newEvent("reasoning_summary", "Beneath the Surface", action.Summary, "", "done"))
+ 	}
+ 	if len(action.Plan) > 0 {
+ 		events = append(events, newEvent("plan_update", "Plan", strings.Join(action.Plan, "\n"), "", "done"))
+@@ -202,6 +260,42 @@
+ 	return events
+ }
+ 
++func formatReasoningTrace(trace modelReasoning) string {
++	var sections []string
++	if value := strings.TrimSpace(string(trace.Goal)); value != "" {
++		sections = append(sections, "**Goal**\n"+value)
++	}
++	if values := compactReasoningItems(trace.Assumptions); len(values) > 0 {
++		sections = append(sections, "**Assumptions**\n- "+strings.Join(values, "\n- "))
++	}
++	if values := compactReasoningItems(trace.Approach); len(values) > 0 {
++		var numbered []string
++		for index, value := range values {
++			numbered = append(numbered, fmt.Sprintf("%d. %s", index+1, value))
++		}
++		sections = append(sections, "**Approach**\n"+strings.Join(numbered, "\n"))
++	}
++	if value := strings.TrimSpace(string(trace.ToolRationale)); value != "" {
++		sections = append(sections, "**Tool rationale**\n"+value)
++	}
++	if value := strings.TrimSpace(string(trace.Verification)); value != "" {
++		sections = append(sections, "**Verification**\n"+value)
++	}
++	return strings.Join(sections, "\n\n")
++}
++
++func compactReasoningItems(values reasoningItems) []string {
++	out := make([]string, 0, len(values))
++	for _, value := range values {
++		value = strings.TrimSpace(value)
++		if value == "" {
++			continue
++		}
++		out = append(out, compact(value, 360))
++	}
++	return out
++}
++
+ func conversationMessages(messages []history.Message) []llm.Message {
+ 	out := make([]llm.Message, 0, len(messages))
+ 	for _, message := range messages {
+diff -ruN a/internal/agent/agent_test.go b/internal/agent/agent_test.go
+--- a/internal/agent/agent_test.go	2026-06-11 21:11:13.562438011 +0000
++++ b/internal/agent/agent_test.go	2026-06-11 21:38:44.273945751 +0000
+@@ -91,3 +91,60 @@
+ 	}
+ 	return false
+ }
++
++func TestRunAutoApproveExecutesWriteAndContinues(t *testing.T) {
++	root := t.TempDir()
++	cfg := config.Default()
++	cfg.WorkspaceRoot = root
++	cfg.AgentEnabled = true
++	cfg.ApprovalPolicy = config.ApprovalAutoApprove
++	provider := &fakeProvider{responses: []string{
++		`{"reasoning":{"goal":"create the requested file","assumptions":"the workspace is writable","approach":["write the file","verify completion"],"tool_rationale":["apply_patch performs the requested workspace change"],"verification":"confirm the tool result"},"summary":"create file","plan":["write file"],"actions":[{"tool":"apply_patch","arguments":{"path":"main.go","content":"package main\n"}}]}`,
++		`{"reasoning":{"goal":"report completion","approach":"summarize the verified result","verification":"the write tool returned success"},"summary":"done","plan":[],"actions":[],"final":"Created main.go."}`,
++	}}
++	session := history.New("agent", "ollama", cfg.Model(), reasoning.ModeNormal)
++	session.Append("user", "create main.go")
++
++	result := NewRunner(cfg, provider).Run(context.Background(), session)
++
++	if result.Pending != nil {
++		t.Fatalf("auto-approve unexpectedly paused: %#v", result.Pending)
++	}
++	data, err := os.ReadFile(filepath.Join(root, "main.go"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(data) != "package main\n" {
++		t.Fatalf("main.go = %q", data)
++	}
++	if !hasEvent(result.Events, "reasoning_trace") {
++		t.Fatalf("events = %#v, want reasoning_trace", result.Events)
++	}
++	if !strings.Contains(result.Text, "Created main.go") {
++		t.Fatalf("final text = %q", result.Text)
++	}
++}
++
++func TestParseModelActionAcceptsCompactReasoningShapes(t *testing.T) {
++	action, ok := parseModelAction(`{
++		"reasoning": {
++			"goal": "fix rendering",
++			"assumptions": "the artifact is an unpainted cell",
++			"approach": ["paint every row", "verify exact widths"],
++			"tool_rationale": ["inspect source", "run tests"],
++			"verification": "all rows match viewport width"
++		},
++		"summary": "repair the renderer",
++		"plan": ["patch", "test"],
++		"actions": []
++	}`)
++	if !ok {
++		t.Fatal("expected model action to parse")
++	}
++	trace := formatReasoningTrace(action.Reasoning)
++	for _, want := range []string{"Goal", "Assumptions", "Approach", "Tool rationale", "Verification", "fix rendering"} {
++		if !strings.Contains(trace, want) {
++			t.Fatalf("trace missing %q:\n%s", want, trace)
++		}
++	}
++}
+diff -ruN a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go	2026-06-11 21:11:13.563733167 +0000
++++ b/internal/config/config.go	2026-06-11 21:34:14.973025465 +0000
+@@ -49,7 +49,8 @@
+ 	ApprovalChat           ApprovalPolicy = "chat"
+ 	ApprovalReadOnly       ApprovalPolicy = "read-only"
+ 	ApprovalApproveWrites  ApprovalPolicy = "approve-writes"
+-	ApprovalWorkspaceWrite ApprovalPolicy = "workspace-write"
++	ApprovalWorkspaceWrite ApprovalPolicy = "workspace-write" // legacy unrestricted mode
++	ApprovalAutoApprove    ApprovalPolicy = "auto-approve"
+ )
+ 
+ // Protocol names the wire protocol used by a connection preset.
+@@ -170,13 +171,36 @@
+ // ValidApprovalPolicy reports whether value is a supported agent autonomy mode.
+ func ValidApprovalPolicy(value ApprovalPolicy) bool {
+ 	switch value {
+-	case ApprovalChat, ApprovalReadOnly, ApprovalApproveWrites, ApprovalWorkspaceWrite:
++	case ApprovalChat, ApprovalReadOnly, ApprovalApproveWrites, ApprovalWorkspaceWrite, ApprovalAutoApprove:
+ 		return true
+ 	default:
+ 		return false
+ 	}
+ }
+ 
++// ParseApprovalPolicy accepts both persisted policy names and concise CLI aliases.
++func ParseApprovalPolicy(value string) (ApprovalPolicy, bool) {
++	switch strings.ToLower(strings.TrimSpace(value)) {
++	case "auto", "auto-approve", "unrestricted":
++		return ApprovalAutoApprove, true
++	case "safe", "approve", "approve-writes":
++		return ApprovalApproveWrites, true
++	case "read-only", "readonly", "read":
++		return ApprovalReadOnly, true
++	case "workspace-write", "workspace":
++		return ApprovalWorkspaceWrite, true
++	case "chat":
++		return ApprovalChat, true
++	default:
++		return "", false
++	}
++}
++
++// ApprovalPolicyChoices lists the concise values exposed by the command palette.
++func ApprovalPolicyChoices() []string {
++	return []string{"auto", "safe", "read-only", "workspace-write", "chat"}
++}
++
+ // Dir returns Ephemera's platform-appropriate config directory.
+ func Dir() (string, error) {
+ 	root, err := os.UserConfigDir()
+diff -ruN a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go	2026-06-11 21:11:13.564337802 +0000
++++ b/internal/config/config_test.go	2026-06-11 21:38:45.566503033 +0000
+@@ -148,3 +148,20 @@
+ 		}
+ 	}
+ }
++
++func TestParseApprovalPolicyAliases(t *testing.T) {
++	cases := map[string]ApprovalPolicy{
++		"auto":            ApprovalAutoApprove,
++		"auto-approve":    ApprovalAutoApprove,
++		"safe":            ApprovalApproveWrites,
++		"read-only":       ApprovalReadOnly,
++		"workspace-write": ApprovalWorkspaceWrite,
++		"chat":            ApprovalChat,
++	}
++	for input, want := range cases {
++		got, ok := ParseApprovalPolicy(input)
++		if !ok || got != want {
++			t.Fatalf("ParseApprovalPolicy(%q) = %q, %t; want %q, true", input, got, ok, want)
++		}
++	}
++}
+diff -ruN a/internal/tools/tools.go b/internal/tools/tools.go
+--- a/internal/tools/tools.go	2026-06-11 21:11:13.573655241 +0000
++++ b/internal/tools/tools.go	2026-06-11 21:34:14.973690068 +0000
+@@ -102,6 +102,13 @@
+ 
+ // RequiresApproval reports whether the configured policy needs user approval.
+ func (r Registry) RequiresApproval(name string) bool {
++	// Auto-approve intentionally attempts every requested action immediately.
++	// Unknown tools still fail safely in Execute instead of creating a useless
++	// approval prompt that can never make them executable.
++	if r.ApprovalPolicy == config.ApprovalAutoApprove {
++		return false
++	}
++
+ 	tool, ok := Lookup(name)
+ 	if !ok {
+ 		return true
+diff -ruN a/internal/tools/tools_test.go b/internal/tools/tools_test.go
+--- a/internal/tools/tools_test.go	2026-06-11 21:11:13.574136874 +0000
++++ b/internal/tools/tools_test.go	2026-06-11 21:38:44.283296635 +0000
+@@ -83,3 +83,16 @@
+ 		t.Fatalf("destructive shell result = %#v, want blocked", result)
+ 	}
+ }
++
++func TestAutoApproveNeverCreatesApprovalPrompts(t *testing.T) {
++	cfg := config.Default()
++	cfg.WorkspaceRoot = t.TempDir()
++	cfg.ApprovalPolicy = config.ApprovalAutoApprove
++	registry := NewRegistry(cfg)
++
++	for _, name := range []string{"read_file", "apply_patch", "shell", "go_test", "unknown_tool"} {
++		if registry.RequiresApproval(name) {
++			t.Fatalf("%s unexpectedly requires approval in auto mode", name)
++		}
++	}
++}
+diff -ruN a/internal/tui/agent_ui.go b/internal/tui/agent_ui.go
+--- a/internal/tui/agent_ui.go	2026-06-11 21:18:49.524577854 +0000
++++ b/internal/tui/agent_ui.go	2026-06-11 21:39:14.886641883 +0000
+@@ -18,7 +18,7 @@
+ 	renderer := newCLIRenderer(m.styles, m.transcriptWidth())
+ 	rows := []string{m.transcriptLine(m.styles.NoticeLabel, "agent")}
+ 	for _, event := range m.session.Events {
+-		if event.Type == "reasoning_summary" && !m.cfg.ShowThinking {
++		if (event.Type == "reasoning_summary" || event.Type == "reasoning_trace") && !m.cfg.ShowThinking {
+ 			continue
+ 		}
+ 		rows = append(rows, m.renderAgentEvent(event, renderer)...)
+@@ -39,15 +39,15 @@
+ 		}
+ 	case "plan_update":
+ 		titleColor = m.styles.Primary
+-	case "reasoning_summary":
++	case "reasoning_summary", "reasoning_trace":
+ 		titleColor = m.styles.AccentSoft
+ 	case "final":
+ 		titleColor = m.styles.Text
+ 	}
+ 
+ 	title := event.Title
+-	if event.Type == "reasoning_summary" {
+-		title = "thinking"
++	if event.Type == "reasoning_summary" || event.Type == "reasoning_trace" {
++		title = "beneath the surface"
+ 	}
+ 	if event.Type == "tool_call" && event.Tool != "" {
+ 		title = "tool " + event.Tool
+@@ -92,7 +92,7 @@
+ 	switch kind {
+ 	case "plan_update":
+ 		return "◇"
+-	case "reasoning_summary":
++	case "reasoning_summary", "reasoning_trace":
+ 		return "◌"
+ 	case "tool_call":
+ 		return "›"
+@@ -191,13 +191,15 @@
+ - Workspace: %s
+ - Auto test: %s
+ - Tool output budget: %s tokens
++- Beneath the Surface: %t
+ 
+-Use /agent on, /agent off, /tools, /plan, /approve, /reject, /run, /diff, /compact, /config, and /memory.`,
++Use /agent auto or /approval auto for automatic execution. Use /agent safe to restore confirmations. Use /thinking on to show concise goal, assumptions, approach, tool rationale, and verification. Other commands: /tools, /plan, /approve, /reject, /run, /diff, /compact, /config, and /memory.`,
+ 		m.cfg.AgentEnabled,
+ 		m.cfg.ApprovalPolicy,
+ 		agent.NewRunner(m.cfg, nil).Tools.WorkspaceRoot,
+ 		m.cfg.AutoTestCommand,
+ 		formatTokenCount(m.cfg.MaxToolOutputTokens),
++		m.cfg.ShowThinking,
+ 	)
+ }
+ 
+@@ -236,6 +238,7 @@
+ - Context budget: %s
+ - Max output tokens: %s
+ - Max tool output tokens: %s
++- Beneath the Surface: %t
+ - Theme density: %s`,
+ 		m.providerName(),
+ 		m.cfg.Model(),
+@@ -248,6 +251,7 @@
+ 		formatTokenCount(m.cfg.ContextTokens),
+ 		formatTokenCount(int(m.cfg.MaxTokens)),
+ 		formatTokenCount(m.cfg.MaxToolOutputTokens),
++		m.cfg.ShowThinking,
+ 		m.cfg.ThemeDensity,
+ 	)
+ }
+diff -ruN a/internal/tui/cli_renderer_test.go b/internal/tui/cli_renderer_test.go
+--- a/internal/tui/cli_renderer_test.go	2026-06-11 21:19:49.253561926 +0000
++++ b/internal/tui/cli_renderer_test.go	2026-06-11 21:38:45.398679580 +0000
+@@ -5,6 +5,7 @@
+ 	"strings"
+ 	"testing"
+ 
++	"charm.land/bubbles/v2/viewport"
+ 	"charm.land/lipgloss/v2"
+ 
+ 	"github.com/ephemera-ai/ephemera/internal/theme"
+@@ -60,3 +61,21 @@
+ 		}
+ 	}
+ }
++
++func TestTexturedViewportUsesFullyPaintedRows(t *testing.T) {
++	styles := theme.New("rose")
++	model := Model{styles: styles}
++	model.viewport = viewport.New(viewport.WithWidth(32), viewport.WithHeight(4))
++	model.viewport.SetContent(newCLIRenderer(styles, 32).Render("short line"))
++
++	output := model.texturedViewport()
++	lines := strings.Split(output, "\n")
++	if len(lines) != 4 {
++		t.Fatalf("height = %d, want 4", len(lines))
++	}
++	for index, line := range lines {
++		if got := lipgloss.Width(line); got != 32 {
++			t.Fatalf("row %d width = %d, want 32", index, got)
++		}
++	}
++}
+diff -ruN a/internal/tui/commands.go b/internal/tui/commands.go
+--- a/internal/tui/commands.go	2026-06-11 21:11:13.576091137 +0000
++++ b/internal/tui/commands.go	2026-06-11 21:37:02.385483026 +0000
+@@ -97,8 +97,12 @@
+ 		Examples: []commandExample{{"/usage", "show current context usage"}},
+ 	},
+ 	{
+-		Name: "/agent", Usage: "<on|off|status>", Description: "toggle or inspect project-agent mode", Category: "AGENT", Introduced: "v0.4.0", Permission: "local", Choices: []string{"on", "off", "status"},
+-		Examples: []commandExample{{"/agent on", "enable project-agent mode"}, {"/agent status", "show agent settings"}},
++		Name: "/agent", Usage: "<on|auto|safe|read-only|status>", Description: "control project-agent mode and approval behavior", Category: "AGENT", Introduced: "v0.4.0", Permission: "local", Choices: []string{"on", "auto", "safe", "read-only", "status"},
++		Examples: []commandExample{{"/agent auto", "run every requested tool immediately"}, {"/agent safe", "require approval for writes and shell"}, {"/agent status", "show agent settings"}},
++	},
++	{
++		Name: "/approval", Usage: "<auto|safe|read-only|workspace-write|chat>", Description: "set the agent approval policy", Category: "AGENT", Introduced: "v0.4.1", Permission: "workspace", Choices: config.ApprovalPolicyChoices(),
++		Examples: []commandExample{{"/approval auto", "approve and run every agent tool"}, {"/approval safe", "prompt before writes and shell"}},
+ 	},
+ 	{
+ 		Name: "/approve", Description: "run the pending agent action", Category: "AGENT", Introduced: "v0.4.0", Permission: "workspace",
+@@ -117,8 +121,8 @@
+ 		Examples: []commandExample{{"/tools", "show tool names and risk levels"}},
+ 	},
+ 	{
+-		Name: "/thinking", Description: "toggle visible reasoning blocks", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
+-		Examples: []commandExample{{"/thinking", "show or hide reasoning summaries"}},
++		Name: "/thinking", Usage: "<on|off|toggle>", Description: "show or hide Beneath the Surface decision traces", Category: "AGENT", Introduced: "v0.4.0", Permission: "local", Choices: []string{"on", "off", "toggle"},
++		Examples: []commandExample{{"/thinking on", "show goal, assumptions, approach, tool rationale, and verification"}, {"/thinking off", "hide visible reasoning traces"}},
+ 	},
+ 	{
+ 		Name: "/details", Description: "toggle detailed tool call output", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
+diff -ruN a/internal/tui/model.go b/internal/tui/model.go
+--- a/internal/tui/model.go	2026-06-11 21:19:10.550405206 +0000
++++ b/internal/tui/model.go	2026-06-11 21:37:27.606676141 +0000
+@@ -35,6 +35,8 @@
+ - **/model <id>** / **/models** — select intelligence
+ - **/mode <profile>** — change response character
+ - **/usage** / **/budget <tokens>** — inspect or set context
++- **/approval <auto|safe|read-only>** — set agent approval policy
++- **/thinking <on|off>** — show or hide Beneath the Surface traces
+ - **/retry** / **/undo** — revise the latest exchange
+ - **/export [path]** — export the transcript
+ - **/doctor** — inspect the active route
+@@ -604,7 +606,11 @@
+ }
+ 
+ func (m Model) transcriptWidth() int {
+-	return max(20, m.viewport.Width()-2)
++	// Bubble's viewport pads short rows to its configured width with unstyled
++	// spaces. Rendering two cells short therefore exposed the terminal's default
++	// black background at the right edge. Paint the complete viewport width so
++	// the viewport never has to append its own unstyled tail.
++	return max(20, m.viewport.Width())
+ }
+ 
+ func (m Model) transcriptLine(style lipgloss.Style, text string) string {
+@@ -865,19 +871,59 @@
+ 		switch value {
+ 		case "on":
+ 			m.cfg.AgentEnabled = true
+-			m.status = "Agent mode enabled · writes require approval"
++			m.status = "Agent mode enabled · policy " + string(m.cfg.ApprovalPolicy)
+ 			_ = config.Save(m.cfg)
+ 		case "off":
+ 			m.cfg.AgentEnabled = true
+ 			m.status = "Agent mode is always on."
+ 			_ = config.Save(m.cfg)
++		case "auto", "auto-approve":
++			m.cfg.AgentEnabled = true
++			m.cfg.ApprovalPolicy = config.ApprovalAutoApprove
++			_ = config.Save(m.cfg)
++			m.notice = m.agentNotice()
++			if m.pendingApproval != nil {
++				return false, m.approvePending()
++			}
++			m.status = "Auto-approve enabled · all agent tools run immediately"
++		case "safe":
++			m.cfg.ApprovalPolicy = config.ApprovalApproveWrites
++			m.status = "Safe approvals enabled · writes and shell require confirmation"
++			_ = config.Save(m.cfg)
++		case "read-only", "readonly":
++			m.cfg.ApprovalPolicy = config.ApprovalReadOnly
++			m.status = "Read-only agent policy enabled"
++			_ = config.Save(m.cfg)
+ 		case "status":
+ 			m.status = "Agent status opened."
+ 		default:
+-			m.status = "Usage: /agent <on|off|status>"
++			m.status = "Usage: /agent <on|auto|safe|read-only|status>"
+ 		}
+ 		m.notice = m.agentNotice()
+ 
++	case "/approval":
++		value, ok := requireArg("/approval <auto|safe|read-only|workspace-write|chat>")
++		if !ok {
++			break
++		}
++		policy, valid := config.ParseApprovalPolicy(value)
++		if !valid {
++			m.status = "Unknown approval policy: " + value
++			break
++		}
++		m.cfg.ApprovalPolicy = policy
++		m.cfg.AgentEnabled = true
++		_ = config.Save(m.cfg)
++		m.notice = m.agentNotice()
++		if policy == config.ApprovalAutoApprove && m.pendingApproval != nil {
++			return false, m.approvePending()
++		}
++		if policy == config.ApprovalAutoApprove {
++			m.status = "Auto-approve enabled · all agent tools run immediately"
++		} else {
++			m.status = "Approval policy → " + string(policy)
++		}
++
+ 	case "/approve":
+ 		return false, m.approvePending()
+ 
+@@ -893,9 +939,32 @@
+ 		m.status = "Tools opened."
+ 
+ 	case "/thinking":
+-		m.cfg.ShowThinking = !m.cfg.ShowThinking
++		value := "toggle"
++		if len(args) > 0 {
++			value = strings.ToLower(strings.TrimSpace(args[0]))
++		}
++		valid := true
++		switch value {
++		case "on", "show", "true":
++			m.cfg.ShowThinking = true
++		case "off", "hide", "false":
++			m.cfg.ShowThinking = false
++		case "toggle":
++			m.cfg.ShowThinking = !m.cfg.ShowThinking
++		default:
++			valid = false
++			m.status = "Usage: /thinking <on|off|toggle>"
++		}
++		if !valid {
++			break
++		}
+ 		_ = config.Save(m.cfg)
+-		m.status = fmt.Sprintf("Thinking visibility → %t", m.cfg.ShowThinking)
++		m.notice = m.agentNotice()
++		if m.cfg.ShowThinking {
++			m.status = "Beneath the Surface → visible"
++		} else {
++			m.status = "Beneath the Surface → hidden"
++		}
+ 
+ 	case "/details":
+ 		m.cfg.ToolDetails = !m.cfg.ToolDetails
+diff -ruN a/internal/tui/texture.go b/internal/tui/texture.go
+--- a/internal/tui/texture.go	2026-06-11 21:19:32.639893512 +0000
++++ b/internal/tui/texture.go	2026-06-11 21:37:11.894331693 +0000
+@@ -5,6 +5,7 @@
+ 	"strings"
+ 
+ 	"charm.land/lipgloss/v2"
++	"github.com/charmbracelet/x/ansi"
+ )
+ 
+ // textureLine now provides a clean, stable fill. Earlier versions scattered
+@@ -26,27 +27,35 @@
+ func (m Model) texturedViewport() string {
+ 	targetHeight := max(1, m.viewport.Height())
+ 	targetWidth := max(1, m.viewport.Width())
+-	value := m.viewport.View()
+-	lines := []string{}
+-	if value != "" {
+-		lines = strings.Split(value, "\n")
+-	}
+-	if len(lines) > targetHeight {
+-		lines = lines[:targetHeight]
+-	}
+ 
+-	// Viewport content can contain many independently styled spans. Never rely
+-	// on the terminal or the enclosing panel to paint the unused tail of a row:
+-	// explicitly fill it with Panel after the final ANSI reset.
++	// Do not call viewport.View here. Bubbles pads short rows using an unstyled
++	// internal Lip Gloss block; after nested ANSI resets that padding can inherit
++	// the terminal's default black background. The transcript renderer already
++	// produces wrapped rows, so select the visible content directly and paint its
++	// final width ourselves.
++	content := m.viewport.GetContent()
++	allLines := []string{}
++	if content != "" {
++		allLines = strings.Split(content, "\n")
++	}
++	start := clampInt(m.viewport.YOffset(), 0, len(allLines))
++	end := min(len(allLines), start+targetHeight)
++	lines := append([]string(nil), allLines[start:end]...)
++
+ 	fill := lipgloss.NewStyle().Foreground(m.styles.Text).Background(m.styles.Panel)
++	xOffset := m.viewport.XOffset()
+ 	for index, line := range lines {
++		if xOffset > 0 || lipgloss.Width(line) > targetWidth {
++			line = ansi.Cut(line, xOffset, xOffset+targetWidth)
++		}
+ 		missing := targetWidth - lipgloss.Width(line)
+ 		if missing > 0 {
+-			lines[index] = line + fill.Render(strings.Repeat(" ", missing))
++			line += fill.Render(strings.Repeat(" ", missing))
+ 		}
++		lines[index] = line
+ 	}
+ 	for len(lines) < targetHeight {
+-		lines = append(lines, m.textureLine(targetWidth, len(lines), 17, m.styles.Panel))
++		lines = append(lines, fill.Render(strings.Repeat(" ", targetWidth)))
+ 	}
+ 	return strings.Join(lines, "\n")
+ }

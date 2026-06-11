@@ -333,3 +333,20 @@ Ephemera uses Bubble Tea v2's cell-diff renderer with synchronized terminal upda
 The provider wizard uses a reversible five-stage flow with a live route preview,
 inline validation, environment-key detection, a final review gate, and fast
 keyboard navigation. See `UI_POLISH_V9.md` for the complete interaction notes.
+
+
+## Auto-approve agent mode
+
+Run `/agent auto` or `/approval auto` to execute every built-in agent tool immediately without approval prompts. Run `/agent safe` or `/approval safe` to restore confirmation for writes and shell commands. Workspace path guards and destructive-command checks remain active.
+
+## Renderer, auto-approve, and Beneath the Surface
+
+The transcript renderer now paints the complete viewport itself, preventing the
+unstyled final-column padding that appeared as a black strip in some terminals.
+
+- `/agent auto` or `/approval auto` automatically executes supported agent tools.
+- `/agent safe` restores write and shell confirmations.
+- `/thinking on` shows the structured **Beneath the Surface** decision trace.
+- `/thinking off` hides visible reasoning traces.
+
+See `RENDERER_AUTO_APPROVE_REASONING.md` for implementation and safety details.

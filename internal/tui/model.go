@@ -35,6 +35,8 @@ const helpText = `### Commands
 - **/model <id>** / **/models** — select intelligence
 - **/mode <profile>** — change response character
 - **/usage** / **/budget <tokens>** — inspect or set context
+- **/approval <auto|safe|read-only>** — set agent approval policy
+- **/thinking <on|off>** — show or hide Beneath the Surface traces
 - **/retry** / **/undo** — revise the latest exchange
 - **/export [path]** — export the transcript
 - **/doctor** — inspect the active route
@@ -604,7 +606,11 @@ Route: **%s** · **%s** · **%s** token context.`,
 }
 
 func (m Model) transcriptWidth() int {
-	return max(20, m.viewport.Width()-2)
+	// Bubble's viewport pads short rows to its configured width with unstyled
+	// spaces. Rendering two cells short therefore exposed the terminal's default
+	// black background at the right edge. Paint the complete viewport width so
+	// the viewport never has to append its own unstyled tail.
+	return max(20, m.viewport.Width())
 }
 
 func (m Model) transcriptLine(style lipgloss.Style, text string) string {
@@ -865,18 +871,58 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		switch value {
 		case "on":
 			m.cfg.AgentEnabled = true
-			m.status = "Agent mode enabled · writes require approval"
+			m.status = "Agent mode enabled · policy " + string(m.cfg.ApprovalPolicy)
 			_ = config.Save(m.cfg)
 		case "off":
 			m.cfg.AgentEnabled = true
 			m.status = "Agent mode is always on."
 			_ = config.Save(m.cfg)
+		case "auto", "auto-approve":
+			m.cfg.AgentEnabled = true
+			m.cfg.ApprovalPolicy = config.ApprovalAutoApprove
+			_ = config.Save(m.cfg)
+			m.notice = m.agentNotice()
+			if m.pendingApproval != nil {
+				return false, m.approvePending()
+			}
+			m.status = "Auto-approve enabled · all agent tools run immediately"
+		case "safe":
+			m.cfg.ApprovalPolicy = config.ApprovalApproveWrites
+			m.status = "Safe approvals enabled · writes and shell require confirmation"
+			_ = config.Save(m.cfg)
+		case "read-only", "readonly":
+			m.cfg.ApprovalPolicy = config.ApprovalReadOnly
+			m.status = "Read-only agent policy enabled"
+			_ = config.Save(m.cfg)
 		case "status":
 			m.status = "Agent status opened."
 		default:
-			m.status = "Usage: /agent <on|off|status>"
+			m.status = "Usage: /agent <on|auto|safe|read-only|status>"
 		}
 		m.notice = m.agentNotice()
+
+	case "/approval":
+		value, ok := requireArg("/approval <auto|safe|read-only|workspace-write|chat>")
+		if !ok {
+			break
+		}
+		policy, valid := config.ParseApprovalPolicy(value)
+		if !valid {
+			m.status = "Unknown approval policy: " + value
+			break
+		}
+		m.cfg.ApprovalPolicy = policy
+		m.cfg.AgentEnabled = true
+		_ = config.Save(m.cfg)
+		m.notice = m.agentNotice()
+		if policy == config.ApprovalAutoApprove && m.pendingApproval != nil {
+			return false, m.approvePending()
+		}
+		if policy == config.ApprovalAutoApprove {
+			m.status = "Auto-approve enabled · all agent tools run immediately"
+		} else {
+			m.status = "Approval policy → " + string(policy)
+		}
 
 	case "/approve":
 		return false, m.approvePending()
@@ -893,9 +939,32 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		m.status = "Tools opened."
 
 	case "/thinking":
-		m.cfg.ShowThinking = !m.cfg.ShowThinking
+		value := "toggle"
+		if len(args) > 0 {
+			value = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		valid := true
+		switch value {
+		case "on", "show", "true":
+			m.cfg.ShowThinking = true
+		case "off", "hide", "false":
+			m.cfg.ShowThinking = false
+		case "toggle":
+			m.cfg.ShowThinking = !m.cfg.ShowThinking
+		default:
+			valid = false
+			m.status = "Usage: /thinking <on|off|toggle>"
+		}
+		if !valid {
+			break
+		}
 		_ = config.Save(m.cfg)
-		m.status = fmt.Sprintf("Thinking visibility → %t", m.cfg.ShowThinking)
+		m.notice = m.agentNotice()
+		if m.cfg.ShowThinking {
+			m.status = "Beneath the Surface → visible"
+		} else {
+			m.status = "Beneath the Surface → hidden"
+		}
 
 	case "/details":
 		m.cfg.ToolDetails = !m.cfg.ToolDetails

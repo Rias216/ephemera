@@ -18,7 +18,7 @@ func (m Model) renderAgentTimeline() string {
 	renderer := newCLIRenderer(m.styles, m.transcriptWidth())
 	rows := []string{m.transcriptLine(m.styles.NoticeLabel, "agent")}
 	for _, event := range m.session.Events {
-		if event.Type == "reasoning_summary" && !m.cfg.ShowThinking {
+		if (event.Type == "reasoning_summary" || event.Type == "reasoning_trace") && !m.cfg.ShowThinking {
 			continue
 		}
 		rows = append(rows, m.renderAgentEvent(event, renderer)...)
@@ -39,15 +39,15 @@ func (m Model) renderAgentEvent(event history.Event, renderer cliRenderer) []str
 		}
 	case "plan_update":
 		titleColor = m.styles.Primary
-	case "reasoning_summary":
+	case "reasoning_summary", "reasoning_trace":
 		titleColor = m.styles.AccentSoft
 	case "final":
 		titleColor = m.styles.Text
 	}
 
 	title := event.Title
-	if event.Type == "reasoning_summary" {
-		title = "thinking"
+	if event.Type == "reasoning_summary" || event.Type == "reasoning_trace" {
+		title = "beneath the surface"
 	}
 	if event.Type == "tool_call" && event.Tool != "" {
 		title = "tool " + event.Tool
@@ -92,7 +92,7 @@ func agentGlyph(kind string) string {
 	switch kind {
 	case "plan_update":
 		return "◇"
-	case "reasoning_summary":
+	case "reasoning_summary", "reasoning_trace":
 		return "◌"
 	case "tool_call":
 		return "›"
@@ -191,13 +191,15 @@ func (m *Model) agentNotice() string {
 - Workspace: %s
 - Auto test: %s
 - Tool output budget: %s tokens
+- Beneath the Surface: %t
 
-Use /agent on, /agent off, /tools, /plan, /approve, /reject, /run, /diff, /compact, /config, and /memory.`,
+Use /agent auto or /approval auto for automatic execution. Use /agent safe to restore confirmations. Use /thinking on to show concise goal, assumptions, approach, tool rationale, and verification. Other commands: /tools, /plan, /approve, /reject, /run, /diff, /compact, /config, and /memory.`,
 		m.cfg.AgentEnabled,
 		m.cfg.ApprovalPolicy,
 		agent.NewRunner(m.cfg, nil).Tools.WorkspaceRoot,
 		m.cfg.AutoTestCommand,
 		formatTokenCount(m.cfg.MaxToolOutputTokens),
+		m.cfg.ShowThinking,
 	)
 }
 
@@ -236,6 +238,7 @@ func (m Model) configNotice() string {
 - Context budget: %s
 - Max output tokens: %s
 - Max tool output tokens: %s
+- Beneath the Surface: %t
 - Theme density: %s`,
 		m.providerName(),
 		m.cfg.Model(),
@@ -248,6 +251,7 @@ func (m Model) configNotice() string {
 		formatTokenCount(m.cfg.ContextTokens),
 		formatTokenCount(int(m.cfg.MaxTokens)),
 		formatTokenCount(m.cfg.MaxToolOutputTokens),
+		m.cfg.ShowThinking,
 		m.cfg.ThemeDensity,
 	)
 }

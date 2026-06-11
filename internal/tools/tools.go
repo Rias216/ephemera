@@ -102,6 +102,13 @@ func Lookup(name string) (Tool, bool) {
 
 // RequiresApproval reports whether the configured policy needs user approval.
 func (r Registry) RequiresApproval(name string) bool {
+	// Auto-approve intentionally attempts every requested action immediately.
+	// Unknown tools still fail safely in Execute instead of creating a useless
+	// approval prompt that can never make them executable.
+	if r.ApprovalPolicy == config.ApprovalAutoApprove {
+		return false
+	}
+
 	tool, ok := Lookup(name)
 	if !ok {
 		return true

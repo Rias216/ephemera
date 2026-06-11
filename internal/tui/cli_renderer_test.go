@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
 
 	"github.com/ephemera-ai/ephemera/internal/theme"
@@ -57,6 +58,24 @@ func TestCLIRendererKeepsTablesAndCodeInsideViewport(t *testing.T) {
 	for index, line := range strings.Split(output, "\n") {
 		if got := lipgloss.Width(line); got != 40 {
 			t.Fatalf("row %d width = %d, want 40", index, got)
+		}
+	}
+}
+
+func TestTexturedViewportUsesFullyPaintedRows(t *testing.T) {
+	styles := theme.New("rose")
+	model := Model{styles: styles}
+	model.viewport = viewport.New(viewport.WithWidth(32), viewport.WithHeight(4))
+	model.viewport.SetContent(newCLIRenderer(styles, 32).Render("short line"))
+
+	output := model.texturedViewport()
+	lines := strings.Split(output, "\n")
+	if len(lines) != 4 {
+		t.Fatalf("height = %d, want 4", len(lines))
+	}
+	for index, line := range lines {
+		if got := lipgloss.Width(line); got != 32 {
+			t.Fatalf("row %d width = %d, want 32", index, got)
 		}
 	}
 }

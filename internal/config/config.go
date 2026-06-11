@@ -49,7 +49,8 @@ const (
 	ApprovalChat           ApprovalPolicy = "chat"
 	ApprovalReadOnly       ApprovalPolicy = "read-only"
 	ApprovalApproveWrites  ApprovalPolicy = "approve-writes"
-	ApprovalWorkspaceWrite ApprovalPolicy = "workspace-write"
+	ApprovalWorkspaceWrite ApprovalPolicy = "workspace-write" // legacy unrestricted mode
+	ApprovalAutoApprove    ApprovalPolicy = "auto-approve"
 )
 
 // Protocol names the wire protocol used by a connection preset.
@@ -170,11 +171,34 @@ func ValidProvider(value string) bool {
 // ValidApprovalPolicy reports whether value is a supported agent autonomy mode.
 func ValidApprovalPolicy(value ApprovalPolicy) bool {
 	switch value {
-	case ApprovalChat, ApprovalReadOnly, ApprovalApproveWrites, ApprovalWorkspaceWrite:
+	case ApprovalChat, ApprovalReadOnly, ApprovalApproveWrites, ApprovalWorkspaceWrite, ApprovalAutoApprove:
 		return true
 	default:
 		return false
 	}
+}
+
+// ParseApprovalPolicy accepts both persisted policy names and concise CLI aliases.
+func ParseApprovalPolicy(value string) (ApprovalPolicy, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "auto", "auto-approve", "unrestricted":
+		return ApprovalAutoApprove, true
+	case "safe", "approve", "approve-writes":
+		return ApprovalApproveWrites, true
+	case "read-only", "readonly", "read":
+		return ApprovalReadOnly, true
+	case "workspace-write", "workspace":
+		return ApprovalWorkspaceWrite, true
+	case "chat":
+		return ApprovalChat, true
+	default:
+		return "", false
+	}
+}
+
+// ApprovalPolicyChoices lists the concise values exposed by the command palette.
+func ApprovalPolicyChoices() []string {
+	return []string{"auto", "safe", "read-only", "workspace-write", "chat"}
 }
 
 // Dir returns Ephemera's platform-appropriate config directory.

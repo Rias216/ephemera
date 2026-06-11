@@ -91,3 +91,60 @@ func hasEvent(events []history.Event, kind string) bool {
 	}
 	return false
 }
+
+func TestRunAutoApproveExecutesWriteAndContinues(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.AgentEnabled = true
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	provider := &fakeProvider{responses: []string{
+		`{"reasoning":{"goal":"create the requested file","assumptions":"the workspace is writable","approach":["write the file","verify completion"],"tool_rationale":["apply_patch performs the requested workspace change"],"verification":"confirm the tool result"},"summary":"create file","plan":["write file"],"actions":[{"tool":"apply_patch","arguments":{"path":"main.go","content":"package main\n"}}]}`,
+		`{"reasoning":{"goal":"report completion","approach":"summarize the verified result","verification":"the write tool returned success"},"summary":"done","plan":[],"actions":[],"final":"Created main.go."}`,
+	}}
+	session := history.New("agent", "ollama", cfg.Model(), reasoning.ModeNormal)
+	session.Append("user", "create main.go")
+
+	result := NewRunner(cfg, provider).Run(context.Background(), session)
+
+	if result.Pending != nil {
+		t.Fatalf("auto-approve unexpectedly paused: %#v", result.Pending)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "package main\n" {
+		t.Fatalf("main.go = %q", data)
+	}
+	if !hasEvent(result.Events, "reasoning_trace") {
+		t.Fatalf("events = %#v, want reasoning_trace", result.Events)
+	}
+	if !strings.Contains(result.Text, "Created main.go") {
+		t.Fatalf("final text = %q", result.Text)
+	}
+}
+
+func TestParseModelActionAcceptsCompactReasoningShapes(t *testing.T) {
+	action, ok := parseModelAction(`{
+		"reasoning": {
+			"goal": "fix rendering",
+			"assumptions": "the artifact is an unpainted cell",
+			"approach": ["paint every row", "verify exact widths"],
+			"tool_rationale": ["inspect source", "run tests"],
+			"verification": "all rows match viewport width"
+		},
+		"summary": "repair the renderer",
+		"plan": ["patch", "test"],
+		"actions": []
+	}`)
+	if !ok {
+		t.Fatal("expected model action to parse")
+	}
+	trace := formatReasoningTrace(action.Reasoning)
+	for _, want := range []string{"Goal", "Assumptions", "Approach", "Tool rationale", "Verification", "fix rendering"} {
+		if !strings.Contains(trace, want) {
+			t.Fatalf("trace missing %q:\n%s", want, trace)
+		}
+	}
+}

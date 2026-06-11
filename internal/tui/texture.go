@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // textureLine now provides a clean, stable fill. Earlier versions scattered
@@ -26,27 +27,35 @@ func (m Model) textureLine(width, row, seed int, background color.Color) string 
 func (m Model) texturedViewport() string {
 	targetHeight := max(1, m.viewport.Height())
 	targetWidth := max(1, m.viewport.Width())
-	value := m.viewport.View()
-	lines := []string{}
-	if value != "" {
-		lines = strings.Split(value, "\n")
-	}
-	if len(lines) > targetHeight {
-		lines = lines[:targetHeight]
-	}
 
-	// Viewport content can contain many independently styled spans. Never rely
-	// on the terminal or the enclosing panel to paint the unused tail of a row:
-	// explicitly fill it with Panel after the final ANSI reset.
+	// Do not call viewport.View here. Bubbles pads short rows using an unstyled
+	// internal Lip Gloss block; after nested ANSI resets that padding can inherit
+	// the terminal's default black background. The transcript renderer already
+	// produces wrapped rows, so select the visible content directly and paint its
+	// final width ourselves.
+	content := m.viewport.GetContent()
+	allLines := []string{}
+	if content != "" {
+		allLines = strings.Split(content, "\n")
+	}
+	start := clampInt(m.viewport.YOffset(), 0, len(allLines))
+	end := min(len(allLines), start+targetHeight)
+	lines := append([]string(nil), allLines[start:end]...)
+
 	fill := lipgloss.NewStyle().Foreground(m.styles.Text).Background(m.styles.Panel)
+	xOffset := m.viewport.XOffset()
 	for index, line := range lines {
+		if xOffset > 0 || lipgloss.Width(line) > targetWidth {
+			line = ansi.Cut(line, xOffset, xOffset+targetWidth)
+		}
 		missing := targetWidth - lipgloss.Width(line)
 		if missing > 0 {
-			lines[index] = line + fill.Render(strings.Repeat(" ", missing))
+			line += fill.Render(strings.Repeat(" ", missing))
 		}
+		lines[index] = line
 	}
 	for len(lines) < targetHeight {
-		lines = append(lines, m.textureLine(targetWidth, len(lines), 17, m.styles.Panel))
+		lines = append(lines, fill.Render(strings.Repeat(" ", targetWidth)))
 	}
 	return strings.Join(lines, "\n")
 }

@@ -110,9 +110,9 @@ func (r Runner) systemPrompt(session history.Session, observations []string) str
 	var b strings.Builder
 	b.WriteString(reasoning.SystemPrompt(r.Config.Mode))
 	b.WriteString("\n\nYou are now operating as Ephemera's local project agent.\n")
-	b.WriteString("Expose a concise visible reasoning trace: goal, assumptions, plan, tool rationale, and verification summary. Keep private chain-of-thought private.\n")
+	b.WriteString("Expose a concise visible decision trace for the UI, never private chain-of-thought. Include the goal, material assumptions, approach, why each tool is useful, and how the result will be verified.\n")
 	b.WriteString("When action is useful, respond with only JSON in this shape:\n")
-	b.WriteString(`{"summary":"brief reason","plan":["step 1","step 2"],"actions":[{"tool":"read_file","arguments":{"path":"go.mod"}}],"final":""}`)
+	b.WriteString(`{"reasoning":{"goal":"what success means","assumptions":["only material assumptions"],"approach":["short step"],"tool_rationale":"why these tools are needed","verification":"how success will be checked"},"summary":"brief decision summary","plan":["step 1","step 2"],"actions":[{"tool":"read_file","arguments":{"path":"go.mod"}}],"final":""}`)
 	b.WriteString("\nUse actions only from this catalog:\n")
 	for _, tool := range tools.Builtins() {
 		fmt.Fprintf(&b, "- %s [%s]: %s\n", tool.Name, tool.Risk, tool.Description)
@@ -121,7 +121,7 @@ func (r Runner) systemPrompt(session history.Session, observations []string) str
 	b.WriteString("- Inspect before editing unless the target file and change are already obvious.\n")
 	b.WriteString("- For apply_patch, provide complete replacement file content in arguments.content.\n")
 	b.WriteString("- Use shell/go_test only when verification is needed.\n")
-	b.WriteString("- Always include summary and plan so the CLI can show your reasoning trace.\n")
+	b.WriteString("- Always include reasoning, summary, and plan so the CLI can show Beneath the Surface. Keep it concise and outcome-focused.\n")
 	b.WriteString("- If done, return JSON with summary, plan, final, and no actions.\n")
 	b.WriteString("- If the user asks for normal explanation only, still prefer JSON with final so the reasoning trace is visible.\n")
 	fmt.Fprintf(&b, "\nWorkspace root: %s\n", r.Tools.WorkspaceRoot)
@@ -151,10 +151,64 @@ func (r Runner) systemPrompt(session history.Session, observations []string) str
 }
 
 type modelAction struct {
-	Summary string            `json:"summary"`
-	Plan    []string          `json:"plan"`
-	Actions []modelToolAction `json:"actions"`
-	Final   string            `json:"final"`
+	Reasoning modelReasoning    `json:"reasoning"`
+	Summary   string            `json:"summary"`
+	Plan      []string          `json:"plan"`
+	Actions   []modelToolAction `json:"actions"`
+	Final     string            `json:"final"`
+}
+
+type modelReasoning struct {
+	Goal          reasoningText  `json:"goal"`
+	Assumptions   reasoningItems `json:"assumptions"`
+	Approach      reasoningItems `json:"approach"`
+	ToolRationale reasoningText  `json:"tool_rationale"`
+	Verification  reasoningText  `json:"verification"`
+}
+
+type reasoningText string
+
+type reasoningItems []string
+
+func (value *reasoningText) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*value = reasoningText(strings.TrimSpace(text))
+		return nil
+	}
+	var items []string
+	if err := json.Unmarshal(data, &items); err == nil {
+		*value = reasoningText(strings.Join(compactReasoningItems(reasoningItems(items)), "; "))
+		return nil
+	}
+	if string(data) == "null" {
+		*value = ""
+		return nil
+	}
+	return fmt.Errorf("reasoning field must be text or a text list")
+}
+
+func (values *reasoningItems) UnmarshalJSON(data []byte) error {
+	var items []string
+	if err := json.Unmarshal(data, &items); err == nil {
+		*values = reasoningItems(items)
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			*values = nil
+		} else {
+			*values = reasoningItems{text}
+		}
+		return nil
+	}
+	if string(data) == "null" {
+		*values = nil
+		return nil
+	}
+	return fmt.Errorf("reasoning list must be text or a text list")
 }
 
 type modelToolAction struct {
@@ -193,13 +247,53 @@ func parseModelAction(text string) (modelAction, bool) {
 
 func actionEvents(action modelAction) []history.Event {
 	var events []history.Event
-	if strings.TrimSpace(action.Summary) != "" {
-		events = append(events, newEvent("reasoning_summary", "Reasoning", action.Summary, "", "done"))
+	if trace := formatReasoningTrace(action.Reasoning); trace != "" {
+		events = append(events, newEvent("reasoning_trace", "Beneath the Surface", trace, "", "done"))
+	} else if strings.TrimSpace(action.Summary) != "" {
+		// Older or less capable providers may omit the structured reasoning object.
+		// Keep the visible summary rather than hiding all decision context.
+		events = append(events, newEvent("reasoning_summary", "Beneath the Surface", action.Summary, "", "done"))
 	}
 	if len(action.Plan) > 0 {
 		events = append(events, newEvent("plan_update", "Plan", strings.Join(action.Plan, "\n"), "", "done"))
 	}
 	return events
+}
+
+func formatReasoningTrace(trace modelReasoning) string {
+	var sections []string
+	if value := strings.TrimSpace(string(trace.Goal)); value != "" {
+		sections = append(sections, "**Goal**\n"+value)
+	}
+	if values := compactReasoningItems(trace.Assumptions); len(values) > 0 {
+		sections = append(sections, "**Assumptions**\n- "+strings.Join(values, "\n- "))
+	}
+	if values := compactReasoningItems(trace.Approach); len(values) > 0 {
+		var numbered []string
+		for index, value := range values {
+			numbered = append(numbered, fmt.Sprintf("%d. %s", index+1, value))
+		}
+		sections = append(sections, "**Approach**\n"+strings.Join(numbered, "\n"))
+	}
+	if value := strings.TrimSpace(string(trace.ToolRationale)); value != "" {
+		sections = append(sections, "**Tool rationale**\n"+value)
+	}
+	if value := strings.TrimSpace(string(trace.Verification)); value != "" {
+		sections = append(sections, "**Verification**\n"+value)
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func compactReasoningItems(values reasoningItems) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		out = append(out, compact(value, 360))
+	}
+	return out
 }
 
 func conversationMessages(messages []history.Message) []llm.Message {
