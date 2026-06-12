@@ -2,8 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/ephemera-ai/ephemera/internal/history"
@@ -17,6 +20,16 @@ type contextStats struct {
 	SentMessages    int
 	TotalMessages   int
 	DroppedMessages int
+}
+
+type memorySourceState struct {
+	Path     string
+	Found    bool
+	Size     int64
+	Modified time.Time
+	Tokens   int
+	Preview  string
+	Err      string
 }
 
 func (m Model) currentContextStats() contextStats {
@@ -40,19 +53,100 @@ func (m Model) usageNotice(stats contextStats) string {
 	if stats.DroppedMessages > 0 {
 		trimLine = fmt.Sprintf("%d oldest message(s) would be omitted from the next request.", stats.DroppedMessages)
 	}
+	memory := m.memorySourceSummary()
 	return fmt.Sprintf(`### Usage
 
 - Request context: ~%s / %s tokens
 - Messages sent next request: %d / %d
 - Output cap: %s tokens
+- Tool output budget: %s tokens
+- Memory sources: %s
 - %s`,
 		formatTokenCount(stats.EstimatedTokens),
 		formatTokenCount(stats.Budget),
 		stats.SentMessages,
 		stats.TotalMessages,
 		formatTokenCount(int(m.cfg.MaxTokens)),
+		formatTokenCount(m.cfg.MaxToolOutputTokens),
+		memory,
 		trimLine,
 	)
+}
+
+func (m Model) memorySourceSummary() string {
+	var found []string
+	for _, source := range m.memorySourceStates() {
+		if source.Found && source.Err == "" {
+			found = append(found, source.Path)
+		}
+	}
+	if len(found) == 0 {
+		return "none found"
+	}
+	return strings.Join(found, ", ")
+}
+
+func (m Model) memorySourceStates() []memorySourceState {
+	root := m.workspaceRoot()
+	candidates := []string{
+		filepath.Join(".ephemera", "instructions.md"),
+		filepath.Join(".ephemera", "memory.json"),
+		"CLAUDE.md",
+		"AGENTS.md",
+	}
+	states := make([]memorySourceState, 0, len(candidates))
+	for _, candidate := range candidates {
+		state := memorySourceState{Path: filepath.ToSlash(candidate)}
+		if root == "" {
+			state.Err = "workspace root is unknown"
+			states = append(states, state)
+			continue
+		}
+		path := filepath.Join(root, candidate)
+		info, err := os.Stat(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				state.Err = err.Error()
+			}
+			states = append(states, state)
+			continue
+		}
+		if info.IsDir() {
+			state.Err = "directory found where a file was expected"
+			states = append(states, state)
+			continue
+		}
+		state.Found = true
+		state.Size = info.Size()
+		state.Modified = info.ModTime()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			state.Err = err.Error()
+			states = append(states, state)
+			continue
+		}
+		content := strings.TrimSpace(strings.ReplaceAll(string(data), "\r\n", "\n"))
+		state.Tokens = estimateTextTokens(content)
+		state.Preview = compactPreview(content, 900)
+		states = append(states, state)
+	}
+	return states
+}
+
+func (m Model) workspaceRoot() string {
+	root := strings.TrimSpace(m.cfg.WorkspaceRoot)
+	if root == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			root = cwd
+		}
+	}
+	if root == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	return root
 }
 
 func buildRequestMessages(messages []history.Message, system string, budget int) ([]llm.Message, contextStats) {
@@ -124,6 +218,28 @@ func formatTokenCount(tokens int) string {
 		return fmt.Sprintf("%.1fk", float64(tokens)/1000)
 	}
 	return strconv.Itoa(tokens)
+}
+
+func formatByteCount(bytes int64) string {
+	if bytes >= 1_000_000 {
+		return fmt.Sprintf("%.1f MB", float64(bytes)/1_000_000)
+	}
+	if bytes >= 1000 {
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1000)
+	}
+	return fmt.Sprintf("%d B", bytes)
+}
+
+func compactPreview(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return strings.TrimSpace(string(runes[:max(0, limit-3)])) + "..."
 }
 
 func parseContextBudget(value string) (int, error) {

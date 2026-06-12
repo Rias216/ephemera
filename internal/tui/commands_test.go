@@ -445,6 +445,19 @@ func TestAgentCommandTogglesAgentMode(t *testing.T) {
 	}
 }
 
+func TestEvalCommandRunsAgentCapabilityEval(t *testing.T) {
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+
+	_, _ = m.handleCommand("/eval")
+
+	if !strings.Contains(m.status, "Agent eval passed") {
+		t.Fatalf("status = %q, want passing eval status", m.status)
+	}
+	if !strings.Contains(m.notice, "Agent capability eval") || !strings.Contains(m.notice, "native-tool-call") {
+		t.Fatalf("eval notice = %q, want capability report", m.notice)
+	}
+}
+
 func TestModelsCommandOpensInteractiveChooser(t *testing.T) {
 	server := modelListServer(t, []string{"live-model"})
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}

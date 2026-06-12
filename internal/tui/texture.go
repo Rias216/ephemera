@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 
@@ -105,6 +106,11 @@ func reassertBackground(block string, background color.Color) string {
 		index = end
 	}
 	return out.String()
+}
+
+func rgbParams(value color.Color) string {
+	r, g, b := colorRGB(value)
+	return fmt.Sprintf("%d;%d;%d", r, g, b)
 }
 
 func sgrResetsBackground(sequence string) bool {

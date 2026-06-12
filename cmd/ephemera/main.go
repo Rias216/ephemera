@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/ephemera-ai/ephemera/internal/agent"
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
 	"github.com/ephemera-ai/ephemera/internal/reasoning"
@@ -22,12 +24,24 @@ func main() {
 		provider    = flag.String("provider", "", "override provider: ollama, openai, anthropic, compatible")
 		model       = flag.String("model", "", "override model for the selected provider")
 		mode        = flag.String("mode", "", "override mode: normal, deep-reason, concise, creative")
+		agentEval   = flag.Bool("agent-eval", false, "run deterministic local agent capability eval and exit")
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println("ephemera", version)
+		return
+	}
+	if *agentEval {
+		report, err := agent.RunDeterministicEval(context.Background())
+		if err != nil {
+			fatal("agent eval", err)
+		}
+		fmt.Println(agent.FormatEvalReport(report))
+		if report.Failed() > 0 {
+			os.Exit(1)
+		}
 		return
 	}
 

@@ -1,7 +1,9 @@
 package llm
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -17,6 +19,10 @@ type Anthropic struct {
 
 func NewAnthropic(apiKey string) *Anthropic { return &Anthropic{apiKey: apiKey} }
 func (p *Anthropic) Name() string           { return "anthropic" }
+
+func (p *Anthropic) Capabilities() ProviderCapabilities {
+	return ProviderCapabilities{Streaming: true, NativeTools: true}
+}
 
 func (p *Anthropic) Generate(ctx context.Context, req Request) (string, error) {
 	key := strings.TrimSpace(p.apiKey)
@@ -62,4 +68,66 @@ func (p *Anthropic) Generate(ctx context.Context, req Request) (string, error) {
 		return "", fmt.Errorf("Anthropic returned no text content")
 	}
 	return text, nil
+}
+
+func (p *Anthropic) GenerateWithTools(ctx context.Context, req Request, specs []ToolSpec, onDelta DeltaFunc) (ToolDecision, error) {
+	return p.generateMessageStream(ctx, req, specs, onDelta)
+}
+
+func anthropicWireTools(specs []ToolSpec) []anthropic.ToolUnionParam {
+	tools := make([]anthropic.ToolUnionParam, 0, len(specs))
+	for _, spec := range specs {
+		param := anthropic.ToolParam{
+			Name:        spec.Name,
+			Description: anthropic.String(spec.Description),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: anthropicToolProperties(spec.Parameters.Properties),
+				Required:   append([]string(nil), spec.Parameters.Required...),
+			},
+		}
+		tools = append(tools, anthropic.ToolUnionParam{OfTool: &param})
+	}
+	return tools
+}
+
+func anthropicToolProperties(properties map[string]ToolProperty) map[string]map[string]string {
+	out := make(map[string]map[string]string, len(properties))
+	for name, property := range properties {
+		out[name] = map[string]string{
+			"type":        property.Type,
+			"description": property.Description,
+		}
+	}
+	return out
+}
+
+func anthropicToolDecision(content []anthropic.ContentBlockUnion, onDelta DeltaFunc) (ToolDecision, error) {
+	var text strings.Builder
+	var calls []ToolCall
+	for _, block := range content {
+		switch value := block.AsAny().(type) {
+		case anthropic.TextBlock:
+			text.WriteString(value.Text)
+		case anthropic.ToolUseBlock:
+			args := map[string]any{}
+			if len(value.Input) > 0 {
+				dec := json.NewDecoder(bytes.NewReader(value.Input))
+				dec.UseNumber()
+				if err := dec.Decode(&args); err != nil {
+					return ToolDecision{}, fmt.Errorf("Anthropic returned invalid arguments for tool %q: %w", value.Name, err)
+				}
+			}
+			calls = append(calls, ToolCall{ID: value.ID, Name: value.Name, Arguments: args})
+		}
+	}
+	visible := strings.TrimSpace(text.String())
+	if onDelta != nil && visible != "" {
+		if err := onDelta(Delta{Kind: DeltaText, Text: visible}); err != nil {
+			return ToolDecision{}, err
+		}
+	}
+	if visible == "" && len(calls) == 0 {
+		return ToolDecision{}, fmt.Errorf("Anthropic returned an empty tool decision")
+	}
+	return ToolDecision{Text: visible, ToolCalls: calls}, nil
 }

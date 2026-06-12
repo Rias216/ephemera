@@ -76,3 +76,39 @@ func (p *Ollama) Generate(ctx context.Context, req Request) (string, error) {
 	}
 	return text, nil
 }
+
+func (p *Ollama) GenerateWithTools(ctx context.Context, req Request, specs []ToolSpec, onDelta DeltaFunc) (ToolDecision, error) {
+	return p.generateChatStream(ctx, req, specs, onDelta)
+}
+
+func (p *Ollama) Capabilities() ProviderCapabilities {
+	return ProviderCapabilities{Streaming: true, NativeTools: true}
+}
+
+func ollamaWireTools(specs []ToolSpec) ollama.Tools {
+	out := make(ollama.Tools, 0, len(specs))
+	for _, spec := range specs {
+		tool := ollama.Tool{Type: "function"}
+		tool.Function.Name = spec.Name
+		tool.Function.Description = spec.Description
+		tool.Function.Parameters.Type = firstNonEmpty(spec.Parameters.Type, "object")
+		tool.Function.Parameters.Required = append([]string(nil), spec.Parameters.Required...)
+		tool.Function.Parameters.Properties = make(map[string]struct {
+			Type        string   `json:"type"`
+			Description string   `json:"description"`
+			Enum        []string `json:"enum,omitempty"`
+		}, len(spec.Parameters.Properties))
+		for name, property := range spec.Parameters.Properties {
+			tool.Function.Parameters.Properties[name] = struct {
+				Type        string   `json:"type"`
+				Description string   `json:"description"`
+				Enum        []string `json:"enum,omitempty"`
+			}{
+				Type:        property.Type,
+				Description: property.Description,
+			}
+		}
+		out = append(out, tool)
+	}
+	return out
+}

@@ -204,6 +204,10 @@ is persisted.
 /agent <auto|safe|read-only|status>
 /approval <auto|safe|read-only|workspace-write|chat>
 /thinking <on|off|toggle>
+/surface
+/tools
+/eval
+/usage
 /run
 /stop
 /copy
@@ -241,6 +245,12 @@ ephemera \
   --session compiler-design
 ```
 
+Run the deterministic local agent capability gate:
+
+```bash
+ephemera --agent-eval
+```
+
 ## Persistence
 
 Ephemera uses the platform user config directory:
@@ -268,8 +278,10 @@ The harness instructs the selected model to:
 4. critique and repair its draft,
 5. return only the smallest complete final answer.
 
-Private chain-of-thought is neither requested for display nor stored separately.
-Anthropic thinking blocks are ignored; only final text enters the transcript.
+Raw hidden chain-of-thought is not rendered or stored. When enabled, the live
+Context and Surface panels show provider-published reasoning summaries plus the
+agent’s explicit structured progress fields; only final answer text enters chat.
+See [`LIVE_REASONING_STREAM.md`](LIVE_REASONING_STREAM.md) for provider details.
 
 ## Project structure
 
@@ -369,7 +381,7 @@ large result at the end. The transcript receives structured reasoning summaries,
 plans, tool calls, and tool results as they occur. The bottom inspector updates
 without moving the composer:
 
-- `Alt+1` — live input/output context estimate and trimming state
+- `Alt+1` — live input/output context estimate, trimming state, and current thought summary
 - `Alt+2` — active round, phase, tool, approval policy, and elapsed time
 - `Alt+3` — Beneath the Surface goal and current plan
 - `Alt+4` — keyboard map
@@ -377,5 +389,15 @@ without moving the composer:
 Use `Ctrl+X` or `/stop` to cancel the current provider request or tool loop.
 `/agent auto` keeps the existing unrestricted auto-approve mode.
 
-Only visible model output and explicit structured reasoning summaries are shown.
-Private hidden chain-of-thought and provider thinking blocks are not forwarded.
+The live surface combines provider-published reasoning summaries with Ephemera's
+streaming `current_state`, rationale, verification, and next-step fields. Raw
+hidden chain-of-thought is never rendered or persisted. Open `Alt+3` for the
+dedicated surface, or leave `Alt+1` selected to see the newest thought inline.
+
+See `LIVE_REASONING_STREAM.md` for provider behavior and fallback rules.
+
+## Persistent reasoning and advanced agent loop
+
+The current source persists the latest **Beneath the Surface** trace after completion. Open it with `/surface` or switch to the Surface inspector with `Alt+3`.
+
+The agent uses an observe → plan → act → verify → review loop with inspect-before-edit protection, repeated-call recovery, targeted file reads, exact replacements, automatic verification, and isolated read-only specialists. Run `/eval` inside the TUI or `ephemera --agent-eval` from a shell to check deterministic local agent capabilities. See `PERSISTENT_REASONING_AGENT.md` for the implementation details and configuration fields.

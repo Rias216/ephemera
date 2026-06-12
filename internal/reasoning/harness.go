@@ -53,6 +53,20 @@ func (m Mode) Temperature() float64 {
 	}
 }
 
+// Effort returns a provider-neutral reasoning effort hint.
+func (m Mode) Effort() string {
+	switch m {
+	case ModeConcise:
+		return "low"
+	case ModeDeep:
+		return "high"
+	case ModeCreative:
+		return "medium"
+	default:
+		return "medium"
+	}
+}
+
 // SystemPrompt returns the complete reasoning contract for a mode.
 func SystemPrompt(mode Mode) string {
 	if !mode.Valid() {

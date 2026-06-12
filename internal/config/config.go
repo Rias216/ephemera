@@ -25,14 +25,20 @@ type Config struct {
 	ContextTokens int    `json:"context_tokens"`
 	OllamaURL     string `json:"ollama_url"`
 
-	AgentEnabled        bool           `json:"agent_enabled"`
-	ApprovalPolicy      ApprovalPolicy `json:"approval_policy"`
-	WorkspaceRoot       string         `json:"workspace_root,omitempty"`
-	AutoTestCommand     string         `json:"auto_test_command,omitempty"`
-	MaxToolOutputTokens int            `json:"max_tool_output_tokens"`
-	ThemeDensity        string         `json:"theme_density"`
-	ShowThinking        bool           `json:"show_thinking"`
-	ToolDetails         bool           `json:"tool_details"`
+	AgentConfigVersion    int            `json:"agent_config_version"`
+	AgentEnabled          bool           `json:"agent_enabled"`
+	ApprovalPolicy        ApprovalPolicy `json:"approval_policy"`
+	WorkspaceRoot         string         `json:"workspace_root,omitempty"`
+	AutoTestCommand       string         `json:"auto_test_command,omitempty"`
+	MaxToolOutputTokens   int            `json:"max_tool_output_tokens"`
+	AgentMaxSteps         int            `json:"agent_max_steps"`
+	AgentLoopLimit        int            `json:"agent_loop_limit"`
+	AgentAutoVerify       bool           `json:"agent_auto_verify"`
+	AgentAutoReview       bool           `json:"agent_auto_review"`
+	RequireReadBeforeEdit bool           `json:"require_read_before_edit"`
+	ThemeDensity          string         `json:"theme_density"`
+	ShowThinking          bool           `json:"show_thinking"`
+	ToolDetails           bool           `json:"tool_details"`
 
 	CompatibleName string `json:"compatible_name,omitempty"`
 	CompatibleURL  string `json:"compatible_url,omitempty"`
@@ -87,20 +93,26 @@ func Default() Config {
 			"anthropic":  "claude-sonnet-4-6",
 			"compatible": "model-name",
 		},
-		Mode:                reasoning.ModeNormal,
-		Theme:               "rose",
-		MaxTokens:           4096,
-		ContextTokens:       16_000,
-		OllamaURL:           "http://localhost:11434",
-		AgentEnabled:        true,
-		ApprovalPolicy:      ApprovalApproveWrites,
-		AutoTestCommand:     "go test ./...",
-		MaxToolOutputTokens: 6_000,
-		ThemeDensity:        "comfortable",
-		ShowThinking:        true,
-		ToolDetails:         true,
-		CompatibleName:      "compatible",
-		CompatibleURL:       "http://localhost:1234/v1",
+		Mode:                  reasoning.ModeNormal,
+		Theme:                 "rose",
+		MaxTokens:             4096,
+		ContextTokens:         16_000,
+		OllamaURL:             "http://localhost:11434",
+		AgentConfigVersion:    1,
+		AgentEnabled:          true,
+		ApprovalPolicy:        ApprovalApproveWrites,
+		AutoTestCommand:       "go test ./...",
+		MaxToolOutputTokens:   6_000,
+		AgentMaxSteps:         10,
+		AgentLoopLimit:        2,
+		AgentAutoVerify:       true,
+		AgentAutoReview:       true,
+		RequireReadBeforeEdit: true,
+		ThemeDensity:          "comfortable",
+		ShowThinking:          true,
+		ToolDetails:           true,
+		CompatibleName:        "compatible",
+		CompatibleURL:         "http://localhost:1234/v1",
 	}
 }
 
@@ -305,6 +317,26 @@ func (c *Config) normalize() {
 	}
 	if c.MaxToolOutputTokens <= 0 {
 		c.MaxToolOutputTokens = defaults.MaxToolOutputTokens
+	}
+	if c.AgentMaxSteps < 2 {
+		c.AgentMaxSteps = defaults.AgentMaxSteps
+	}
+	if c.AgentMaxSteps > 32 {
+		c.AgentMaxSteps = 32
+	}
+	if c.AgentLoopLimit < 1 {
+		c.AgentLoopLimit = defaults.AgentLoopLimit
+	}
+	if c.AgentLoopLimit > 6 {
+		c.AgentLoopLimit = 6
+	}
+	// Configs written before the advanced agent settings existed have version 0.
+	// Apply the new safe defaults once, then preserve explicit false values.
+	if c.AgentConfigVersion <= 0 {
+		c.AgentAutoVerify = defaults.AgentAutoVerify
+		c.AgentAutoReview = defaults.AgentAutoReview
+		c.RequireReadBeforeEdit = defaults.RequireReadBeforeEdit
+		c.AgentConfigVersion = defaults.AgentConfigVersion
 	}
 	if c.ThemeDensity != "compact" && c.ThemeDensity != "comfortable" {
 		c.ThemeDensity = defaults.ThemeDensity

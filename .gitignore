@@ -2,4 +2,6 @@
 /dist/
 .env
 *.log
+*.exe
+*.rar
 .DS_Store

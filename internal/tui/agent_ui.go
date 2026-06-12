@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 
@@ -16,17 +18,173 @@ import (
 
 func (m Model) renderAgentTimeline() string {
 	renderer := newCLIRenderer(m.styles, m.transcriptWidth())
-	rows := []string{m.transcriptLine(m.styles.NoticeLabel, "agent")}
+	rows := []string{m.transcriptLine(m.styles.NoticeLabel, m.agentTimelineLabel())}
+	events := m.visibleAgentEvents()
+	selected := m.clampedSelectedEvent(len(events))
+	for index, event := range events {
+		rows = append(rows, m.renderAgentEvent(event, renderer, index == selected, m.eventExpanded(event, index), index)...)
+	}
+	if len(events) == 0 && !m.liveAgent.Active {
+		rows = append(rows, renderer.paintRow(cliLine{{text: "  no timeline events match the current filter", style: cliStyle{foreground: m.styles.Faint}}}))
+	}
+	if m.liveAgent.Active {
+		rows = append(rows, m.renderLiveAgent(renderer)...)
+	} else if m.cfg.ShowThinking && m.timelineFilterAllows("reasoning") && strings.TrimSpace(m.session.Agent.Reasoning) != "" && !m.snapshotReasoningAlreadyRendered() {
+		snapshot := history.Event{Type: "reasoning_trace", Title: "Beneath the Surface", Content: m.session.Agent.Reasoning, Status: m.session.Agent.Status, CreatedAt: m.session.Agent.UpdatedAt}
+		rows = append(rows, m.renderAgentEvent(snapshot, renderer, false, false, len(events))...)
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (m Model) agentTimelineLabel() string {
+	label := "agent"
+	if m.timelineFocus {
+		label += " · timeline"
+	}
+	if m.timelineFilter != "" {
+		label += " · " + m.timelineFilter
+	}
+	if !m.followLive {
+		label += " · follow off"
+	}
+	return label
+}
+
+func (m Model) visibleAgentEvents() []history.Event {
+	events := make([]history.Event, 0, len(m.session.Events))
 	for _, event := range m.session.Events {
 		if (event.Type == "reasoning_summary" || event.Type == "reasoning_trace") && !m.cfg.ShowThinking {
 			continue
 		}
-		rows = append(rows, m.renderAgentEvent(event, renderer)...)
+		if m.timelineFilter == "errors" {
+			if event.Status != "error" {
+				continue
+			}
+		} else if !m.timelineFilterAllows(eventTimelineKind(event)) {
+			continue
+		}
+		events = append(events, event)
 	}
-	if m.liveAgent.Active {
-		rows = append(rows, m.renderLiveAgent(renderer)...)
+	return events
+}
+
+func eventTimelineKind(event history.Event) string {
+	switch event.Type {
+	case "tool_call", "tool_result", "approval_request", "verification", "test_result":
+		return "tools"
+	case "reasoning_summary", "reasoning_trace", "plan_update":
+		return "reasoning"
+	default:
+		return event.Type
 	}
-	return strings.Join(rows, "\n")
+}
+
+func (m Model) timelineFilterAllows(kind string) bool {
+	switch m.timelineFilter {
+	case "", "all":
+		return true
+	case "tools":
+		return kind == "tools"
+	case "reasoning":
+		return kind == "reasoning"
+	case "errors":
+		return true
+	default:
+		return true
+	}
+}
+
+func (m Model) eventExpanded(event history.Event, index int) bool {
+	if event.Type == "approval_request" && event.Status == "pending" {
+		return true
+	}
+	return m.expandedEvents != nil && m.expandedEvents[timelineEventKey(event, index)]
+}
+
+func timelineEventKey(event history.Event, index int) string {
+	if event.ID != "" {
+		return event.ID
+	}
+	return fmt.Sprintf("%d:%s:%s:%s", index, event.Type, event.Tool, event.Title)
+}
+
+func (m Model) clampedSelectedEvent(count int) int {
+	if count <= 0 {
+		return 0
+	}
+	if m.selectedEvent < 0 {
+		return 0
+	}
+	if m.selectedEvent >= count {
+		return count - 1
+	}
+	return m.selectedEvent
+}
+
+func (m *Model) moveTimelineSelection(delta int) {
+	count := len(m.visibleAgentEvents())
+	if count == 0 {
+		m.selectedEvent = 0
+		m.status = "No timeline events."
+		return
+	}
+	m.selectedEvent = m.clampedSelectedEvent(count) + delta
+	if m.selectedEvent < 0 {
+		m.selectedEvent = 0
+	}
+	if m.selectedEvent >= count {
+		m.selectedEvent = count - 1
+	}
+	m.followLive = m.selectedEvent == count-1
+}
+
+func (m *Model) toggleSelectedEvent() {
+	events := m.visibleAgentEvents()
+	if len(events) == 0 {
+		m.status = "No timeline event selected."
+		return
+	}
+	index := m.clampedSelectedEvent(len(events))
+	m.selectedEvent = index
+	if m.expandedEvents == nil {
+		m.expandedEvents = make(map[string]bool)
+	}
+	key := timelineEventKey(events[index], index)
+	m.expandedEvents[key] = !m.expandedEvents[key]
+	state := "collapsed"
+	if m.expandedEvents[key] {
+		state = "expanded"
+	}
+	m.status = firstNonEmpty(events[index].Title, events[index].Type) + " " + state
+}
+
+func (m *Model) cycleTimelineFilter() {
+	filters := []string{"", "tools", "reasoning", "errors"}
+	current := 0
+	for index, value := range filters {
+		if value == m.timelineFilter {
+			current = index
+			break
+		}
+	}
+	m.timelineFilter = filters[(current+1)%len(filters)]
+	m.selectedEvent = m.clampedSelectedEvent(len(m.visibleAgentEvents()))
+	label := firstNonEmpty(m.timelineFilter, "all")
+	m.status = "Timeline filter: " + label
+}
+
+func (m Model) snapshotReasoningAlreadyRendered() bool {
+	content := strings.TrimSpace(m.session.Agent.Reasoning)
+	if content == "" {
+		return true
+	}
+	for index := len(m.session.Events) - 1; index >= 0; index-- {
+		event := m.session.Events[index]
+		if event.Type == "reasoning_trace" || event.Type == "reasoning_summary" {
+			return strings.TrimSpace(event.Content) == content
+		}
+	}
+	return false
 }
 
 func (m Model) renderLiveAgent(renderer cliRenderer) []string {
@@ -47,14 +205,17 @@ func (m Model) renderLiveAgent(renderer cliRenderer) []string {
 			messageState += fmt.Sprintf(" · trimmed %d", m.liveAgent.DroppedMessages)
 		}
 	}
-	detail := fmt.Sprintf("  ctx ~%s/%s · output ~%s%s · received %d chars · elapsed %s",
+	detail := fmt.Sprintf("  ctx ~%s/%s · output ~%s%s · received %d chars",
 		formatTokenCount(m.liveAgent.ContextTokens),
 		formatTokenCount(m.cfg.ContextTokens),
 		formatTokenCount(m.liveAgent.OutputTokens),
 		messageState,
 		m.liveAgent.ReceivedChars,
-		elapsed,
 	)
+	if m.cfg.ShowThinking && m.liveAgent.ReasoningChars > 0 {
+		detail += fmt.Sprintf(" · reasoning %d chars", m.liveAgent.ReasoningChars)
+	}
+	detail += " · elapsed " + elapsed.String()
 	rows := []string{header, renderer.paintRow(cliLine{{text: detail, style: cliStyle{foreground: m.styles.Faint}}})}
 	if goal := strings.TrimSpace(m.liveAgent.Goal); goal != "" {
 		rows = append(rows, renderer.paintRow(cliLine{
@@ -68,60 +229,183 @@ func (m Model) renderLiveAgent(renderer cliRenderer) []string {
 			{text: firstLineCompact(plan, max(12, renderer.width-9)), style: cliStyle{foreground: m.styles.Muted}},
 		}))
 	}
+	if m.cfg.ShowThinking {
+		thought := firstNonEmpty(strings.TrimSpace(m.liveAgent.Thought), latestReasoningPreview(m.liveAgent.Reasoning))
+		if thought != "" {
+			rows = append(rows, renderer.paintRow(cliLine{
+				{text: "  thinking · ", style: cliStyle{foreground: m.styles.AccentBright, bold: true}},
+				{text: lastLineCompact(thought, max(12, renderer.width-13)), style: cliStyle{foreground: m.styles.Muted}},
+			}))
+		}
+	}
 	return rows
 }
 
-func (m Model) renderAgentEvent(event history.Event, renderer cliRenderer) []string {
-	titleColor := m.styles.Muted
-	switch event.Type {
-	case "approval_request":
+func (m Model) renderAgentEvent(event history.Event, renderer cliRenderer, selected, expanded bool, index int) []string {
+	titleColor := m.eventTitleColor(event)
+	if selected {
 		titleColor = m.styles.AccentBright
-	case "tool_result", "test_result":
-		if event.Status == "error" {
-			titleColor = m.styles.Warning
-		} else {
-			titleColor = m.styles.Success
-		}
-	case "plan_update":
-		titleColor = m.styles.Primary
-	case "reasoning_summary", "reasoning_trace":
-		titleColor = m.styles.AccentSoft
-	case "final":
-		titleColor = m.styles.Text
+	}
+	title := m.eventDisplayTitle(event)
+	status := fallbackStatus(event.Status)
+	iteration := eventMetadataInt(event, "iteration")
+	meta := status
+	if iteration > 0 {
+		meta = fmt.Sprintf("round %d · %s", iteration, status)
+	}
+	if selected {
+		meta += " · selected"
 	}
 
-	title := event.Title
-	if event.Type == "reasoning_summary" || event.Type == "reasoning_trace" {
-		title = "beneath the surface"
+	fold := "▸"
+	if expanded {
+		fold = "▾"
 	}
-	if event.Type == "tool_call" && event.Tool != "" {
-		title = "tool " + event.Tool
+	if !eventHasExpandableBody(event) {
+		fold = " "
 	}
-	status := event.Status
-	if status == "" {
-		status = "done"
-	}
-
-	prefix := "  " + agentGlyph(event.Type) + " "
-	statusText := " · " + status
+	prefix := "  " + fold + " " + agentGlyph(event.Type) + " "
+	statusText := " · " + meta
 	available := max(1, renderer.width-lipgloss.Width(prefix)-lipgloss.Width(statusText))
-	title = cliClipCells(title, available)
 	header := renderer.paintRow(cliLine{
-		{text: prefix + title, style: cliStyle{foreground: titleColor, bold: true}},
+		{text: prefix + cliClipCells(title, available), style: cliStyle{foreground: titleColor, bold: true}},
 		{text: statusText, style: cliStyle{foreground: m.styles.Faint}},
 	})
 	rows := []string{header}
 
-	showBody := strings.TrimSpace(event.Content) != "" &&
-		(m.cfg.ToolDetails || (event.Type != "tool_call" && event.Type != "tool_result")) &&
-		!m.agentBodyAlreadyShown(event.Content)
+	if compact := m.eventCompactDetail(event, renderer.width-4); compact != "" && !expanded {
+		rows = append(rows, renderer.paintRow(cliLine{
+			{text: "    ", style: cliStyle{foreground: m.styles.Faint}},
+			{text: compact, style: cliStyle{foreground: m.styles.Muted}},
+		}))
+	}
+
+	showBody := strings.TrimSpace(event.Content) != "" && !m.agentBodyAlreadyShown(event.Content) &&
+		(expanded || (m.cfg.ToolDetails && eventIsToolish(event)) || eventShowsBodyByDefault(event))
 	if showBody {
 		bodyRenderer := renderer
 		bodyRenderer.body = cliStyle{foreground: m.styles.Muted}
 		bodyRenderer.strong = cliStyle{foreground: m.styles.Text, bold: true}
-		rows = append(rows, strings.Split(bodyRenderer.Render(event.Content), "\n")...)
+		rows = append(rows, m.renderEventBody(event, bodyRenderer)...)
 	}
+	if selected && !expanded && eventHasExpandableBody(event) {
+		rows = append(rows, renderer.paintRow(cliLine{{text: "    Enter/Space expands · y copies latest answer · Ctrl+T returns focus", style: cliStyle{foreground: m.styles.Faint}}}))
+	}
+	_ = index
 	return rows
+}
+
+func (m Model) eventTitleColor(event history.Event) color.Color {
+	switch event.Type {
+	case "approval_request":
+		return m.styles.AccentBright
+	case "tool_result", "test_result", "verification":
+		if event.Status == "error" {
+			return m.styles.Warning
+		}
+		return m.styles.Success
+	case "plan_update":
+		return m.styles.Primary
+	case "reasoning_summary", "reasoning_trace":
+		return m.styles.AccentSoft
+	case "final":
+		return m.styles.Text
+	default:
+		return m.styles.Muted
+	}
+}
+
+func (m Model) eventDisplayTitle(event history.Event) string {
+	if event.Type == "reasoning_summary" || event.Type == "reasoning_trace" {
+		return "thinking surface"
+	}
+	if event.Type == "tool_call" && event.Tool != "" {
+		return "tool " + event.Tool
+	}
+	if event.Type == "tool_result" && event.Tool != "" {
+		return "result " + event.Tool
+	}
+	return firstNonEmpty(event.Title, event.Type)
+}
+
+func eventHasExpandableBody(event history.Event) bool {
+	return strings.TrimSpace(event.Content) != ""
+}
+
+func eventIsToolish(event history.Event) bool {
+	switch event.Type {
+	case "tool_call", "tool_result", "test_result", "approval_request", "verification":
+		return true
+	default:
+		return false
+	}
+}
+
+func eventShowsBodyByDefault(event history.Event) bool {
+	switch event.Type {
+	case "tool_call", "tool_result", "test_result", "approval_request", "verification", "reasoning_trace", "reasoning_summary":
+		return false
+	default:
+		return true
+	}
+}
+
+func (m Model) eventCompactDetail(event history.Event, width int) string {
+	switch event.Type {
+	case "reasoning_trace", "reasoning_summary":
+		trace := eventAgentTrace(event)
+		goal := trace.Goal
+		if goal == "" {
+			goal = firstLineCompact(event.Content, width)
+		}
+		next := firstNonEmpty(trace.NextStep, trace.Verification, parseReasoningSection(event.Content, "Next step"), parseReasoningSection(event.Content, "Verification"))
+		if next != "" && lipgloss.Width(goal)+lipgloss.Width(next)+9 <= width {
+			return "goal: " + goal + " · next: " + next
+		}
+		return "goal: " + firstLineCompact(goal, max(12, width-6))
+	case "plan_update":
+		return firstLineCompact(strings.ReplaceAll(event.Content, "- [ ]", "□"), width)
+	case "tool_call", "tool_result", "test_result", "approval_request", "verification":
+		prefix := ""
+		if ms := eventMetadataInt(event, "duration_ms"); ms > 0 {
+			prefix = fmt.Sprintf("%dms · ", ms)
+		}
+		return firstLineCompact(prefix+event.Content, width)
+	case "final":
+		return firstLineCompact(event.Content, width)
+	default:
+		return firstLineCompact(event.Content, width)
+	}
+}
+
+func (m Model) renderEventBody(event history.Event, renderer cliRenderer) []string {
+	content := strings.TrimSpace(event.Content)
+	if content == "" {
+		return nil
+	}
+	if event.Type == "tool_call" || event.Type == "tool_result" || event.Type == "test_result" || event.Type == "approval_request" {
+		content = "```text\n" + content + "\n```"
+	}
+	return strings.Split(renderer.Render(content), "\n")
+}
+
+func eventMetadataInt(event history.Event, key string) int {
+	if event.Metadata == nil {
+		return 0
+	}
+	switch value := event.Metadata[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		parsed, _ := value.Int64()
+		return int(parsed)
+	default:
+		return 0
+	}
 }
 
 func (m Model) agentBodyAlreadyShown(content string) bool {
@@ -143,6 +427,8 @@ func agentGlyph(kind string) string {
 		return "›"
 	case "tool_result", "test_result":
 		return "✓"
+	case "verification":
+		return "◎"
 	case "approval_request":
 		return "◆"
 	case "final":
@@ -157,6 +443,10 @@ func (m *Model) approvePending() tea.Cmd {
 		m.status = "No pending approval."
 		return nil
 	}
+	if m.busy {
+		m.status = "The approved action is already running."
+		return nil
+	}
 	pending := *m.pendingApproval
 	cfg := m.cfg
 	m.busy = true
@@ -165,24 +455,66 @@ func (m *Model) approvePending() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		event := agent.NewRunner(cfg, nil).ExecuteApproved(ctx, pending)
-		return approvalResultMsg{event: event, continueAgent: !pending.LocalOnly}
+		return approvalResultMsg{event: event, pending: pending, continueAgent: !pending.LocalOnly}
 	}
 }
 
-func (m *Model) resolvePendingToolEvent(result history.Event) {
-	if result.Tool == "" {
-		return
+func (m *Model) resolvePendingApproval(pending agent.PendingApproval, result history.Event) {
+	fingerprint := pending.Fingerprint
+	if fingerprint == "" && result.Metadata != nil {
+		fingerprint, _ = result.Metadata["call_fingerprint"].(string)
 	}
-	status := "done"
+	toolStatus := "done"
+	approvalStatus := "approved"
+	approvalContent := "User approved the action and it completed successfully."
 	if result.Status == "error" {
-		status = "error"
+		toolStatus = "error"
+		approvalStatus = "error"
+		approvalContent = "User approved the action, but execution failed."
 	}
+
+	toolResolved := false
+	approvalResolved := false
 	for index := len(m.session.Events) - 1; index >= 0; index-- {
 		event := &m.session.Events[index]
-		if event.Type == "tool_call" && event.Tool == result.Tool && (event.Status == "pending" || event.Status == "running") {
-			event.Status = status
-			return
+		if !toolResolved && event.Type == history.EventToolCall && pendingEventMatches(*event, pending.CallEventID, fingerprint, pending.Call.Name) {
+			event.Status = toolStatus
+			setResolutionMetadata(event, result.ID)
+			toolResolved = true
 		}
+		if !approvalResolved && event.Type == history.EventApprovalRequest && pendingEventMatches(*event, pending.ApprovalEventID, fingerprint, pending.Call.Name) {
+			event.Status = approvalStatus
+			event.Content = approvalContent
+			setResolutionMetadata(event, result.ID)
+			approvalResolved = true
+		}
+		if toolResolved && approvalResolved {
+			break
+		}
+	}
+}
+
+func pendingEventMatches(event history.Event, eventID, fingerprint, tool string) bool {
+	if eventID != "" {
+		return event.ID == eventID
+	}
+	if event.Tool != tool || (event.Status != "pending" && event.Status != "running") {
+		return false
+	}
+	if fingerprint == "" || event.Metadata == nil {
+		return true
+	}
+	value, _ := event.Metadata["call_fingerprint"].(string)
+	return value == fingerprint
+}
+
+func setResolutionMetadata(event *history.Event, resultEventID string) {
+	if event.Metadata == nil {
+		event.Metadata = map[string]any{}
+	}
+	event.Metadata["resolved_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	if resultEventID != "" {
+		event.Metadata["result_event_id"] = resultEventID
 	}
 }
 
@@ -191,16 +523,45 @@ func (m *Model) rejectPending() {
 		m.status = "No pending approval."
 		return
 	}
-	call := m.pendingApproval.Call
-	m.session.AppendEvent(history.Event{
-		Type:      "approval_request",
-		Title:     "Rejected: " + call.Name,
-		Content:   "User rejected the pending action.",
-		Tool:      call.Name,
-		Status:    "rejected",
-		CreatedAt: time.Now(),
-	})
+	if m.busy {
+		m.status = "The approved action is already running and can no longer be rejected."
+		return
+	}
+	pending := *m.pendingApproval
+	fingerprint := pending.Fingerprint
+	resolvedTool := false
+	resolvedApproval := false
+	for index := len(m.session.Events) - 1; index >= 0; index-- {
+		event := &m.session.Events[index]
+		if !resolvedTool && event.Type == history.EventToolCall && pendingEventMatches(*event, pending.CallEventID, fingerprint, pending.Call.Name) {
+			event.Status = "rejected"
+			setResolutionMetadata(event, "")
+			resolvedTool = true
+		}
+		if !resolvedApproval && event.Type == history.EventApprovalRequest && pendingEventMatches(*event, pending.ApprovalEventID, fingerprint, pending.Call.Name) {
+			event.Status = "rejected"
+			event.Content = "User rejected the pending action."
+			setResolutionMetadata(event, "")
+			resolvedApproval = true
+		}
+		if resolvedTool && resolvedApproval {
+			break
+		}
+	}
+	if !resolvedApproval {
+		event := history.Event{
+			Type:      history.EventApprovalRequest,
+			Title:     "Rejected: " + pending.Call.Name,
+			Content:   "User rejected the pending action.",
+			Tool:      pending.Call.Name,
+			Status:    "rejected",
+			Metadata:  map[string]any{"call_fingerprint": fingerprint},
+			CreatedAt: time.Now(),
+		}
+		m.session.AppendEvent(event)
+	}
 	m.pendingApproval = nil
+	m.notice = ""
 	_ = m.saveSession()
 	m.status = "Rejected pending action."
 }
@@ -211,26 +572,40 @@ func (m *Model) submitShellCommand(command string) tea.Cmd {
 		return nil
 	}
 	call := tools.Call{Name: "shell", Arguments: map[string]any{"command": command}}
+	fingerprint := callFingerprint(call)
 	registry := tools.NewRegistry(m.cfg)
-	m.session.AppendEvent(history.Event{
-		Type:      "tool_call",
+	callEvent := history.Event{
+		ID:        fmt.Sprintf("evt-%d", time.Now().UnixNano()),
+		Type:      history.EventToolCall,
 		Title:     "shell",
 		Content:   command,
 		Tool:      "shell",
 		Status:    "pending",
+		Metadata:  map[string]any{"call_fingerprint": fingerprint},
 		CreatedAt: time.Now(),
-	})
+	}
+	m.session.AppendEvent(callEvent)
 	if registry.RequiresApproval(call.Name) {
 		reason := "Shell command requested from composer."
-		m.pendingApproval = &agent.PendingApproval{Call: call, Reason: reason, LocalOnly: true}
-		m.session.AppendEvent(history.Event{
-			Type:      "approval_request",
+		approvalEvent := history.Event{
+			ID:        fmt.Sprintf("evt-%d", time.Now().UnixNano()),
+			Type:      history.EventApprovalRequest,
 			Title:     "Approval required: shell",
 			Content:   reason,
 			Tool:      "shell",
 			Status:    "pending",
+			Metadata:  map[string]any{"call_fingerprint": fingerprint, "call_event_id": callEvent.ID},
 			CreatedAt: time.Now(),
-		})
+		}
+		m.pendingApproval = &agent.PendingApproval{
+			Call:            call,
+			Reason:          reason,
+			LocalOnly:       true,
+			Fingerprint:     fingerprint,
+			CallEventID:     callEvent.ID,
+			ApprovalEventID: approvalEvent.ID,
+		}
+		m.session.AppendEvent(approvalEvent)
 		_ = m.saveSession()
 		m.status = "Shell approval needed · /approve or /reject"
 		return nil
@@ -240,9 +615,14 @@ func (m *Model) submitShellCommand(command string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
-		event := agent.NewRunner(m.cfg, nil).ExecuteApproved(ctx, agent.PendingApproval{Call: call, Reason: "composer shell command", LocalOnly: true})
-		return approvalResultMsg{event: event, continueAgent: false}
+		pending := agent.PendingApproval{Call: call, Reason: "composer shell command", LocalOnly: true, Fingerprint: fingerprint, CallEventID: callEvent.ID}
+		event := agent.NewRunner(m.cfg, nil).ExecuteApproved(ctx, pending)
+		return approvalResultMsg{event: event, pending: pending, continueAgent: false}
 	}
+}
+
+func callFingerprint(call tools.Call) string {
+	return tools.Fingerprint(call)
 }
 
 func (m *Model) agentNotice() string {
@@ -253,14 +633,24 @@ func (m *Model) agentNotice() string {
 - Workspace: %s
 - Auto test: %s
 - Tool output budget: %s tokens
+- Agent max steps: %d
+- Repeated-call guard: %d
+- Automatic verification: %t
+- Automatic review specialist: %t
+- Inspect before edit: %t
 - Beneath the Surface: %t
 
-Use /agent auto or /approval auto for automatic execution. Use /agent safe to restore confirmations. Use /thinking on to show concise goal, assumptions, approach, tool rationale, and verification. Other commands: /tools, /plan, /approve, /reject, /run, /diff, /compact, /config, and /memory.`,
+Use /agent auto or /approval auto for automatic execution. Use /agent safe to restore confirmations. Use /surface after a run to reopen the persisted goal, evidence, plan, and verification trace. The agent can delegate isolated read-only exploration and review tasks. Other commands: /tools, /plan, /thinking, /approve, /reject, /run, /diff, /compact, /config, and /memory.`,
 		m.cfg.AgentEnabled,
 		m.cfg.ApprovalPolicy,
 		agent.NewRunner(m.cfg, nil).Tools.WorkspaceRoot,
 		m.cfg.AutoTestCommand,
 		formatTokenCount(m.cfg.MaxToolOutputTokens),
+		m.cfg.AgentMaxSteps,
+		m.cfg.AgentLoopLimit,
+		m.cfg.AgentAutoVerify,
+		m.cfg.AgentAutoReview,
+		m.cfg.RequireReadBeforeEdit,
 		m.cfg.ShowThinking,
 	)
 }
@@ -269,12 +659,118 @@ func (m *Model) toolsNotice() string {
 	var b strings.Builder
 	b.WriteString("### Built-in tools\n\n")
 	for _, tool := range tools.Builtins() {
-		fmt.Fprintf(&b, "- `%s` [%s] — %s\n", tool.Name, tool.Risk, tool.Description)
+		args := "no arguments"
+		if len(tool.Arguments) > 0 {
+			var parts []string
+			for _, argument := range tool.Arguments {
+				name := argument.Name
+				if argument.Required {
+					name += "*"
+				}
+				parts = append(parts, name+":"+argument.Type)
+			}
+			args = strings.Join(parts, ", ")
+		}
+		fmt.Fprintf(&b, "- `%s` [%s] — %s Args: %s\n", tool.Name, tool.Risk, tool.Description, args)
 	}
+	b.WriteString("\nRequired arguments are marked with `*`. Safe mode auto-runs read tools and asks before write/shell tools.")
 	return b.String()
 }
 
+func (m Model) surfaceNotice() string {
+	snapshot := m.session.Agent
+	if !snapshot.Trace.Empty() {
+		return m.structuredSurfaceNotice(snapshot)
+	}
+	if strings.TrimSpace(snapshot.Reasoning) == "" {
+		if event, ok := m.latestReasoningEvent(); ok {
+			if trace := eventAgentTrace(event); !trace.Empty() {
+				return "### Beneath the Surface\n\n" + formatAgentTraceMarkdown(trace)
+			}
+			return "### Beneath the Surface\n\n" + strings.TrimSpace(event.Content)
+		}
+		return "### Beneath the Surface\n\nNo persisted reasoning summary is available yet."
+	}
+	var sections []string
+	sections = append(sections, "### Beneath the Surface")
+	sections = append(sections, strings.TrimSpace(snapshot.Reasoning))
+	if strings.TrimSpace(snapshot.Plan) != "" {
+		sections = append(sections, "### Persisted plan\n\n"+strings.TrimSpace(snapshot.Plan))
+	}
+	verification := strings.TrimSpace(snapshot.Verification)
+	if verification == "" {
+		verification = "No explicit verification evidence was captured."
+	}
+	state := "unverified"
+	if snapshot.Verified {
+		state = "verified"
+	}
+	sections = append(sections, "### Verification · "+state+"\n\n"+verification)
+	if strings.TrimSpace(snapshot.Summary) != "" {
+		sections = append(sections, "### Final summary\n\n"+strings.TrimSpace(snapshot.Summary))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func (m Model) structuredSurfaceNotice(snapshot history.AgentSnapshot) string {
+	var sections []string
+	sections = append(sections, "### Beneath the Surface")
+	sections = append(sections, formatAgentTraceMarkdown(snapshot.Trace))
+	if strings.TrimSpace(snapshot.Plan) != "" {
+		sections = append(sections, "### Persisted plan\n\n"+strings.TrimSpace(snapshot.Plan))
+	}
+	verification := strings.TrimSpace(firstNonEmpty(snapshot.Trace.Verification, snapshot.Verification))
+	if verification == "" {
+		verification = "No explicit verification evidence was captured."
+	}
+	state := "unverified"
+	if snapshot.Verified {
+		state = "verified"
+	}
+	sections = append(sections, "### Verification · "+state+"\n\n"+verification)
+	if strings.TrimSpace(snapshot.Summary) != "" {
+		sections = append(sections, "### Final summary\n\n"+strings.TrimSpace(snapshot.Summary))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func formatAgentTraceMarkdown(trace history.AgentTrace) string {
+	var sections []string
+	appendText := func(label, value string) {
+		if strings.TrimSpace(value) != "" {
+			sections = append(sections, "**"+label+"**\n"+strings.TrimSpace(value))
+		}
+	}
+	appendList := func(label string, values []string) {
+		var items []string
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				items = append(items, strings.TrimSpace(value))
+			}
+		}
+		if len(items) > 0 {
+			sections = append(sections, "**"+label+"**\n- "+strings.Join(items, "\n- "))
+		}
+	}
+	appendText("Goal", trace.Goal)
+	appendText("Current state", trace.CurrentState)
+	appendList("Assumptions", trace.Assumptions)
+	appendList("Approach", trace.Approach)
+	appendList("Evidence", trace.Evidence)
+	appendList("Risks", trace.Risks)
+	appendText("Tool rationale", trace.ToolRationale)
+	appendText("Verification", trace.Verification)
+	appendText("Next step", trace.NextStep)
+	if len(sections) == 0 {
+		return "No structured trace fields were captured."
+	}
+	return strings.Join(sections, "\n\n")
+}
+
 func (m Model) planNotice() string {
+	if strings.TrimSpace(m.session.Agent.Plan) != "" {
+		return "### Plan\n\n" + strings.TrimSpace(m.session.Agent.Plan)
+	}
 	var plans []string
 	for i := len(m.session.Events) - 1; i >= 0; i-- {
 		if m.session.Events[i].Type == "plan_update" {
@@ -300,6 +796,11 @@ func (m Model) configNotice() string {
 - Context budget: %s
 - Max output tokens: %s
 - Max tool output tokens: %s
+- Agent max steps: %d
+- Repeated-call guard: %d
+- Automatic verification: %t
+- Automatic review specialist: %t
+- Inspect before edit: %t
 - Beneath the Surface: %t
 - Theme density: %s`,
 		m.providerName(),
@@ -313,13 +814,50 @@ func (m Model) configNotice() string {
 		formatTokenCount(m.cfg.ContextTokens),
 		formatTokenCount(int(m.cfg.MaxTokens)),
 		formatTokenCount(m.cfg.MaxToolOutputTokens),
+		m.cfg.AgentMaxSteps,
+		m.cfg.AgentLoopLimit,
+		m.cfg.AgentAutoVerify,
+		m.cfg.AgentAutoReview,
+		m.cfg.RequireReadBeforeEdit,
 		m.cfg.ShowThinking,
 		m.cfg.ThemeDensity,
 	)
 }
 
 func (m Model) memoryNotice() string {
-	return "### Memory\n\nProject memory is loaded from `.ephemera/memory.json`, `.ephemera/instructions.md`, `CLAUDE.md`, and `AGENTS.md` in the workspace. Persistent memory editing will land after the V1 tool loop stabilizes."
+	states := m.memorySourceStates()
+	var found, tokens int
+	for _, source := range states {
+		if source.Found && source.Err == "" {
+			found++
+			tokens += source.Tokens
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("### Memory\n\n")
+	fmt.Fprintf(&b, "- Workspace: `%s`\n", escapeMarkdown(m.workspaceRoot()))
+	fmt.Fprintf(&b, "- Loaded sources: %d / %d\n", found, len(states))
+	fmt.Fprintf(&b, "- Estimated memory tokens: ~%s\n\n", formatTokenCount(tokens))
+	for _, source := range states {
+		switch {
+		case source.Found && source.Err == "":
+			fmt.Fprintf(&b, "#### `%s`\n\n", source.Path)
+			fmt.Fprintf(&b, "- Status: found · %s · ~%s tokens · updated %s\n", formatByteCount(source.Size), formatTokenCount(source.Tokens), source.Modified.Format("2006-01-02 15:04"))
+			if strings.TrimSpace(source.Preview) == "" {
+				b.WriteString("- Preview: empty file\n\n")
+			} else {
+				b.WriteString("\n```text\n")
+				b.WriteString(source.Preview)
+				b.WriteString("\n```\n\n")
+			}
+		case source.Err != "":
+			fmt.Fprintf(&b, "- `%s` — unavailable: %s\n", source.Path, escapeMarkdown(source.Err))
+		default:
+			fmt.Fprintf(&b, "- `%s` — missing\n", source.Path)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func (m Model) localToolNotice(name string) string {

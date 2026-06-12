@@ -59,6 +59,9 @@ func TestDefaultAgentPolicy(t *testing.T) {
 	if cfg.ThemeDensity != "comfortable" {
 		t.Fatalf("theme density = %q, want comfortable", cfg.ThemeDensity)
 	}
+	if cfg.AgentMaxSteps < 8 || cfg.AgentLoopLimit < 1 || !cfg.AgentAutoVerify || !cfg.AgentAutoReview || !cfg.RequireReadBeforeEdit {
+		t.Fatalf("unexpected agent quality defaults: %+v", cfg)
+	}
 }
 
 func TestNormalizePreservesExplicitOpenAIModel(t *testing.T) {

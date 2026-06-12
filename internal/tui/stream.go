@@ -22,6 +22,7 @@ type agentStreamMsg struct {
 
 type liveAgentState struct {
 	Active          bool
+	RunID           string
 	Phase           string
 	Iteration       int
 	Tool            string
@@ -38,7 +39,13 @@ type liveAgentState struct {
 	Err             string
 	Goal            string
 	Summary         string
+	Thought         string
+	Reasoning       string
+	ReasoningChars  int
+	Trace           history.AgentTrace
 	Plan            string
+	Verification    string
+	Verified        bool
 }
 
 func waitAgentStream(ch <-chan agent.StreamUpdate) tea.Cmd {
@@ -58,12 +65,19 @@ func (m *Model) generateCmd() tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.agentStream = stream
 	m.agentCancel = cancel
+	now := time.Now()
 	m.liveAgent = liveAgentState{
 		Active:    true,
 		Phase:     "starting",
 		Iteration: 1,
-		StartedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		StartedAt: now,
+		UpdatedAt: now,
+	}
+	m.session.Agent = history.AgentSnapshot{
+		Status:    "running",
+		Phase:     "starting",
+		Iteration: 1,
+		UpdatedAt: now,
 	}
 
 	go func() {
@@ -87,11 +101,13 @@ func (m *Model) generateCmd() tea.Cmd {
 		system := reasoning.SystemPrompt(cfg.Mode)
 		messages, stats := buildRequestMessages(session.Messages, system, cfg.ContextTokens)
 		req := llm.Request{
-			Model:       cfg.Model(),
-			System:      system,
-			Messages:    messages,
-			MaxTokens:   cfg.MaxTokens,
-			Temperature: cfg.Mode.Temperature(),
+			Model:            cfg.Model(),
+			System:           system,
+			Messages:         messages,
+			MaxTokens:        cfg.MaxTokens,
+			Temperature:      cfg.Mode.Temperature(),
+			ReasoningSummary: cfg.ShowThinking,
+			ReasoningEffort:  cfg.Mode.Effort(),
 		}
 		emit(agent.StreamUpdate{
 			Kind:            agent.StreamStatus,
@@ -103,13 +119,23 @@ func (m *Model) generateCmd() tea.Cmd {
 			DroppedMessages: stats.DroppedMessages,
 		})
 		outputRunes := 0
-		text, err := llm.GenerateStreaming(ctx, provider, req, func(delta string) error {
-			outputRunes += len([]rune(delta))
+		text, err := llm.GenerateStreaming(ctx, provider, req, func(delta llm.Delta) error {
+			if delta.Text == "" {
+				return nil
+			}
+			kind := agent.StreamDelta
+			phase := "receiving model"
+			if delta.Kind == llm.DeltaReasoning {
+				kind = agent.StreamReasoning
+				phase = "reasoning"
+			} else {
+				outputRunes += len([]rune(delta.Text))
+			}
 			emit(agent.StreamUpdate{
-				Kind:          agent.StreamDelta,
-				Phase:         "receiving model",
+				Kind:          kind,
+				Phase:         phase,
 				Iteration:     1,
-				Delta:         delta,
+				Delta:         delta.Text,
 				ContextTokens: stats.EstimatedTokens,
 				OutputTokens:  (outputRunes + 3) / 4,
 			})
@@ -138,14 +164,23 @@ func completionPhase(err error) string {
 
 func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 	now := time.Now()
-	if update.Kind == agent.StreamStatus && update.Phase == "requesting model" &&
-		(update.Iteration != m.liveAgent.Iteration || m.liveAgent.Phase != "requesting model") {
+	if update.RunID != "" {
+		m.liveAgent.RunID = update.RunID
+	}
+	m.liveAgent.Verified = update.Verified
+	if update.Kind == agent.StreamStatus && (update.Phase == "requesting model" || update.Phase == "deliberating") &&
+		(update.Iteration != m.liveAgent.Iteration || (m.liveAgent.Phase != "requesting model" && m.liveAgent.Phase != "deliberating")) {
 		m.liveAgent.Partial = ""
 		m.liveAgent.ReceivedChars = 0
 		m.liveAgent.OutputTokens = 0
 		m.liveAgent.Goal = ""
 		m.liveAgent.Summary = ""
+		m.liveAgent.Thought = ""
+		m.liveAgent.Reasoning = ""
+		m.liveAgent.ReasoningChars = 0
+		m.liveAgent.Trace = history.AgentTrace{}
 		m.liveAgent.Plan = ""
+		m.liveAgent.Verification = ""
 	}
 	if m.liveAgent.StartedAt.IsZero() {
 		m.liveAgent.StartedAt = update.StartedAt
@@ -177,7 +212,7 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 		m.liveAgent.TotalMessages = update.TotalMessages
 		m.liveAgent.DroppedMessages = update.DroppedMessages
 	}
-	if update.Delta != "" {
+	if update.Delta != "" && update.Kind == agent.StreamDelta {
 		m.liveAgent.ReceivedChars += len([]rune(update.Delta))
 		m.liveAgent.Partial += update.Delta
 		const maxPartial = 96 * 1024
@@ -186,13 +221,22 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 		}
 		m.updateDecisionPreview()
 	}
+	if update.Delta != "" && update.Kind == agent.StreamReasoning {
+		m.liveAgent.ReasoningChars += len([]rune(update.Delta))
+		m.liveAgent.Reasoning += update.Delta
+		const maxReasoning = 48 * 1024
+		if len(m.liveAgent.Reasoning) > maxReasoning {
+			m.liveAgent.Reasoning = m.liveAgent.Reasoning[len(m.liveAgent.Reasoning)-maxReasoning:]
+		}
+		m.liveAgent.Thought = latestReasoningPreview(m.liveAgent.Reasoning)
+	}
 
 	atBottom := m.viewport.AtBottom()
 	switch update.Kind {
 	case agent.StreamStatus:
 		m.status = m.liveStatusText()
 		m.refreshViewport(atBottom)
-	case agent.StreamDelta:
+	case agent.StreamDelta, agent.StreamReasoning:
 		m.status = m.liveStatusText()
 		// Rebuilding the full transcript for every token is expensive. Repaint at
 		// a terminal-friendly cadence while the footer still updates every event.
@@ -203,6 +247,11 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 	case agent.StreamEvent:
 		if update.Event != nil {
 			m.upsertStreamEvent(*update.Event)
+			m.captureAgentEvent(*update.Event)
+			if m.followLive {
+				m.selectedEvent = max(0, len(m.visibleAgentEvents())-1)
+			}
+			m.persistAgentSnapshot(false)
 			_ = m.saveSession()
 		}
 		m.status = m.liveStatusText()
@@ -223,6 +272,10 @@ func (m *Model) finishAgentStream(update agent.StreamUpdate) {
 	m.liveAgent.Active = false
 	m.liveAgent.Phase = update.Phase
 	m.liveAgent.Tool = update.Tool
+	m.liveAgent.Verified = update.Verified
+	if update.RunID != "" {
+		m.liveAgent.RunID = update.RunID
+	}
 	m.liveAgent.UpdatedAt = time.Now()
 	if update.Err != nil {
 		m.liveAgent.Err = update.Err.Error()
@@ -231,8 +284,15 @@ func (m *Model) finishAgentStream(update agent.StreamUpdate) {
 	} else {
 		text := strings.TrimSpace(update.Text)
 		if text != "" {
-			m.session.Append("assistant", text)
-			m.lastAssistant = text
+			if m.pendingApproval == nil {
+				m.session.Append("assistant", text)
+				m.lastAssistant = text
+			} else {
+				// Approval prompts belong to the control timeline. Keeping them out
+				// of chat prevents the resumed model from treating a stale request
+				// as an unresolved assistant instruction.
+				m.notice = text
+			}
 		}
 		m.session.Provider = m.cfg.Provider
 		m.session.Model = m.cfg.Model()
@@ -243,6 +303,7 @@ func (m *Model) finishAgentStream(update agent.StreamUpdate) {
 			m.status = "Saved · " + contextSummary(m.currentContextStats())
 		}
 	}
+	m.persistAgentSnapshot(m.pendingApproval == nil)
 	if err := m.saveSession(); err != nil {
 		m.status = "Completed, but session save failed: " + err.Error()
 	}
@@ -313,10 +374,160 @@ func (m *Model) updateDecisionPreview() {
 			m.liveAgent.Plan = value
 		}
 	}
+	if m.liveAgent.Verification == "" {
+		if value := partialJSONStringField(raw, "verification"); value != "" {
+			m.liveAgent.Verification = value
+		}
+	}
+	if thought := latestDecisionThought(raw); thought != "" {
+		m.liveAgent.Thought = thought
+	}
+}
+
+func latestDecisionThought(raw string) string {
+	type candidate struct {
+		index int
+		text  string
+	}
+	best := candidate{index: -1}
+	for _, key := range []string{"goal", "current_state", "tool_rationale", "verification", "next_step", "summary"} {
+		index := strings.LastIndex(raw, `"`+key+`"`)
+		if index < best.index {
+			continue
+		}
+		if value := partialJSONStringField(raw, key); value != "" {
+			best = candidate{index: index, text: value}
+		}
+	}
+	for _, key := range []string{"assumptions", "approach", "evidence", "risks", "plan"} {
+		index := strings.LastIndex(raw, `"`+key+`"`)
+		if index < best.index {
+			continue
+		}
+		if value := partialJSONArrayFirstString(raw, key); value != "" {
+			best = candidate{index: index, text: value}
+		}
+	}
+	return lastLineCompact(best.text, 180)
+}
+
+func latestReasoningPreview(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	lines := strings.Split(raw, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line != "" {
+			return lastLineCompact(line, 180)
+		}
+	}
+	return lastLineCompact(raw, 180)
+}
+
+func lastLineCompact(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if value == "" || limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit == 1 {
+		return "…"
+	}
+	return "…" + string(runes[len(runes)-limit+1:])
+}
+
+func (m *Model) captureAgentEvent(event history.Event) {
+	switch event.Type {
+	case "reasoning_trace", "reasoning_summary":
+		m.liveAgent.Reasoning = event.Content
+		if trace := eventAgentTrace(event); !trace.Empty() {
+			m.liveAgent.Trace = trace
+			if strings.TrimSpace(trace.Goal) != "" {
+				m.liveAgent.Goal = trace.Goal
+			}
+			if strings.TrimSpace(trace.Verification) != "" {
+				m.liveAgent.Verification = trace.Verification
+			}
+			return
+		}
+		if goal := parseReasoningSection(event.Content, "Goal"); goal != "" {
+			m.liveAgent.Goal = goal
+		}
+		if verification := parseReasoningSection(event.Content, "Verification"); verification != "" {
+			m.liveAgent.Verification = verification
+		}
+	case "plan_update":
+		m.liveAgent.Plan = event.Content
+	case "verification":
+		m.liveAgent.Verification = event.Content
+		if value, ok := event.Metadata["verified"].(bool); ok {
+			m.liveAgent.Verified = value
+		}
+	case "final":
+		m.liveAgent.Summary = event.Content
+		if value, ok := event.Metadata["verified"].(bool); ok {
+			m.liveAgent.Verified = value
+		}
+	}
+}
+
+func eventAgentTrace(event history.Event) history.AgentTrace {
+	if event.Metadata == nil {
+		return history.AgentTrace{}
+	}
+	value, ok := event.Metadata["trace"]
+	if !ok || value == nil {
+		return history.AgentTrace{}
+	}
+	if trace, ok := value.(history.AgentTrace); ok {
+		return trace
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return history.AgentTrace{}
+	}
+	var trace history.AgentTrace
+	if err := json.Unmarshal(data, &trace); err != nil {
+		return history.AgentTrace{}
+	}
+	return trace
+}
+
+func (m *Model) persistAgentSnapshot(completed bool) {
+	status := "running"
+	if completed {
+		status = firstNonEmpty(m.liveAgent.Phase, "complete")
+	}
+	if m.pendingApproval != nil {
+		status = "awaiting approval"
+	}
+	m.session.Agent = history.AgentSnapshot{
+		RunID:         m.liveAgent.RunID,
+		Status:        status,
+		Phase:         m.liveAgent.Phase,
+		Iteration:     m.liveAgent.Iteration,
+		Goal:          m.liveAgent.Goal,
+		Summary:       m.liveAgent.Summary,
+		Reasoning:     m.liveAgent.Reasoning,
+		Trace:         m.liveAgent.Trace,
+		Plan:          m.liveAgent.Plan,
+		Verification:  m.liveAgent.Verification,
+		LastTool:      m.liveAgent.Tool,
+		ContextTokens: m.liveAgent.ContextTokens,
+		OutputTokens:  m.liveAgent.OutputTokens,
+		Verified:      m.liveAgent.Verified,
+		Completed:     completed,
+		UpdatedAt:     m.liveAgent.UpdatedAt,
+	}
 }
 
 func partialJSONStringField(raw, key string) string {
-	index := strings.Index(raw, `"`+key+`"`)
+	index := strings.LastIndex(raw, `"`+key+`"`)
 	if index < 0 {
 		return ""
 	}
@@ -334,7 +545,7 @@ func partialJSONStringField(raw, key string) string {
 }
 
 func partialJSONArrayFirstString(raw, key string) string {
-	index := strings.Index(raw, `"`+key+`"`)
+	index := strings.LastIndex(raw, `"`+key+`"`)
 	if index < 0 {
 		return ""
 	}
@@ -359,25 +570,53 @@ func parsePartialJSONString(raw string) (string, bool) {
 	if !strings.HasPrefix(raw, `"`) {
 		return "", false
 	}
-	escaped := false
+	var value strings.Builder
 	for index := 1; index < len(raw); index++ {
 		char := raw[index]
-		if escaped {
-			escaped = false
+		if char == '"' {
+			var complete string
+			if err := json.Unmarshal([]byte(raw[:index+1]), &complete); err == nil {
+				return complete, true
+			}
+			return value.String(), true
+		}
+		if char != '\\' {
+			value.WriteByte(char)
 			continue
 		}
-		if char == '\\' {
-			escaped = true
-			continue
+		if index+1 >= len(raw) {
+			break
 		}
-		if char != '"' {
-			continue
+		index++
+		switch escaped := raw[index]; escaped {
+		case '"', '\\', '/':
+			value.WriteByte(escaped)
+		case 'b':
+			value.WriteByte('\b')
+		case 'f':
+			value.WriteByte('\f')
+		case 'n':
+			value.WriteByte('\n')
+		case 'r':
+			value.WriteByte('\r')
+		case 't':
+			value.WriteByte('\t')
+		case 'u':
+			if index+4 >= len(raw) {
+				return value.String(), true
+			}
+			encoded := raw[index-1 : index+5]
+			var decoded string
+			if err := json.Unmarshal([]byte(`"`+encoded+`"`), &decoded); err != nil {
+				return value.String(), true
+			}
+			value.WriteString(decoded)
+			index += 4
+		default:
+			// Preserve a malformed or provider-specific escape in the preview;
+			// final JSON validation still happens in the agent parser.
+			value.WriteByte(escaped)
 		}
-		var value string
-		if err := json.Unmarshal([]byte(raw[:index+1]), &value); err != nil {
-			return "", false
-		}
-		return value, true
 	}
-	return "", false
+	return value.String(), true
 }

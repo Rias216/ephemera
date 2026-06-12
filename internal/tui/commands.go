@@ -73,8 +73,8 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/load research", "open a saved session"}},
 	},
 	{
-		Name: "/sessions", Description: "list saved sessions", Category: "SESSION", Introduced: "v0.1.0", Permission: "filesystem",
-		Examples: []commandExample{{"/sessions", "show session names"}},
+		Name: "/sessions", Usage: "[query]", Description: "list or search saved sessions", Category: "SESSION", Introduced: "v0.1.0", Permission: "filesystem",
+		Examples: []commandExample{{"/sessions", "show session names"}, {"/sessions renderer", "search saved session text"}},
 	},
 	{
 		Name: "/provider", Usage: "<provider>", Description: "switch the active provider", Category: "ROUTE", Introduced: "v0.1.0", Permission: "local", Choices: config.ProviderNames(),
@@ -117,8 +117,16 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/plan", "inspect the current agent plan"}},
 	},
 	{
+		Name: "/surface", Description: "open the persisted Beneath the Surface trace", Category: "AGENT", Introduced: "v0.6.0", Permission: "local",
+		Examples: []commandExample{{"/surface", "review the latest goal, evidence, plan, and verification after completion"}},
+	},
+	{
 		Name: "/tools", Description: "list local agent tools", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
 		Examples: []commandExample{{"/tools", "show tool names and risk levels"}},
+	},
+	{
+		Name: "/eval", Description: "run deterministic local agent capability eval", Category: "AGENT", Introduced: "v0.6.0", Permission: "local",
+		Examples: []commandExample{{"/eval", "check read, write, native tool, repair, and verification behavior"}},
 	},
 	{
 		Name: "/thinking", Usage: "<on|off|toggle>", Description: "show or hide Beneath the Surface decision traces", Category: "AGENT", Introduced: "v0.4.0", Permission: "local", Choices: []string{"on", "off", "toggle"},

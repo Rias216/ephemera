@@ -36,6 +36,8 @@ const helpText = `### Commands
 - **/usage** / **/budget <tokens>** — inspect or set context
 - **/approval <auto|safe|read-only>** — set agent approval policy
 - **/thinking <on|off>** — show or hide Beneath the Surface traces
+- **/surface** — reopen the latest persisted reasoning and verification trace
+- **/eval** — run deterministic local agent capability checks
 - **/retry** / **/undo** — revise the latest exchange
 - **/stop** — cancel the active streaming agent run
 - **/export [path]** — export the transcript
@@ -46,7 +48,7 @@ const helpText = `### Commands
 
 Autocomplete: type **/**, use **↑/↓** or **Ctrl+N/P** to select, **PgUp/PgDn** to jump, **Enter** to run, **Tab** to complete, and **Esc** to close.
 
-Keys: **Enter** send · **Ctrl+X** stop agent · **Ctrl+L** clear composer · **Ctrl+R** retry · **PgUp/PgDn** scroll · **Alt+1..4** inspector tabs · **Ctrl+←/→** switch tabs · **Ctrl+Y** copy · **Ctrl+C** quit`
+Keys: **Enter** send · **Ctrl+X** stop agent · **Ctrl+L** clear composer · **Ctrl+R** retry · **PgUp/PgDn** scroll · **Ctrl+T** timeline focus · **Alt+1..4** inspector tabs · **Ctrl+←/→** switch tabs · **Ctrl+Y** copy · **Ctrl+C** quit`
 
 type responseMsg struct {
 	text    string
@@ -58,6 +60,7 @@ type responseMsg struct {
 
 type approvalResultMsg struct {
 	event         history.Event
+	pending       agent.PendingApproval
 	err           error
 	continueAgent bool
 }
@@ -90,6 +93,11 @@ type Model struct {
 	modelCatalogCache   map[string]modelCatalogState
 	pendingApproval     *agent.PendingApproval
 	inspectorTab        int
+	timelineFocus       bool
+	selectedEvent       int
+	expandedEvents      map[string]bool
+	timelineFilter      string
+	followLive          bool
 	agentStream         <-chan agent.StreamUpdate
 	agentCancel         context.CancelFunc
 	liveAgent           liveAgentState
@@ -141,6 +149,8 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 		animationGeneration: 1,
 		animationLastTick:   now,
 		inspectorTab:        0,
+		expandedEvents:      make(map[string]bool),
+		followLive:          true,
 	}
 }
 
@@ -225,10 +235,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, event := range msg.events {
 			m.session.AppendEvent(event)
 		}
+		if m.followLive {
+			m.selectedEvent = max(0, len(m.visibleAgentEvents())-1)
+		}
 		m.pendingApproval = msg.pending
 		if strings.TrimSpace(msg.text) != "" {
-			m.session.Append("assistant", msg.text)
-			m.lastAssistant = msg.text
+			if msg.pending == nil {
+				m.session.Append("assistant", msg.text)
+				m.lastAssistant = msg.text
+			} else {
+				// Approval prompts are control state, not assistant conversation.
+				// Persisting them in the transcript makes the resumed model see
+				// its own stale request and can trigger another approval loop.
+				m.notice = msg.text
+			}
 		}
 		m.session.Provider = m.cfg.Provider
 		m.session.Model = m.cfg.Model()
@@ -251,8 +271,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.session.AppendEvent(msg.event)
-		m.resolvePendingToolEvent(msg.event)
+		m.resolvePendingApproval(msg.pending, msg.event)
 		m.pendingApproval = nil
+		m.notice = ""
 		_ = m.saveSession()
 		if !msg.continueAgent {
 			m.status = "Shell command captured."
@@ -260,7 +281,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy = true
-		m.status = "Approved action ran · continuing agent..."
+		if msg.event.Status == "error" {
+			m.status = "Approved action failed · continuing agent to recover..."
+		} else {
+			m.status = "Approved action ran · continuing agent..."
+		}
 		m.refreshViewport(true)
 		return m, tea.Batch(m.spinner.Tick, m.generateCmd())
 
@@ -313,10 +338,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingApproval != nil && m.input.Value() == "" {
 				return m, m.approvePending()
 			}
+			if key == "enter" && m.timelineFocus && m.input.Value() == "" {
+				m.toggleSelectedEvent()
+				m.refreshViewport(false)
+				return m, nil
+			}
 		case "r":
 			if m.pendingApproval != nil && m.input.Value() == "" {
 				m.rejectPending()
 				m.refreshViewport(true)
+				return m, nil
+			}
+		case "ctrl+t":
+			m.timelineFocus = !m.timelineFocus
+			if m.timelineFocus {
+				m.status = "Timeline focus · j/k select · Enter expand · f follow · t filter"
+			} else {
+				m.status = "Composer focus."
+			}
+			m.refreshViewport(false)
+			return m, nil
+		case "j", "down":
+			if m.timelineFocus && m.input.Value() == "" {
+				m.moveTimelineSelection(1)
+				m.refreshViewport(false)
+				return m, nil
+			}
+		case "k", "up":
+			if m.timelineFocus && m.input.Value() == "" {
+				m.moveTimelineSelection(-1)
+				m.refreshViewport(false)
+				return m, nil
+			}
+		case " ", "space":
+			if m.timelineFocus && m.input.Value() == "" {
+				m.toggleSelectedEvent()
+				m.refreshViewport(false)
+				return m, nil
+			}
+		case "f":
+			if m.timelineFocus && m.input.Value() == "" {
+				m.followLive = !m.followLive
+				m.status = "Timeline follow " + onOff(m.followLive)
+				m.refreshViewport(m.followLive)
+				return m, nil
+			}
+		case "t":
+			if m.timelineFocus && m.input.Value() == "" {
+				m.cycleTimelineFilter()
+				m.refreshViewport(false)
 				return m, nil
 			}
 		case "pgup":
@@ -728,6 +798,8 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		m.session.Events = nil
 		m.lastAssistant = ""
 		m.pendingApproval = nil
+		m.session.Agent = history.AgentSnapshot{}
+		m.liveAgent = liveAgentState{}
 		m.notice = ""
 		m.status = "The surface is clear."
 		_ = m.saveSession()
@@ -772,22 +844,46 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		_ = config.Save(m.cfg)
 
 	case "/sessions":
-		names, err := m.listSessions()
-		if err != nil {
-			m.status = "List failed: " + err.Error()
+		query := strings.TrimSpace(strings.Join(args, " "))
+		if query == "" {
+			names, err := m.listSessions()
+			if err != nil {
+				m.status = "List failed: " + err.Error()
+				break
+			}
+			if len(names) == 0 {
+				m.notice = "No saved sessions yet."
+			} else {
+				var b strings.Builder
+				b.WriteString("### Saved sessions\n\n")
+				for _, name := range names {
+					fmt.Fprintf(&b, "- `%s`\n", name)
+				}
+				m.notice = b.String()
+			}
+			m.status = fmt.Sprintf("%d session(s).", len(names))
 			break
 		}
-		if len(names) == 0 {
-			m.notice = "No saved sessions yet."
+		results, err := m.searchSessions(query)
+		if err != nil {
+			m.status = "Search failed: " + err.Error()
+			break
+		}
+		if len(results) == 0 {
+			m.notice = "No saved sessions match `" + escapeMarkdown(query) + "`."
 		} else {
 			var b strings.Builder
-			b.WriteString("### Saved sessions\n\n")
-			for _, name := range names {
-				fmt.Fprintf(&b, "- `%s`\n", name)
+			fmt.Fprintf(&b, "### Saved sessions matching `%s`\n\n", escapeMarkdown(query))
+			for _, result := range results {
+				detail := strings.TrimSpace(result.Match)
+				if detail == "" {
+					detail = result.Provider + " / " + result.Model
+				}
+				fmt.Fprintf(&b, "- `%s` — %s\n", result.Name, escapeMarkdown(detail))
 			}
 			m.notice = b.String()
 		}
-		m.status = fmt.Sprintf("%d session(s).", len(names))
+		m.status = fmt.Sprintf("%d session match(es).", len(results))
 
 	case "/provider":
 		provider, ok := requireArg("/provider <ollama|openai|anthropic|compatible>")
@@ -957,9 +1053,28 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		m.notice = m.planNotice()
 		m.status = "Plan opened."
 
+	case "/surface":
+		m.notice = m.surfaceNotice()
+		m.inspectorTab = inspectorThinking
+		m.status = "Beneath the Surface opened."
+
 	case "/tools":
 		m.notice = m.toolsNotice()
 		m.status = "Tools opened."
+
+	case "/eval":
+		report, err := agent.RunDeterministicEval(context.Background())
+		if err != nil {
+			m.notice = "### Agent capability eval\n\n`" + escapeMarkdown(err.Error()) + "`"
+			m.status = "Agent eval failed."
+			break
+		}
+		m.notice = agent.FormatEvalReport(report)
+		if report.Failed() > 0 {
+			m.status = fmt.Sprintf("Agent eval failed · %d/%d passed", report.Passed(), len(report.Results))
+		} else {
+			m.status = fmt.Sprintf("Agent eval passed · %d/%d", report.Passed(), len(report.Results))
+		}
 
 	case "/thinking":
 		value := "toggle"
@@ -1179,6 +1294,13 @@ func (m *Model) listSessions() ([]string, error) {
 		return nil, fmt.Errorf("session store unavailable")
 	}
 	return m.store.List()
+}
+
+func (m *Model) searchSessions(query string) ([]history.SearchResult, error) {
+	if m.store == nil {
+		return nil, fmt.Errorf("session store unavailable")
+	}
+	return m.store.Search(query, 20)
 }
 
 func loadFromStore(store *history.Store, name string) (history.Session, error) {

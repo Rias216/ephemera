@@ -34,21 +34,9 @@ func NewOpenAICompatible(name, baseURL, apiKey string) *OpenAI {
 func (p *OpenAI) Name() string { return p.name }
 
 func (p *OpenAI) Generate(ctx context.Context, req Request) (string, error) {
-	key := strings.TrimSpace(p.apiKey)
-	if key == "" {
-		if p.baseURL == "" {
-			key = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
-		} else {
-			key = firstNonEmpty(os.Getenv(p.apiKeyEnv), os.Getenv("EPHEMERA_API_KEY"))
-		}
-	}
-	if key == "" && p.baseURL == "" {
-		return "", fmt.Errorf("OPENAI_API_KEY is not set; run /connect openai")
-	}
-	// Local OpenAI-compatible servers commonly require no authentication, but
-	// the SDK expects a value. Most such servers ignore this placeholder header.
-	if key == "" {
-		key = "not-needed"
+	key, err := p.resolvedAPIKey()
+	if err != nil {
+		return "", err
 	}
 
 	opts := []option.RequestOption{option.WithAPIKey(key)}
@@ -75,7 +63,6 @@ func (p *OpenAI) Generate(ctx context.Context, req Request) (string, error) {
 		Model:    openai.ChatModel(req.Model),
 	}
 	var response *openai.ChatCompletion
-	var err error
 	if p.baseURL == "" {
 		params.MaxCompletionTokens = openai.Int(req.MaxTokens)
 		response, err = client.Chat.Completions.New(ctx, params)
@@ -102,4 +89,61 @@ func (p *OpenAI) Generate(ctx context.Context, req Request) (string, error) {
 		return "", fmt.Errorf("%s returned an empty response", p.Name())
 	}
 	return text, nil
+}
+
+func (p *OpenAI) GenerateWithTools(ctx context.Context, req Request, specs []ToolSpec, onDelta DeltaFunc) (ToolDecision, error) {
+	if len(specs) == 0 {
+		text, err := p.GenerateStream(ctx, req, onDelta)
+		return ToolDecision{Text: text}, err
+	}
+	if p.baseURL == "" {
+		return p.generateResponsesStream(ctx, req, specs, onDelta)
+	}
+	return p.generateChatCompletionsStream(ctx, req, specs, onDelta)
+}
+
+func (p *OpenAI) resolvedAPIKey() (string, error) {
+	key := strings.TrimSpace(p.apiKey)
+	if key == "" {
+		if p.baseURL == "" {
+			key = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+		} else {
+			key = firstNonEmpty(os.Getenv(p.apiKeyEnv), os.Getenv("EPHEMERA_API_KEY"))
+		}
+	}
+	if key == "" && p.baseURL == "" {
+		return "", fmt.Errorf("OPENAI_API_KEY is not set; run /connect openai")
+	}
+	if key == "" {
+		// Local OpenAI-compatible servers commonly require no authentication.
+		// Most ignore this placeholder header.
+		key = "not-needed"
+	}
+	return key, nil
+}
+
+func openAIWireMessages(req Request) []map[string]string {
+	messages := make([]map[string]string, 0, len(req.Messages)+1)
+	messages = append(messages, map[string]string{"role": "system", "content": req.System})
+	for _, message := range req.Messages {
+		if message.Role == "user" || message.Role == "assistant" {
+			messages = append(messages, map[string]string{"role": message.Role, "content": message.Content})
+		}
+	}
+	return messages
+}
+
+func openAIWireTools(specs []ToolSpec) []map[string]any {
+	tools := make([]map[string]any, 0, len(specs))
+	for _, spec := range specs {
+		tools = append(tools, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        spec.Name,
+				"description": spec.Description,
+				"parameters":  spec.Parameters,
+			},
+		})
+	}
+	return tools
 }

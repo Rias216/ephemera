@@ -32,7 +32,10 @@ func (m Model) footerTabsLine(width int) string {
 	}
 	left := strings.Join(tabs, " ")
 	_, glyph := m.statusPresentation()
-	statusText := glyph + " live · Ctrl+←/→ switch"
+	statusText := glyph + " live · Ctrl+T timeline · Ctrl+←/→ switch"
+	if m.timelineFocus {
+		statusText = glyph + " timeline · j/k · Enter · t filter"
+	}
 	if m.liveAgent.Active {
 		statusText = glyph + " " + firstNonEmpty(m.liveAgent.Phase, "working") + " · Ctrl+X stop"
 	}
@@ -123,18 +126,37 @@ func (m Model) footerPaneSummary() (string, string) {
 		if m.pendingApproval != nil {
 			pending = m.pendingApproval.Call.Name
 		}
+		if snapshot := m.session.Agent; snapshot.Status != "" {
+			verified := "unverified"
+			if snapshot.Verified {
+				verified = "verified"
+			}
+			return fmt.Sprintf("agent %s · round %d · %s · %s", snapshot.Status, max(1, snapshot.Iteration), verified, m.cfg.ApprovalPolicy),
+				fmt.Sprintf("ctx ~%s · out ~%s", formatTokenCount(snapshot.ContextTokens), formatTokenCount(snapshot.OutputTokens))
+		}
 		return fmt.Sprintf("agent %s · policy %s · pending %s", onOff(m.cfg.AgentEnabled), m.cfg.ApprovalPolicy, pending),
 			fmt.Sprintf("events %d · msgs %d", len(m.session.Events), len(m.session.Messages))
 	case inspectorThinking:
 		if m.liveAgent.Active {
-			return "beneath the surface · " + m.liveGoalPreview(), fmt.Sprintf("round %d · %s", max(1, m.liveAgent.Iteration), firstNonEmpty(m.liveAgent.Phase, "working"))
+			preview := firstNonEmpty(m.liveAgent.Thought, m.liveGoalPreview())
+			return "beneath the surface · " + lastLineCompact(preview, 96), fmt.Sprintf("round %d · %s", max(1, m.liveAgent.Iteration), firstNonEmpty(m.liveAgent.Phase, "working"))
+		}
+		if snapshot := m.session.Agent; strings.TrimSpace(snapshot.Reasoning) != "" || strings.TrimSpace(snapshot.Goal) != "" || !snapshot.Trace.Empty() {
+			preview := firstNonEmpty(snapshot.Trace.Goal, snapshot.Goal, parseReasoningSection(snapshot.Reasoning, "Goal"), snapshot.Reasoning)
+			state := snapshot.Status
+			if snapshot.Verified {
+				state += " · verified"
+			} else if snapshot.Completed {
+				state += " · unverified"
+			}
+			return "beneath the surface · " + firstLineCompact(preview, 96), state
 		}
 		if event, ok := m.latestReasoningEvent(); ok {
 			return "beneath the surface · " + firstLineCompact(event.Content, 96), fmt.Sprintf("updated %s", event.CreatedAt.Format("15:04:05"))
 		}
 		return "beneath the surface is waiting for the next agent step", fmt.Sprintf("thinking %s", onOff(m.cfg.ShowThinking))
 	case inspectorKeys:
-		return "Enter send · Ctrl+X stop · / palette · PgUp/PgDn scroll · Ctrl+R retry", "Alt+1..4 inspector"
+		return "Enter send · Ctrl+T timeline · j/k select · Enter expand · f follow · t filter", "Alt+1..4 inspector"
 	default:
 		trim := "clean"
 		if stats.DroppedMessages > 0 {
@@ -160,7 +182,10 @@ func (m Model) footerPaneDetail() (string, string) {
 				fmt.Sprintf("policy %s", m.cfg.ApprovalPolicy)
 		}
 		last := "no agent activity yet"
-		if event, ok := m.latestEvent(); ok {
+		if snapshot := m.session.Agent; snapshot.Status != "" {
+			last = firstNonEmpty(snapshot.Summary, snapshot.Goal, snapshot.Phase, last)
+			last = fmt.Sprintf("last %s: %s", snapshot.Status, firstLineCompact(last, 96))
+		} else if event, ok := m.latestEvent(); ok {
 			last = fmt.Sprintf("last %s/%s: %s", event.Type, fallbackStatus(event.Status), firstLineCompact(firstNonEmpty(event.Title, event.Content), 96))
 		}
 		workspace := strings.TrimSpace(m.cfg.WorkspaceRoot)
@@ -171,8 +196,14 @@ func (m Model) footerPaneDetail() (string, string) {
 	case inspectorThinking:
 		goal, plan := m.latestThinkingSummary()
 		phase := fmt.Sprintf("thinking %s", onOff(m.cfg.ShowThinking))
+		if snapshot := m.session.Agent; snapshot.Status != "" && !m.liveAgent.Active {
+			phase = snapshot.Status
+			if verification := firstNonEmpty(snapshot.Trace.Verification, snapshot.Verification); strings.TrimSpace(verification) != "" {
+				plan = "verify · " + firstLineCompact(verification, 96)
+			}
+		}
 		if m.liveAgent.Active {
-			goal = m.liveGoalPreview()
+			goal = firstNonEmpty(m.liveAgent.Thought, m.liveGoalPreview())
 			phase = fmt.Sprintf("%s · ~%s generated", firstNonEmpty(m.liveAgent.Phase, "working"), formatTokenCount(m.liveAgent.OutputTokens))
 			if strings.TrimSpace(m.liveAgent.Plan) != "" {
 				plan = "plan · " + firstLineCompact(m.liveAgent.Plan, 96)
@@ -180,10 +211,19 @@ func (m Model) footerPaneDetail() (string, string) {
 				plan = ""
 			}
 		}
+		if m.liveAgent.Active {
+			goal = lastLineCompact(goal, 96)
+		}
 		return firstNonEmpty(goal, "goal not available yet"), firstNonEmpty(plan, phase)
 	case inspectorKeys:
-		return "Ctrl+Y copy · Ctrl+L clear · Ctrl+X stop · Ctrl+C quit · /agent auto enables full auto-approve", "!<cmd> runs shell via approvals"
+		return "Ctrl+Y copy · Ctrl+L clear · Ctrl+X stop · Ctrl+C quit · /agent auto enables full auto-approve", "timeline focus keeps composer safe"
 	default:
+		if m.liveAgent.Active && m.cfg.ShowThinking {
+			thought := firstNonEmpty(m.liveAgent.Thought, latestReasoningPreview(m.liveAgent.Reasoning))
+			if strings.TrimSpace(thought) != "" {
+				return "thinking · " + lastLineCompact(thought, 110), fmt.Sprintf("reasoning %d chars", m.liveAgent.ReasoningChars)
+			}
+		}
 		return fmt.Sprintf("session %s · mode %s · viewport %3.0f%%", m.session.Name, m.cfg.Mode, m.viewport.ScrollPercent()*100),
 			fmt.Sprintf("messages %d · agent %s", len(m.session.Messages), onOff(m.cfg.AgentEnabled))
 	}
@@ -232,6 +272,16 @@ func (m Model) latestPlanEvent() (history.Event, bool) {
 }
 
 func (m Model) latestThinkingSummary() (string, string) {
+	if snapshot := m.session.Agent; strings.TrimSpace(snapshot.Reasoning) != "" || strings.TrimSpace(snapshot.Goal) != "" || strings.TrimSpace(snapshot.Plan) != "" || !snapshot.Trace.Empty() {
+		goal := firstNonEmpty(snapshot.Trace.Goal, snapshot.Goal, parseReasoningSection(snapshot.Reasoning, "Goal"), snapshot.Reasoning)
+		plan := ""
+		if strings.TrimSpace(snapshot.Trace.NextStep) != "" {
+			plan = "next · " + firstLineCompact(snapshot.Trace.NextStep, 96)
+		} else if strings.TrimSpace(snapshot.Plan) != "" {
+			plan = "plan · " + firstLineCompact(snapshot.Plan, 96)
+		}
+		return firstLineCompact(goal, 96), plan
+	}
 	goal := ""
 	if event, ok := m.latestReasoningEvent(); ok {
 		goal = parseReasoningSection(event.Content, "Goal")

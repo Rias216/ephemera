@@ -1,7 +1,8 @@
-// Package history persists named chat sessions as portable JSON files.
+// Package history persists named chat sessions.
 package history
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,10 +11,12 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/reasoning"
+	_ "modernc.org/sqlite"
 )
 
 var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
@@ -38,6 +41,67 @@ type Event struct {
 	CreatedAt time.Time      `json:"created_at"`
 }
 
+const (
+	EventDecision         = "decision"
+	EventReasoningTrace   = "reasoning_trace"
+	EventReasoningSummary = "reasoning_summary"
+	EventPlanUpdate       = "plan_update"
+	EventToolCall         = "tool_call"
+	EventToolResult       = "tool_result"
+	EventVerification     = "verification"
+	EventApprovalRequest  = "approval_request"
+	EventFinal            = "final"
+)
+
+// AgentTrace is the public, structured version of the agent's working state.
+// It is a concise rationale surface, not private chain-of-thought.
+type AgentTrace struct {
+	Goal          string   `json:"goal,omitempty"`
+	CurrentState  string   `json:"current_state,omitempty"`
+	Assumptions   []string `json:"assumptions,omitempty"`
+	Approach      []string `json:"approach,omitempty"`
+	Evidence      []string `json:"evidence,omitempty"`
+	Risks         []string `json:"risks,omitempty"`
+	ToolRationale string   `json:"tool_rationale,omitempty"`
+	Verification  string   `json:"verification,omitempty"`
+	NextStep      string   `json:"next_step,omitempty"`
+}
+
+// Empty reports whether the trace contains any user-visible content.
+func (t AgentTrace) Empty() bool {
+	return strings.TrimSpace(t.Goal) == "" &&
+		strings.TrimSpace(t.CurrentState) == "" &&
+		len(t.Assumptions) == 0 &&
+		len(t.Approach) == 0 &&
+		len(t.Evidence) == 0 &&
+		len(t.Risks) == 0 &&
+		strings.TrimSpace(t.ToolRationale) == "" &&
+		strings.TrimSpace(t.Verification) == "" &&
+		strings.TrimSpace(t.NextStep) == ""
+}
+
+// AgentSnapshot is the persisted, user-visible state of the latest agent run.
+// It stores concise decision summaries and verification evidence, never hidden
+// chain-of-thought.
+type AgentSnapshot struct {
+	RunID         string     `json:"run_id,omitempty"`
+	Status        string     `json:"status,omitempty"`
+	Phase         string     `json:"phase,omitempty"`
+	Iteration     int        `json:"iteration,omitempty"`
+	Goal          string     `json:"goal,omitempty"`
+	Summary       string     `json:"summary,omitempty"`
+	Reasoning     string     `json:"reasoning,omitempty"`
+	Trace         AgentTrace `json:"trace,omitempty"`
+	Plan          string     `json:"plan,omitempty"`
+	Verification  string     `json:"verification,omitempty"`
+	LastTool      string     `json:"last_tool,omitempty"`
+	ContextTokens int        `json:"context_tokens,omitempty"`
+	OutputTokens  int        `json:"output_tokens,omitempty"`
+	Verified      bool       `json:"verified,omitempty"`
+	Completed     bool       `json:"completed,omitempty"`
+	UpdatedAt     time.Time  `json:"updated_at,omitempty"`
+}
+
 // Session is a named conversation and the settings that produced it.
 type Session struct {
 	Name      string         `json:"name"`
@@ -48,6 +112,16 @@ type Session struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 	Messages  []Message      `json:"messages"`
 	Events    []Event        `json:"events,omitempty"`
+	Agent     AgentSnapshot  `json:"agent,omitempty"`
+}
+
+// SearchResult is a compact session search hit.
+type SearchResult struct {
+	Name      string
+	Provider  string
+	Model     string
+	UpdatedAt time.Time
+	Match     string
 }
 
 // New creates an empty session.
@@ -106,7 +180,11 @@ func Sanitize(name string) string {
 
 // Store reads and writes sessions.
 type Store struct {
-	dir string
+	dir    string
+	dbPath string
+
+	mu sync.Mutex
+	db *sql.DB
 }
 
 // NewStore creates the sessions directory when necessary.
@@ -115,11 +193,14 @@ func NewStore() (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	dir = filepath.Join(dir, "sessions")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	sessionDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Store{dir: dir}, nil
+	return &Store{
+		dir:    sessionDir,
+		dbPath: filepath.Join(dir, "history.sqlite"),
+	}, nil
 }
 
 // Save atomically persists a session.
@@ -130,22 +211,328 @@ func (s *Store) Save(session Session) error {
 		session.CreatedAt = session.UpdatedAt
 	}
 
-	data, err := json.MarshalIndent(session, "", "  ")
+	db, err := s.ensureDB()
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
 
-	path := s.path(session.Name)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer func() { _ = tx.Rollback() }()
+
+	agentJSON, err := json.Marshal(session.Agent)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO sessions (name, provider, model, mode, created_at, updated_at, agent_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET
+			provider = excluded.provider,
+			model = excluded.model,
+			mode = excluded.mode,
+			created_at = excluded.created_at,
+			updated_at = excluded.updated_at,
+			agent_json = excluded.agent_json
+	`, session.Name, session.Provider, session.Model, string(session.Mode), encodeTime(session.CreatedAt), encodeTime(session.UpdatedAt), string(agentJSON)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM messages WHERE session_name = ?`, session.Name); err != nil {
+		return err
+	}
+	for i, message := range session.Messages {
+		if _, err := tx.Exec(`
+			INSERT INTO messages (session_name, idx, role, content, created_at)
+			VALUES (?, ?, ?, ?, ?)
+		`, session.Name, i, message.Role, message.Content, encodeTime(message.CreatedAt)); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM events WHERE session_name = ?`, session.Name); err != nil {
+		return err
+	}
+	for i, event := range session.Events {
+		metadataJSON, err := json.Marshal(event.Metadata)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO events (session_name, idx, id, type, title, content, tool, status, metadata_json, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, session.Name, i, event.ID, event.Type, event.Title, event.Content, event.Tool, event.Status, string(metadataJSON), encodeTime(event.CreatedAt)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // Load opens a named session.
 func (s *Store) Load(name string) (Session, error) {
+	session, err := s.loadSQL(name)
+	if err == nil {
+		return session, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Session{}, err
+	}
+	return s.loadJSON(name)
+}
+
+// List returns session names, newest first.
+func (s *Store) List() ([]string, error) {
+	type item struct {
+		name string
+		mod  time.Time
+	}
+	items := make([]item, 0, 16)
+	seen := map[string]struct{}{}
+
+	db, err := s.ensureDB()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT name, updated_at FROM sessions ORDER BY updated_at DESC, name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, updated string
+		if err := rows.Scan(&name, &updated); err != nil {
+			return nil, err
+		}
+		items = append(items, item{name: name, mod: decodeTime(updated)})
+		seen[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(s.dir)
+	if errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), ".json")
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		items = append(items, item{name: name, mod: info.ModTime()})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].mod.Equal(items[j].mod) {
+			return items[i].name < items[j].name
+		}
+		return items[i].mod.After(items[j].mod)
+	})
+
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		names = append(names, item.name)
+	}
+	return names, nil
+}
+
+// Search finds sessions whose name, transcript, timeline, or agent snapshot
+// contains query. SQLite-backed sessions are searched in SQL; legacy JSON files
+// remain searchable for compatibility.
+func (s *Store) Search(query string, limit int) ([]SearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		names, err := s.List()
+		if err != nil {
+			return nil, err
+		}
+		results := make([]SearchResult, 0, len(names))
+		for _, name := range names {
+			results = append(results, SearchResult{Name: name})
+			if limit > 0 && len(results) >= limit {
+				break
+			}
+		}
+		return results, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	db, err := s.ensureDB()
+	if err != nil {
+		return nil, err
+	}
+	pattern := "%" + strings.ToLower(query) + "%"
+	rows, err := db.Query(`
+		SELECT name
+		FROM sessions
+		WHERE lower(name) LIKE ?
+			OR lower(provider) LIKE ?
+			OR lower(model) LIKE ?
+			OR lower(agent_json) LIKE ?
+			OR EXISTS (
+				SELECT 1 FROM messages
+				WHERE messages.session_name = sessions.name
+					AND (lower(role) LIKE ? OR lower(content) LIKE ?)
+			)
+			OR EXISTS (
+				SELECT 1 FROM events
+				WHERE events.session_name = sessions.name
+					AND (lower(type) LIKE ? OR lower(title) LIKE ? OR lower(content) LIKE ? OR lower(tool) LIKE ? OR lower(status) LIKE ? OR lower(metadata_json) LIKE ?)
+			)
+		ORDER BY updated_at DESC, name ASC
+		LIMIT ?
+	`, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]SearchResult, 0, limit)
+	seen := map[string]struct{}{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		session, err := s.loadSQL(name)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, sessionSearchResult(session, query))
+		seen[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	legacy, err := s.searchLegacyJSON(query, seen)
+	if err != nil {
+		return nil, err
+	}
+	results = append(results, legacy...)
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].UpdatedAt.Equal(results[j].UpdatedAt) {
+			return results[i].Name < results[j].Name
+		}
+		return results[i].UpdatedAt.After(results[j].UpdatedAt)
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+// Close releases the underlying database handle.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	return err
+}
+
+func (s *Store) loadSQL(name string) (Session, error) {
+	db, err := s.ensureDB()
+	if err != nil {
+		return Session{}, err
+	}
+
+	name = Sanitize(name)
+	var session Session
+	var mode, created, updated, agentJSON string
+	err = db.QueryRow(`
+		SELECT name, provider, model, mode, created_at, updated_at, agent_json
+		FROM sessions
+		WHERE name = ?
+	`, name).Scan(&session.Name, &session.Provider, &session.Model, &mode, &created, &updated, &agentJSON)
+	if err != nil {
+		return Session{}, err
+	}
+	session.Mode = reasoning.Mode(mode)
+	session.CreatedAt = decodeTime(created)
+	session.UpdatedAt = decodeTime(updated)
+	if strings.TrimSpace(agentJSON) != "" {
+		if err := json.Unmarshal([]byte(agentJSON), &session.Agent); err != nil {
+			return Session{}, err
+		}
+	}
+
+	rows, err := db.Query(`
+		SELECT role, content, created_at
+		FROM messages
+		WHERE session_name = ?
+		ORDER BY idx ASC
+	`, name)
+	if err != nil {
+		return Session{}, err
+	}
+	for rows.Next() {
+		var message Message
+		var created string
+		if err := rows.Scan(&message.Role, &message.Content, &created); err != nil {
+			_ = rows.Close()
+			return Session{}, err
+		}
+		message.CreatedAt = decodeTime(created)
+		session.Messages = append(session.Messages, message)
+	}
+	if err := rows.Close(); err != nil {
+		return Session{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return Session{}, err
+	}
+
+	rows, err = db.Query(`
+		SELECT id, type, title, content, tool, status, metadata_json, created_at
+		FROM events
+		WHERE session_name = ?
+		ORDER BY idx ASC
+	`, name)
+	if err != nil {
+		return Session{}, err
+	}
+	for rows.Next() {
+		var event Event
+		var metadataJSON, created string
+		if err := rows.Scan(&event.ID, &event.Type, &event.Title, &event.Content, &event.Tool, &event.Status, &metadataJSON, &created); err != nil {
+			_ = rows.Close()
+			return Session{}, err
+		}
+		if strings.TrimSpace(metadataJSON) != "" {
+			if err := json.Unmarshal([]byte(metadataJSON), &event.Metadata); err != nil {
+				_ = rows.Close()
+				return Session{}, err
+			}
+		}
+		event.CreatedAt = decodeTime(created)
+		session.Events = append(session.Events, event)
+	}
+	if err := rows.Close(); err != nil {
+		return Session{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return Session{}, err
+	}
+
+	return session, nil
+}
+
+func (s *Store) loadJSON(name string) (Session, error) {
 	path := s.path(name)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -165,39 +552,228 @@ func (s *Store) Load(name string) (Session, error) {
 	return session, nil
 }
 
-// List returns session names, newest first.
-func (s *Store) List() ([]string, error) {
+func (s *Store) searchLegacyJSON(query string, seen map[string]struct{}) ([]SearchResult, error) {
 	entries, err := os.ReadDir(s.dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	type item struct {
-		name string
-		mod  time.Time
-	}
-	items := make([]item, 0, len(entries))
+	var results []SearchResult
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		info, err := entry.Info()
+		name := strings.TrimSuffix(entry.Name(), ".json")
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		session, err := s.loadJSON(name)
 		if err != nil {
 			continue
 		}
-		items = append(items, item{
-			name: strings.TrimSuffix(entry.Name(), ".json"),
-			mod:  info.ModTime(),
-		})
+		result, ok := matchSession(session, query)
+		if ok {
+			results = append(results, result)
+		}
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].mod.After(items[j].mod) })
+	return results, nil
+}
 
-	names := make([]string, 0, len(items))
-	for _, item := range items {
-		names = append(names, item.name)
+func (s *Store) ensureDB() (*sql.DB, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db != nil {
+		return s.db, nil
 	}
-	return names, nil
+
+	if strings.TrimSpace(s.dbPath) == "" {
+		s.dbPath = filepath.Join(s.dir, "history.sqlite")
+	}
+	if err := os.MkdirAll(filepath.Dir(s.dbPath), 0o700); err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(s.dbPath); errors.Is(err, os.ErrNotExist) {
+		file, err := os.OpenFile(s.dbPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		if err := file.Close(); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+
+	db, err := sql.Open("sqlite", s.dbPath)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if err := initDB(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	s.db = db
+	return s.db, nil
 }
 
 func (s *Store) path(name string) string {
 	return filepath.Join(s.dir, Sanitize(name)+".json")
+}
+
+func initDB(db *sql.DB) error {
+	statements := []string{
+		`PRAGMA foreign_keys = ON`,
+		`PRAGMA busy_timeout = 5000`,
+		`PRAGMA journal_mode = WAL`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+			name TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			model TEXT NOT NULL,
+			mode TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			agent_json TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS messages (
+			session_name TEXT NOT NULL,
+			idx INTEGER NOT NULL,
+			role TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (session_name, idx),
+			FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE IF NOT EXISTS events (
+			session_name TEXT NOT NULL,
+			idx INTEGER NOT NULL,
+			id TEXT NOT NULL,
+			type TEXT NOT NULL,
+			title TEXT NOT NULL,
+			content TEXT NOT NULL,
+			tool TEXT NOT NULL,
+			status TEXT NOT NULL,
+			metadata_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (session_name, idx),
+			FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS sessions_updated_at_idx ON sessions(updated_at DESC)`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func encodeTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func decodeTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, value)
+	if err == nil {
+		return t
+	}
+	t, err = time.Parse(time.RFC3339, value)
+	if err == nil {
+		return t
+	}
+	return time.Time{}
+}
+
+func sessionSearchResult(session Session, query string) SearchResult {
+	result, ok := matchSession(session, query)
+	if ok {
+		return result
+	}
+	return SearchResult{
+		Name:      session.Name,
+		Provider:  session.Provider,
+		Model:     session.Model,
+		UpdatedAt: session.UpdatedAt,
+	}
+}
+
+func matchSession(session Session, query string) (SearchResult, bool) {
+	query = strings.ToLower(strings.TrimSpace(query))
+	result := SearchResult{
+		Name:      session.Name,
+		Provider:  session.Provider,
+		Model:     session.Model,
+		UpdatedAt: session.UpdatedAt,
+	}
+	if query == "" {
+		return result, true
+	}
+	for _, item := range []struct {
+		label string
+		value string
+	}{
+		{"name", session.Name},
+		{"provider", session.Provider},
+		{"model", session.Model},
+		{"mode", string(session.Mode)},
+		{"agent goal", session.Agent.Goal},
+		{"agent summary", session.Agent.Summary},
+		{"agent verification", session.Agent.Verification},
+	} {
+		if containsFold(item.value, query) {
+			result.Match = item.label + ": " + compactSearchText(item.value)
+			return result, true
+		}
+	}
+	for _, message := range session.Messages {
+		if containsFold(message.Role, query) || containsFold(message.Content, query) {
+			result.Match = message.Role + ": " + compactSearchText(message.Content)
+			return result, true
+		}
+	}
+	for _, event := range session.Events {
+		for _, item := range []struct {
+			label string
+			value string
+		}{
+			{event.Type, event.Title},
+			{event.Type, event.Content},
+			{"tool", event.Tool},
+			{"status", event.Status},
+		} {
+			if containsFold(item.value, query) {
+				result.Match = item.label + ": " + compactSearchText(item.value)
+				return result, true
+			}
+		}
+		if event.Metadata != nil {
+			data, _ := json.Marshal(event.Metadata)
+			if containsFold(string(data), query) {
+				result.Match = "metadata: " + compactSearchText(string(data))
+				return result, true
+			}
+		}
+	}
+	return result, false
+}
+
+func containsFold(value, lowerQuery string) bool {
+	return strings.Contains(strings.ToLower(value), lowerQuery)
+}
+
+func compactSearchText(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) <= 120 {
+		return value
+	}
+	return value[:117] + "..."
 }

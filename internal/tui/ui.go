@@ -431,11 +431,6 @@ func ansiForeground(value color.Color) string {
 	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
 }
 
-func rgbParams(value color.Color) string {
-	r, g, b := colorRGB(value)
-	return fmt.Sprintf("%d;%d;%d", r, g, b)
-}
-
 func fadeColor(from, to color.Color, t float64) color.Color {
 	t = math.Max(0, math.Min(1, t))
 	fr, fg, fb := colorRGB(from)
