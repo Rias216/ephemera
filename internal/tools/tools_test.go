@@ -2,10 +2,14 @@ package tools
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 )
@@ -242,5 +246,128 @@ func TestListFilesReturnsExplicitEmptyDirectoryEvidence(t *testing.T) {
 	}
 	if result.Metadata["count"] != 0 {
 		t.Fatalf("metadata = %#v", result.Metadata)
+	}
+}
+
+func TestNormalizeRepairsAliasesAndScalarTypes(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceRoot = t.TempDir()
+	registry := NewRegistry(cfg)
+
+	call, err := registry.Normalize(Call{Name: "read_file", Arguments: map[string]any{
+		"filename": "main.go",
+		"start":    "2",
+		"end":      7.0,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Arguments["path"] != "main.go" || call.Arguments["start_line"] != int64(2) || call.Arguments["end_line"] != int64(7) {
+		t.Fatalf("normalized call = %#v", call)
+	}
+	if _, exists := call.Arguments["filename"]; exists {
+		t.Fatalf("alias survived normalization: %#v", call.Arguments)
+	}
+
+	_, err = registry.Normalize(Call{Name: "read_file", Arguments: map[string]any{"path": "a.go", "file": "b.go"}})
+	if err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("conflict error = %v", err)
+	}
+}
+
+func TestExecuteStreamPublishesCommandOutputBeforeCompletion(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.ApprovalPolicy = config.ApprovalWorkspaceWrite
+	cfg.AgentToolTimeoutSec = 10
+	registry := NewRegistry(cfg)
+	command := "printf 'first\\n'; sleep 0.25; printf 'second\\n'"
+	if runtime.GOOS == "windows" {
+		command = "Write-Output first; Start-Sleep -Milliseconds 250; Write-Output second"
+	}
+	chunks := make(chan string, 8)
+	done := make(chan Result, 1)
+	go func() {
+		done <- registry.ExecuteStream(context.Background(), Call{Name: "shell", Arguments: map[string]any{"command": command}}, func(chunk string) {
+			chunks <- chunk
+		})
+	}()
+	select {
+	case chunk := <-chunks:
+		if !strings.Contains(chunk, "first") {
+			t.Fatalf("first chunk = %q", chunk)
+		}
+	case result := <-done:
+		t.Fatalf("command completed before streaming a chunk: %#v", result)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no streamed command output")
+	}
+	result := <-done
+	if !result.OK || !strings.Contains(result.Output, "second") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+type staticHTTPDoer struct {
+	response *http.Response
+	err      error
+}
+
+func (d staticHTTPDoer) Do(*http.Request) (*http.Response, error) { return d.response, d.err }
+
+func TestWebFetchExtractsReadableTextAndRejectsPrivateHosts(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceRoot = t.TempDir()
+	registry := NewRegistry(cfg)
+	registry.WebClient = staticHTTPDoer{response: &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(`<html><body><h1>Frontier</h1><script>steal()</script><p>Useful text</p></body></html>`)),
+	}}
+	result := registry.Execute(context.Background(), Call{Name: "web_fetch", Arguments: map[string]any{"url": "https://example.com/docs"}})
+	if !result.OK || !strings.Contains(result.Output, "Frontier") || !strings.Contains(result.Output, "Useful text") || strings.Contains(result.Output, "steal") {
+		t.Fatalf("web result = %#v", result)
+	}
+
+	blocked := registry.Execute(context.Background(), Call{Name: "web_fetch", Arguments: map[string]any{"url": "http://127.0.0.1/private"}})
+	if blocked.OK || !strings.Contains(strings.ToLower(blocked.Error), "private") && !strings.Contains(strings.ToLower(blocked.Error), "local") {
+		t.Fatalf("private fetch = %#v", blocked)
+	}
+}
+
+func TestDryRunPreviewsWritesWithoutMutatingWorkspace(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "main.go")
+	if err := os.WriteFile(path, []byte("package old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	cfg.AgentDryRun = true
+	registry := NewRegistry(cfg)
+	result := registry.Execute(context.Background(), Call{Name: "apply_patch", Arguments: map[string]any{"path": "main.go", "content": "package main\n"}})
+	if !result.OK || result.Metadata["dry_run"] != true || !strings.Contains(result.Output, "DRY RUN diff") {
+		t.Fatalf("dry run result = %#v", result)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "package old\n" {
+		t.Fatalf("dry run mutated file: %q, %v", data, err)
+	}
+}
+
+func TestDryRunDoesNotExecuteShellCommands(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	cfg.AgentDryRun = true
+	registry := NewRegistry(cfg)
+	result := registry.Execute(context.Background(), Call{Name: "shell", Arguments: map[string]any{"command": "printf changed > changed.txt"}})
+	if !result.OK || result.Metadata["dry_run"] != true {
+		t.Fatalf("dry shell result = %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, "changed.txt")); !os.IsNotExist(err) {
+		t.Fatalf("dry shell executed: %v", err)
 	}
 }

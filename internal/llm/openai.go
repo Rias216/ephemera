@@ -33,6 +33,19 @@ func NewOpenAICompatible(name, baseURL, apiKey string) *OpenAI {
 
 func (p *OpenAI) Name() string { return p.name }
 
+func (p *OpenAI) Capabilities() ProviderCapabilities {
+	format := "openai"
+	return ProviderCapabilities{
+		Streaming:         true,
+		NativeTools:       true,
+		SupportsVision:    true,
+		SupportsReasoning: p.baseURL == "",
+		MaxParallelTools:  8,
+		ToolCallFormat:    format,
+		StreamingFormat:   "sse",
+	}
+}
+
 func (p *OpenAI) Generate(ctx context.Context, req Request) (string, error) {
 	key, err := p.resolvedAPIKey()
 	if err != nil {

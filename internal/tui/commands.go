@@ -131,6 +131,30 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/eval", "check read, write, native tool, repair, and verification behavior"}},
 	},
 	{
+		Name: "/sandbox", Usage: "<none|snapshot|docker>", Description: "set shell and workspace isolation mode", Category: "SAFETY", Introduced: "v0.7.0", Permission: "workspace", Choices: []string{"none", "snapshot", "docker"},
+		Examples: []commandExample{{"/sandbox snapshot", "capture a restorable workspace snapshot before writes"}, {"/sandbox docker", "run commands in an offline Docker container"}},
+	},
+	{
+		Name: "/dry-run", Usage: "<on|off|toggle>", Description: "preview writes and commands without executing them", Category: "SAFETY", Introduced: "v0.7.0", Permission: "local", Choices: []string{"on", "off", "toggle"},
+		Examples: []commandExample{{"/dry-run on", "preview the next agent run"}, {"/dry-run off", "allow approved changes again"}},
+	},
+	{
+		Name: "/rollback", Usage: "[now|auto|manual|status]", Description: "restore the latest snapshot or configure automatic rollback", Category: "SAFETY", Introduced: "v0.7.0", Permission: "workspace", Choices: []string{"now", "auto", "manual", "status"},
+		Examples: []commandExample{{"/rollback", "restore the latest retained snapshot"}, {"/rollback auto", "restore automatically when a run fails"}, {"/rollback manual", "retain failed-run snapshots for manual restore"}},
+	},
+	{
+		Name: "/index", Usage: "<on|off|rebuild|status>", Description: "control the persistent semantic codebase index", Category: "CONTEXT", Introduced: "v0.7.0", Permission: "filesystem", Choices: []string{"on", "off", "rebuild", "status"},
+		Examples: []commandExample{{"/index rebuild", "discard and lazily rebuild the codebase index"}, {"/index off", "disable semantic codebase context"}},
+	},
+	{
+		Name: "/tdd", Usage: "<on|off|toggle>", Description: "control test-first implementation guidance", Category: "AGENT", Introduced: "v0.7.0", Permission: "local", Choices: []string{"on", "off", "toggle"},
+		Examples: []commandExample{{"/tdd on", "prefer failing tests before implementation"}, {"/tdd off", "use the normal implementation workflow"}},
+	},
+	{
+		Name: "/learn", Usage: "<on|off|toggle>", Description: "control episodic project learning after successful runs", Category: "MEMORY", Introduced: "v0.7.0", Permission: "filesystem", Choices: []string{"on", "off", "toggle"},
+		Examples: []commandExample{{"/learn on", "save compact task learnings to project memory"}, {"/learn off", "stop writing learned memories"}},
+	},
+	{
 		Name: "/thinking", Usage: "<on|off|toggle>", Description: "show or hide Beneath the Surface decision traces", Category: "AGENT", Introduced: "v0.4.0", Permission: "local", Choices: []string{"on", "off", "toggle"},
 		Examples: []commandExample{{"/thinking on", "show goal, assumptions, approach, tool rationale, and verification"}, {"/thinking off", "hide visible reasoning traces"}},
 	},
@@ -578,6 +602,14 @@ func argumentDescription(command, choice string) string {
 		return "connect to " + choice
 	case "/mode":
 		return "reasoning profile"
+	case "/sandbox":
+		return "execution isolation mode"
+	case "/dry-run", "/tdd", "/learn":
+		return "feature state"
+	case "/rollback":
+		return "rollback behavior"
+	case "/index":
+		return "codebase index action"
 	case "/theme":
 		return "terminal palette"
 	case "/load":

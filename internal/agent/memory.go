@@ -10,6 +10,7 @@ func (r Runner) projectMemory() string {
 	paths := []string{
 		filepath.Join(r.Tools.WorkspaceRoot, ".ephemera", "instructions.md"),
 		filepath.Join(r.Tools.WorkspaceRoot, ".ephemera", "memory.json"),
+		filepath.Join(r.Tools.WorkspaceRoot, ".ephemera", "preferences.json"),
 		filepath.Join(r.Tools.WorkspaceRoot, "CLAUDE.md"),
 		filepath.Join(r.Tools.WorkspaceRoot, "AGENTS.md"),
 	}

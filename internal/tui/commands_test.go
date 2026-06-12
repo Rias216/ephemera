@@ -65,7 +65,7 @@ func TestModelSuggestionsExcludeUnavailableSavedSelection(t *testing.T) {
 	if hasSuggestion(got, "stale-model") {
 		t.Fatalf("model suggestions included unavailable saved model: %#v", got)
 	}
-	if !hasSuggestion(got, "/model live-model") {
+	if !hasSuggestion(got, "live-model") {
 		t.Fatalf("model suggestions missing live provider model: %#v", got)
 	}
 }

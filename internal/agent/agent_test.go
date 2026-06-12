@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -857,5 +859,70 @@ func TestReconstructNativeTurnsSkipsPendingApprovalCalls(t *testing.T) {
 	}
 	if turns := reconstructNativeToolTurns(events); len(turns) != 0 {
 		t.Fatalf("pending native call leaked into provider history: %#v", turns)
+	}
+}
+
+func TestRunDispatchesIndependentReadsInParallelWithStableOrdering(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("alpha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("beta\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.ApprovalPolicy = config.ApprovalApproveWrites
+	cfg.AgentAutoVerify = false
+	cfg.AgentAutoReview = false
+	cfg.AgentMaxParallelTools = 2
+	provider := &fakeProvider{responses: []string{
+		`{"summary":"inspect both","actions":[{"tool":"read_file","arguments":{"path":"a.txt"}},{"tool":"read_file","arguments":{"path":"b.txt"}}]}`,
+		`{"final":"both inspected"}`,
+	}}
+	session := history.New("parallel", "ollama", cfg.Model(), reasoning.ModeNormal)
+	session.Append("user", "inspect both files")
+	result := NewRunner(cfg, provider).Run(context.Background(), session)
+	if result.Pending != nil || result.Text != "both inspected" {
+		t.Fatalf("result = %#v", result)
+	}
+	var indexes []int
+	for _, event := range result.Events {
+		if event.Type != history.EventToolResult || !metadataBool(event.Metadata, "parallel") {
+			continue
+		}
+		if value, ok := event.Metadata["parallel_batch_index"].(int); ok {
+			indexes = append(indexes, value)
+		}
+	}
+	if len(indexes) != 2 || indexes[0] != 0 || indexes[1] != 1 {
+		t.Fatalf("parallel result indexes = %#v", indexes)
+	}
+}
+
+func TestRunStreamPublishesLiveShellOutput(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	cfg.AgentAutoVerify = false
+	cfg.AgentAutoReview = false
+	command := "printf 'live-output\\n'"
+	if runtime.GOOS == "windows" {
+		command = "Write-Output live-output"
+	}
+	provider := &fakeProvider{responses: []string{
+		fmt.Sprintf(`{"summary":"run","actions":[{"tool":"shell","arguments":{"command":%q}}]}`, command),
+		`{"final":"done"}`,
+	}}
+	session := history.New("stream-command", "ollama", cfg.Model(), reasoning.ModeNormal)
+	session.Append("user", "run command")
+	var live strings.Builder
+	result := NewRunner(cfg, provider).RunStream(context.Background(), session, func(update StreamUpdate) {
+		if update.Kind == StreamToolProgress && update.Phase == "tool output" {
+			live.WriteString(update.Delta)
+		}
+	})
+	if result.Text != "done" || !strings.Contains(live.String(), "live-output") {
+		t.Fatalf("result=%q live=%q", result.Text, live.String())
 	}
 }

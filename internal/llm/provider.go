@@ -41,8 +41,14 @@ type Provider interface {
 // Providers that do not implement CapableProvider are treated as plain text
 // generators with fallback streaming.
 type ProviderCapabilities struct {
-	Streaming   bool
-	NativeTools bool
+	Streaming         bool
+	NativeTools       bool
+	MaxContextWindow  int
+	SupportsVision    bool
+	SupportsReasoning bool
+	MaxParallelTools  int
+	ToolCallFormat    string // openai, anthropic, ollama, or text
+	StreamingFormat   string // sse, newline-delimited, process, or buffered
 }
 
 // CapableProvider reports provider-specific optional behavior.
@@ -65,12 +71,19 @@ type ToolSchema struct {
 	AdditionalProperties bool                    `json:"additionalProperties"`
 }
 
-// ToolSpec is the provider-neutral shape of one callable tool.
-type ToolSpec struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Parameters  ToolSchema `json:"parameters"`
+// ToolContract is the versioned provider-neutral shape of one callable tool.
+// ProviderHints are optional boundary-only hints; the agent core never branches
+// on them. Provider adapters remain responsible for wire-format conversion.
+type ToolContract struct {
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	Parameters    ToolSchema     `json:"parameters"`
+	Version       string         `json:"version,omitempty"`
+	ProviderHints map[string]any `json:"provider_hints,omitempty"`
 }
+
+// ToolSpec remains the public compatibility name used by existing adapters.
+type ToolSpec = ToolContract
 
 // ToolCall is a provider-neutral request to execute a local tool.
 type ToolCall struct {
@@ -136,17 +149,38 @@ func Capabilities(provider Provider) ProviderCapabilities {
 	if provider == nil {
 		return ProviderCapabilities{}
 	}
-	caps := ProviderCapabilities{}
+	caps := ProviderCapabilities{ToolCallFormat: "text", StreamingFormat: "buffered", MaxParallelTools: 1}
 	if _, ok := provider.(StreamingProvider); ok {
 		caps.Streaming = true
+		caps.StreamingFormat = "stream"
 	}
 	if capable, ok := provider.(CapableProvider); ok {
 		reported := capable.Capabilities()
 		caps.Streaming = caps.Streaming || reported.Streaming
 		caps.NativeTools = reported.NativeTools
+		if reported.MaxContextWindow > 0 {
+			caps.MaxContextWindow = reported.MaxContextWindow
+		}
+		caps.SupportsVision = reported.SupportsVision
+		caps.SupportsReasoning = reported.SupportsReasoning
+		if reported.MaxParallelTools > 0 {
+			caps.MaxParallelTools = reported.MaxParallelTools
+		}
+		if reported.ToolCallFormat != "" {
+			caps.ToolCallFormat = reported.ToolCallFormat
+		}
+		if reported.StreamingFormat != "" {
+			caps.StreamingFormat = reported.StreamingFormat
+		}
 	}
 	if _, ok := provider.(ToolCallingProvider); ok {
 		caps.NativeTools = true
+		if caps.ToolCallFormat == "text" {
+			caps.ToolCallFormat = "openai"
+		}
+	}
+	if caps.MaxParallelTools < 1 {
+		caps.MaxParallelTools = 1
 	}
 	return caps
 }

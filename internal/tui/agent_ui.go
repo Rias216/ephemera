@@ -638,9 +638,15 @@ func (m *Model) agentNotice() string {
 - Automatic verification: %t
 - Automatic review specialist: %t
 - Inspect before edit: %t
+- Sandbox mode: %s
+- Dry run: %t
+- Automatic rollback: %t
+- Semantic codebase index: %t
+- TDD mode: %t
+- Episodic learning: %t
 - Beneath the Surface: %t
 
-Use /agent auto or /approval auto for automatic execution. Use /agent safe to restore confirmations. Use /surface after a run to reopen the persisted goal, evidence, plan, and verification trace. The agent can delegate isolated read-only exploration and review tasks. Other commands: /tools, /plan, /thinking, /approve, /reject, /run, /diff, /compact, /config, and /memory.`,
+Use /agent auto or /approval auto for automatic execution. Use /agent safe to restore confirmations. Safety controls: /sandbox, /dry-run, and /rollback. Intelligence controls: /index, /tdd, and /learn. Use /surface after a run to reopen the persisted goal, evidence, plan, and verification trace.`,
 		m.cfg.AgentEnabled,
 		m.cfg.ApprovalPolicy,
 		agent.NewRunner(m.cfg, nil).Tools.WorkspaceRoot,
@@ -651,6 +657,12 @@ Use /agent auto or /approval auto for automatic execution. Use /agent safe to re
 		m.cfg.AgentAutoVerify,
 		m.cfg.AgentAutoReview,
 		m.cfg.RequireReadBeforeEdit,
+		m.cfg.SandboxMode,
+		m.cfg.AgentDryRun,
+		m.cfg.AgentAutoRollback,
+		m.cfg.AgentSemanticIndex,
+		m.cfg.AgentTDDMode,
+		m.cfg.AgentLearnMemory,
 		m.cfg.ShowThinking,
 	)
 }
@@ -803,6 +815,14 @@ func (m Model) configNotice() string {
 - Automatic verification: %t
 - Automatic review specialist: %t
 - Inspect before edit: %t
+- Sandbox mode: %s
+- Dry run: %t
+- Automatic rollback: %t
+- Snapshot limit: %d MiB
+- Semantic codebase index: %t
+- Context recall messages: %d
+- TDD mode: %t
+- Episodic learning: %t
 - Beneath the Surface: %t
 - Theme density: %s`,
 		m.providerName(),
@@ -823,6 +843,14 @@ func (m Model) configNotice() string {
 		m.cfg.AgentAutoVerify,
 		m.cfg.AgentAutoReview,
 		m.cfg.RequireReadBeforeEdit,
+		m.cfg.SandboxMode,
+		m.cfg.AgentDryRun,
+		m.cfg.AgentAutoRollback,
+		m.cfg.AgentSnapshotMaxMB,
+		m.cfg.AgentSemanticIndex,
+		m.cfg.AgentContextRecall,
+		m.cfg.AgentTDDMode,
+		m.cfg.AgentLearnMemory,
 		m.cfg.ShowThinking,
 		m.cfg.ThemeDensity,
 	)

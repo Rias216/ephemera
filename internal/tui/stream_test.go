@@ -172,3 +172,13 @@ func TestPlainTextDeltaAdvancesThinkingDisplay(t *testing.T) {
 		t.Fatalf("thinking display = %q, want incremental response progress", got)
 	}
 }
+
+func TestPlanUpdateRefreshesVisiblePlan(t *testing.T) {
+	cfg := config.Default()
+	m := New(cfg, nil, "stream-plan")
+	plan := &agent.Plan{Goal: "upgrade", Steps: []agent.PlanStep{{ID: 1, Description: "inspect", Status: agent.PlanRunning}}}
+	m.applyAgentStream(agent.StreamUpdate{Kind: agent.StreamPlan, Phase: "plan step running", Plan: plan})
+	if !strings.Contains(m.liveAgent.Plan, "Goal: upgrade") || !strings.Contains(m.liveAgent.Plan, "inspect") {
+		t.Fatalf("visible plan = %q", m.liveAgent.Plan)
+	}
+}

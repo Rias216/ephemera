@@ -301,3 +301,48 @@ func TestConfigForConnectionDoesNotMutateActiveModelMap(t *testing.T) {
 		t.Fatalf("active model map mutated to %q", got)
 	}
 }
+
+func TestFrontierAgentDefaultsAndBounds(t *testing.T) {
+	cfg := Default()
+	if cfg.AgentMaxParallelTools != 4 || cfg.AgentToolTimeoutSec != 120 || cfg.AgentReadRetries != 1 || cfg.AgentContextSummaryTok != 800 {
+		t.Fatalf("frontier defaults = parallel:%d timeout:%d retries:%d summary:%d", cfg.AgentMaxParallelTools, cfg.AgentToolTimeoutSec, cfg.AgentReadRetries, cfg.AgentContextSummaryTok)
+	}
+	if !cfg.AgentSemanticIndex || cfg.SandboxMode != SandboxNone || cfg.AgentSnapshotMaxMB != 128 || cfg.AgentContextRecall != 8 {
+		t.Fatalf("phase-two defaults = semantic:%t sandbox:%q snapshot:%d recall:%d", cfg.AgentSemanticIndex, cfg.SandboxMode, cfg.AgentSnapshotMaxMB, cfg.AgentContextRecall)
+	}
+	cfg.AgentMaxParallelTools = 99
+	cfg.AgentToolTimeoutSec = 9999
+	cfg.AgentReadRetries = 99
+	cfg.AgentContextSummaryTok = 99999
+	cfg.AgentSnapshotMaxMB = 99999
+	cfg.AgentContextRecall = 999
+	cfg.SandboxMode = "unknown"
+	cfg.normalize()
+	if cfg.AgentMaxParallelTools != 8 || cfg.AgentToolTimeoutSec != 900 || cfg.AgentReadRetries != 3 || cfg.AgentContextSummaryTok != 4000 {
+		t.Fatalf("bounded config = parallel:%d timeout:%d retries:%d summary:%d", cfg.AgentMaxParallelTools, cfg.AgentToolTimeoutSec, cfg.AgentReadRetries, cfg.AgentContextSummaryTok)
+	}
+	if cfg.AgentSnapshotMaxMB != 4096 || cfg.AgentContextRecall != 64 || cfg.SandboxMode != SandboxNone {
+		t.Fatalf("phase-two bounds = snapshot:%d recall:%d sandbox:%q", cfg.AgentSnapshotMaxMB, cfg.AgentContextRecall, cfg.SandboxMode)
+	}
+}
+
+func TestNormalizeMCPServerConfiguration(t *testing.T) {
+	cfg := Default()
+	cfg.MCPServers = map[string]MCPServerConfig{
+		" Local FS ": {Command: "  npx  ", Args: []string{"server"}, TimeoutSec: 1},
+		"REMOTE":     {URL: " https://example.test/mcp/ ", TimeoutSec: 9999},
+		"broken":     {Transport: "websocket", URL: "ws://example.test"},
+	}
+	cfg.normalize()
+	stdio, ok := cfg.MCPServers["local fs"]
+	if !ok || stdio.Transport != "stdio" || stdio.Command != "npx" || stdio.TimeoutSec != cfg.AgentToolTimeoutSec {
+		t.Fatalf("stdio config = %#v", stdio)
+	}
+	remote, ok := cfg.MCPServers["remote"]
+	if !ok || remote.Transport != "http" || remote.URL != "https://example.test/mcp" || remote.TimeoutSec != 900 {
+		t.Fatalf("remote config = %#v", remote)
+	}
+	if !cfg.MCPServers["broken"].Disabled {
+		t.Fatalf("unsupported transport was not disabled: %#v", cfg.MCPServers["broken"])
+	}
+}

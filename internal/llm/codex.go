@@ -22,6 +22,16 @@ func NewCodex() *Codex {
 
 func (p *Codex) Name() string { return "codex" }
 
+func (p *Codex) Capabilities() ProviderCapabilities {
+	return ProviderCapabilities{
+		Streaming:         true,
+		SupportsReasoning: true,
+		MaxParallelTools:  1,
+		ToolCallFormat:    "text",
+		StreamingFormat:   "process",
+	}
+}
+
 func (p *Codex) Generate(ctx context.Context, req Request) (string, error) {
 	if _, err := loadCodexAccessToken(); err != nil {
 		return "", err

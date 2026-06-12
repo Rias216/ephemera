@@ -230,6 +230,9 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 		m.liveAgent.TotalMessages = update.TotalMessages
 		m.liveAgent.DroppedMessages = update.DroppedMessages
 	}
+	if update.Plan != nil {
+		m.liveAgent.Plan = update.Plan.Render()
+	}
 	if update.Delta != "" && update.Kind == agent.StreamDelta {
 		m.liveAgent.ReceivedChars += len([]rune(update.Delta))
 		m.liveAgent.Partial += update.Delta
@@ -256,7 +259,7 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 		m.liveAgent.Thought = latestReasoningPreview(m.liveAgent.Reasoning)
 		m.liveAgent.ThoughtUpdatedAt = now
 	}
-	if update.Delta != "" && update.Kind == agent.StreamActivity {
+	if update.Delta != "" && (update.Kind == agent.StreamActivity || update.Kind == agent.StreamToolProgress) {
 		m.liveAgent.Activity = lastLineCompact(update.Delta, 180)
 		m.liveAgent.ActivityUpdatedAt = now
 	}
@@ -266,7 +269,7 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 	case agent.StreamStatus:
 		m.status = m.liveStatusText()
 		m.refreshViewport(atBottom)
-	case agent.StreamDelta, agent.StreamReasoning, agent.StreamActivity:
+	case agent.StreamDelta, agent.StreamReasoning, agent.StreamActivity, agent.StreamToolProgress:
 		m.status = m.liveStatusText()
 		// Rebuilding the full transcript for every token is expensive. Repaint at
 		// a terminal-friendly cadence while the footer still updates every event.
@@ -274,6 +277,9 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 			m.liveAgent.LastPaint = now
 			m.refreshViewport(atBottom)
 		}
+	case agent.StreamPlan:
+		m.status = m.liveStatusText()
+		m.refreshViewport(atBottom)
 	case agent.StreamEvent:
 		if update.Event != nil {
 			m.upsertStreamEvent(*update.Event)
@@ -401,6 +407,19 @@ func phaseActivity(phase, tool string) string {
 		return "Responding without starting the agent loop…"
 	case "verifying":
 		return "Verifying the result…"
+	case "tool output":
+		if tool != "" {
+			return "Streaming " + tool + " output…"
+		}
+		return "Streaming tool output…"
+	case "plan updated", "plan step started", "plan step completed", "plan step running", "plan step updated":
+		return "Updating the execution plan…"
+	case "retrying provider":
+		return "Retrying the provider request…"
+	case "budget reached":
+		return "Task token budget reached."
+	case "self critique":
+		return "Reviewing the completed answer…"
 	}
 	return ""
 }

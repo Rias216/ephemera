@@ -34,20 +34,38 @@ type Config struct {
 	ContextTokens int    `json:"context_tokens"`
 	OllamaURL     string `json:"ollama_url"`
 
-	AgentConfigVersion    int            `json:"agent_config_version"`
-	AgentEnabled          bool           `json:"agent_enabled"`
-	ApprovalPolicy        ApprovalPolicy `json:"approval_policy"`
-	WorkspaceRoot         string         `json:"workspace_root,omitempty"`
-	AutoTestCommand       string         `json:"auto_test_command,omitempty"`
-	MaxToolOutputTokens   int            `json:"max_tool_output_tokens"`
-	AgentMaxSteps         int            `json:"agent_max_steps"`
-	AgentLoopLimit        int            `json:"agent_loop_limit"`
-	AgentAutoVerify       bool           `json:"agent_auto_verify"`
-	AgentAutoReview       bool           `json:"agent_auto_review"`
-	RequireReadBeforeEdit bool           `json:"require_read_before_edit"`
-	ThemeDensity          string         `json:"theme_density"`
-	ShowThinking          bool           `json:"show_thinking"`
-	ToolDetails           bool           `json:"tool_details"`
+	AgentConfigVersion     int                        `json:"agent_config_version"`
+	AgentEnabled           bool                       `json:"agent_enabled"`
+	ApprovalPolicy         ApprovalPolicy             `json:"approval_policy"`
+	WorkspaceRoot          string                     `json:"workspace_root,omitempty"`
+	AutoTestCommand        string                     `json:"auto_test_command,omitempty"`
+	MaxToolOutputTokens    int                        `json:"max_tool_output_tokens"`
+	AgentMaxSteps          int                        `json:"agent_max_steps"`
+	AgentLoopLimit         int                        `json:"agent_loop_limit"`
+	AgentMaxParallelTools  int                        `json:"agent_max_parallel_tools"`
+	AgentToolTimeoutSec    int                        `json:"agent_tool_timeout_seconds"`
+	AgentReadRetries       int                        `json:"agent_read_retries"`
+	AgentContextSummaryTok int                        `json:"agent_context_summary_tokens"`
+	AgentAutoVerify        bool                       `json:"agent_auto_verify"`
+	AgentAutoReview        bool                       `json:"agent_auto_review"`
+	AgentSelfCritique      bool                       `json:"agent_self_critique"`
+	AgentAdaptiveReasoning bool                       `json:"agent_adaptive_reasoning"`
+	AgentTDDMode           bool                       `json:"agent_tdd_mode"`
+	AgentLearnMemory       bool                       `json:"agent_learn_memory"`
+	AgentSemanticIndex     bool                       `json:"agent_semantic_index"`
+	AgentDryRun            bool                       `json:"agent_dry_run"`
+	AgentAutoRollback      bool                       `json:"agent_auto_rollback"`
+	SandboxMode            SandboxMode                `json:"sandbox_mode"`
+	AgentSnapshotMaxMB     int                        `json:"agent_snapshot_max_mb"`
+	AgentContextRecall     int                        `json:"agent_context_recall_messages"`
+	ProviderMaxRetries     int                        `json:"provider_max_retries"`
+	ProviderRetryBackoffMS int                        `json:"provider_retry_backoff_ms"`
+	AgentTaskTokenBudget   int                        `json:"agent_task_token_budget"`
+	RequireReadBeforeEdit  bool                       `json:"require_read_before_edit"`
+	ThemeDensity           string                     `json:"theme_density"`
+	ShowThinking           bool                       `json:"show_thinking"`
+	ToolDetails            bool                       `json:"tool_details"`
+	MCPServers             map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
 
 	CompatibleName string `json:"compatible_name,omitempty"`
 	CompatibleURL  string `json:"compatible_url,omitempty"`
@@ -59,6 +77,21 @@ type Config struct {
 	// never serialized into config.json. This is a local file, not OS-keychain
 	// encryption.
 	Credentials map[string]string `json:"-"`
+}
+
+// MCPServerConfig describes one Model Context Protocol server. Standard
+// transports are stdio and Streamable HTTP. Secrets should be referenced with
+// ${ENV_VAR} placeholders rather than stored directly in config.json.
+type MCPServerConfig struct {
+	Transport  string            `json:"transport,omitempty"`
+	Command    string            `json:"command,omitempty"`
+	Args       []string          `json:"args,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	Cwd        string            `json:"cwd,omitempty"`
+	URL        string            `json:"url,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	Disabled   bool              `json:"disabled,omitempty"`
+	TimeoutSec int               `json:"timeout_seconds,omitempty"`
 }
 
 // SavedConnection is one reusable provider route. Connecting once records the
@@ -87,6 +120,17 @@ const (
 	ApprovalApproveWrites  ApprovalPolicy = "approve-writes"
 	ApprovalWorkspaceWrite ApprovalPolicy = "workspace-write" // legacy unrestricted mode
 	ApprovalAutoApprove    ApprovalPolicy = "auto-approve"
+)
+
+// SandboxMode controls optional local execution isolation. Snapshot mode is
+// implemented natively; docker is negotiated but only used when a compatible
+// runtime is available.
+type SandboxMode string
+
+const (
+	SandboxNone     SandboxMode = "none"
+	SandboxSnapshot SandboxMode = "snapshot"
+	SandboxDocker   SandboxMode = "docker"
 )
 
 // Protocol names the wire protocol used by a connection preset.
@@ -123,28 +167,46 @@ func Default() Config {
 			"anthropic":  "claude-sonnet-4-6",
 			"compatible": "model-name",
 		},
-		Mode:                  reasoning.ModeNormal,
-		Theme:                 "rose",
-		MaxTokens:             4096,
-		ContextTokens:         16_000,
-		OllamaURL:             "http://localhost:11434",
-		AgentConfigVersion:    1,
-		AgentEnabled:          true,
-		ApprovalPolicy:        ApprovalApproveWrites,
-		AutoTestCommand:       "go test ./...",
-		MaxToolOutputTokens:   6_000,
-		AgentMaxSteps:         10,
-		AgentLoopLimit:        2,
-		AgentAutoVerify:       true,
-		AgentAutoReview:       true,
-		RequireReadBeforeEdit: true,
-		ThemeDensity:          "comfortable",
-		ShowThinking:          true,
-		ToolDetails:           true,
-		CompatibleName:        "compatible",
-		CompatibleURL:         "http://localhost:1234/v1",
-		Connections:           map[string]SavedConnection{},
-		Credentials:           map[string]string{},
+		Mode:                   reasoning.ModeNormal,
+		Theme:                  "rose",
+		MaxTokens:              4096,
+		ContextTokens:          16_000,
+		OllamaURL:              "http://localhost:11434",
+		AgentConfigVersion:     4,
+		AgentEnabled:           true,
+		ApprovalPolicy:         ApprovalApproveWrites,
+		AutoTestCommand:        "go test ./...",
+		MaxToolOutputTokens:    6_000,
+		AgentMaxSteps:          10,
+		AgentLoopLimit:         2,
+		AgentMaxParallelTools:  4,
+		AgentToolTimeoutSec:    120,
+		AgentReadRetries:       1,
+		AgentContextSummaryTok: 800,
+		AgentAutoVerify:        true,
+		AgentAutoReview:        true,
+		AgentSelfCritique:      false,
+		AgentAdaptiveReasoning: true,
+		AgentTDDMode:           false,
+		AgentLearnMemory:       false,
+		AgentSemanticIndex:     true,
+		AgentDryRun:            false,
+		AgentAutoRollback:      false,
+		SandboxMode:            SandboxNone,
+		AgentSnapshotMaxMB:     128,
+		AgentContextRecall:     8,
+		ProviderMaxRetries:     2,
+		ProviderRetryBackoffMS: 350,
+		AgentTaskTokenBudget:   100_000,
+		RequireReadBeforeEdit:  true,
+		ThemeDensity:           "comfortable",
+		ShowThinking:           true,
+		ToolDetails:            true,
+		MCPServers:             map[string]MCPServerConfig{},
+		CompatibleName:         "compatible",
+		CompatibleURL:          "http://localhost:1234/v1",
+		Connections:            map[string]SavedConnection{},
+		Credentials:            map[string]string{},
 	}
 	cfg.RememberConnection(SavedConnection{
 		Provider: "ollama",
@@ -621,12 +683,92 @@ func (c *Config) normalize() {
 	if c.AgentLoopLimit > 6 {
 		c.AgentLoopLimit = 6
 	}
+	if c.AgentMaxParallelTools < 1 {
+		c.AgentMaxParallelTools = defaults.AgentMaxParallelTools
+	}
+	if c.AgentMaxParallelTools > 8 {
+		c.AgentMaxParallelTools = 8
+	}
+	if c.AgentToolTimeoutSec < 5 {
+		c.AgentToolTimeoutSec = defaults.AgentToolTimeoutSec
+	}
+	if c.AgentToolTimeoutSec > 900 {
+		c.AgentToolTimeoutSec = 900
+	}
+	if c.AgentReadRetries < 0 {
+		c.AgentReadRetries = 0
+	}
+	if c.AgentReadRetries > 3 {
+		c.AgentReadRetries = 3
+	}
+	if c.AgentContextSummaryTok < 0 {
+		c.AgentContextSummaryTok = 0
+	}
+	if c.AgentContextSummaryTok > 4000 {
+		c.AgentContextSummaryTok = 4000
+	}
+	if c.AgentContextRecall < 0 {
+		c.AgentContextRecall = 0
+	}
+	if c.AgentContextRecall > 64 {
+		c.AgentContextRecall = 64
+	}
+	if c.AgentSnapshotMaxMB < 1 {
+		c.AgentSnapshotMaxMB = defaults.AgentSnapshotMaxMB
+	}
+	if c.AgentSnapshotMaxMB > 4096 {
+		c.AgentSnapshotMaxMB = 4096
+	}
+	switch c.SandboxMode {
+	case SandboxNone, SandboxSnapshot, SandboxDocker:
+	default:
+		c.SandboxMode = defaults.SandboxMode
+	}
+	if c.ProviderMaxRetries < 0 {
+		c.ProviderMaxRetries = 0
+	}
+	if c.ProviderMaxRetries > 6 {
+		c.ProviderMaxRetries = 6
+	}
+	if c.ProviderRetryBackoffMS < 50 {
+		c.ProviderRetryBackoffMS = defaults.ProviderRetryBackoffMS
+	}
+	if c.ProviderRetryBackoffMS > 10000 {
+		c.ProviderRetryBackoffMS = 10000
+	}
+	if c.AgentTaskTokenBudget < 0 {
+		c.AgentTaskTokenBudget = 0
+	}
+	if c.AgentTaskTokenBudget > 2_000_000 {
+		c.AgentTaskTokenBudget = 2_000_000
+	}
 	// Configs written before the advanced agent settings existed have version 0.
 	// Apply the new safe defaults once, then preserve explicit false values.
 	if c.AgentConfigVersion <= 0 {
 		c.AgentAutoVerify = defaults.AgentAutoVerify
 		c.AgentAutoReview = defaults.AgentAutoReview
+		c.AgentAdaptiveReasoning = defaults.AgentAdaptiveReasoning
+		c.ProviderMaxRetries = defaults.ProviderMaxRetries
+		c.ProviderRetryBackoffMS = defaults.ProviderRetryBackoffMS
 		c.RequireReadBeforeEdit = defaults.RequireReadBeforeEdit
+	}
+	if c.AgentConfigVersion < 2 {
+		c.AgentMaxParallelTools = defaults.AgentMaxParallelTools
+		c.AgentToolTimeoutSec = defaults.AgentToolTimeoutSec
+		c.AgentReadRetries = defaults.AgentReadRetries
+		c.AgentContextSummaryTok = defaults.AgentContextSummaryTok
+	}
+	if c.AgentConfigVersion < 3 {
+		c.AgentAdaptiveReasoning = defaults.AgentAdaptiveReasoning
+		c.ProviderMaxRetries = defaults.ProviderMaxRetries
+		c.ProviderRetryBackoffMS = defaults.ProviderRetryBackoffMS
+		c.AgentTaskTokenBudget = defaults.AgentTaskTokenBudget
+	}
+	if c.AgentConfigVersion < 4 {
+		c.AgentSemanticIndex = defaults.AgentSemanticIndex
+		c.AgentSnapshotMaxMB = defaults.AgentSnapshotMaxMB
+		c.AgentContextRecall = defaults.AgentContextRecall
+		c.SandboxMode = defaults.SandboxMode
 		c.AgentConfigVersion = defaults.AgentConfigVersion
 	}
 	if c.ThemeDensity != "compact" && c.ThemeDensity != "comfortable" {
@@ -641,6 +783,50 @@ func (c *Config) normalize() {
 	if strings.TrimSpace(c.CompatibleURL) == "" {
 		c.CompatibleURL = defaults.CompatibleURL
 	}
+	if c.MCPServers == nil {
+		c.MCPServers = map[string]MCPServerConfig{}
+	}
+	normalizedMCP := make(map[string]MCPServerConfig, len(c.MCPServers))
+	for rawName, server := range c.MCPServers {
+		name := strings.ToLower(strings.TrimSpace(rawName))
+		if name == "" {
+			continue
+		}
+		server.Transport = strings.ToLower(strings.TrimSpace(server.Transport))
+		server.Command = strings.TrimSpace(server.Command)
+		server.Cwd = strings.TrimSpace(server.Cwd)
+		server.URL = strings.TrimRight(strings.TrimSpace(server.URL), "/")
+		if server.Transport == "" {
+			if server.Command != "" {
+				server.Transport = "stdio"
+			} else if server.URL != "" {
+				server.Transport = "http"
+			}
+		}
+		if server.Transport != "stdio" && server.Transport != "http" {
+			server.Disabled = true
+		}
+		if server.Transport == "stdio" && server.Command == "" {
+			server.Disabled = true
+		}
+		if server.Transport == "http" && server.URL == "" {
+			server.Disabled = true
+		}
+		if server.TimeoutSec < 5 {
+			server.TimeoutSec = c.AgentToolTimeoutSec
+		}
+		if server.TimeoutSec > 900 {
+			server.TimeoutSec = 900
+		}
+		if server.Env == nil {
+			server.Env = map[string]string{}
+		}
+		if server.Headers == nil {
+			server.Headers = map[string]string{}
+		}
+		normalizedMCP[name] = server
+	}
+	c.MCPServers = normalizedMCP
 	if c.Credentials == nil {
 		c.Credentials = map[string]string{}
 	}

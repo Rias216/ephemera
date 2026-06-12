@@ -38,6 +38,8 @@ const helpText = `### Commands
 - **/thinking <on|off>** — show or hide Beneath the Surface traces
 - **/surface** — reopen the latest persisted reasoning and verification trace
 - **/eval** — run deterministic local agent capability checks
+- **/sandbox**, **/dry-run**, **/rollback** — control execution safety
+- **/index**, **/tdd**, **/learn** — control codebase intelligence and learning
 - **/retry** / **/undo** — revise the latest exchange
 - **/stop** — cancel the active streaming agent run
 - **/export [path]** — export the transcript
@@ -1087,6 +1089,115 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		} else {
 			m.status = fmt.Sprintf("Agent eval passed · %d/%d", report.Passed(), len(report.Results))
 		}
+
+	case "/sandbox":
+		value, ok := requireArg("/sandbox <none|snapshot|docker>")
+		if !ok {
+			break
+		}
+		mode, valid := parseSandboxMode(value)
+		if !valid {
+			m.status = "Usage: /sandbox <none|snapshot|docker>"
+			break
+		}
+		m.cfg.SandboxMode = mode
+		_ = config.Save(m.cfg)
+		m.notice = m.safetyNotice()
+		m.status = "Sandbox mode → " + string(mode)
+
+	case "/dry-run":
+		value := "toggle"
+		if len(args) > 0 {
+			value = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		enabled, valid := toggleSetting(m.cfg.AgentDryRun, value)
+		if !valid {
+			m.status = "Usage: /dry-run <on|off|toggle>"
+			break
+		}
+		m.cfg.AgentDryRun = enabled
+		_ = config.Save(m.cfg)
+		m.notice = m.safetyNotice()
+		m.status = fmt.Sprintf("Dry run → %t", enabled)
+
+	case "/rollback":
+		value := "now"
+		if len(args) > 0 {
+			value = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		switch value {
+		case "now":
+			m.rollbackLatestSnapshot()
+		case "auto", "on":
+			m.cfg.AgentAutoRollback = true
+			_ = config.Save(m.cfg)
+			m.notice = m.safetyNotice()
+			m.status = "Automatic rollback → enabled"
+		case "manual", "off":
+			m.cfg.AgentAutoRollback = false
+			_ = config.Save(m.cfg)
+			m.notice = m.safetyNotice()
+			m.status = "Automatic rollback → disabled; failed-run snapshots are retained"
+		case "status":
+			m.notice = m.safetyNotice()
+			m.status = "Safety status opened."
+		default:
+			m.status = "Usage: /rollback [now|auto|manual|status]"
+		}
+
+	case "/index":
+		value, ok := requireArg("/index <on|off|rebuild|status>")
+		if !ok {
+			break
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "on":
+			m.cfg.AgentSemanticIndex = true
+			_ = config.Save(m.cfg)
+			m.status = "Semantic codebase index → enabled"
+		case "off":
+			m.cfg.AgentSemanticIndex = false
+			_ = config.Save(m.cfg)
+			m.status = "Semantic codebase index → disabled"
+		case "rebuild":
+			m.rebuildSemanticIndex()
+		case "status":
+			m.status = "Codebase index status opened."
+		default:
+			m.status = "Usage: /index <on|off|rebuild|status>"
+			break
+		}
+		m.notice = m.intelligenceNotice()
+
+	case "/tdd":
+		value := "toggle"
+		if len(args) > 0 {
+			value = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		enabled, valid := toggleSetting(m.cfg.AgentTDDMode, value)
+		if !valid {
+			m.status = "Usage: /tdd <on|off|toggle>"
+			break
+		}
+		m.cfg.AgentTDDMode = enabled
+		_ = config.Save(m.cfg)
+		m.notice = m.intelligenceNotice()
+		m.status = fmt.Sprintf("TDD mode → %t", enabled)
+
+	case "/learn":
+		value := "toggle"
+		if len(args) > 0 {
+			value = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		enabled, valid := toggleSetting(m.cfg.AgentLearnMemory, value)
+		if !valid {
+			m.status = "Usage: /learn <on|off|toggle>"
+			break
+		}
+		m.cfg.AgentLearnMemory = enabled
+		_ = config.Save(m.cfg)
+		m.notice = m.intelligenceNotice()
+		m.status = fmt.Sprintf("Episodic learning → %t", enabled)
 
 	case "/thinking":
 		value := "toggle"
