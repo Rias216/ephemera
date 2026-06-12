@@ -2,9 +2,11 @@ package history
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,7 +166,7 @@ func TestStoreWritesRecoverableSessionBundle(t *testing.T) {
 	}
 
 	bundleDir := filepath.Join(dir, "recover-me")
-	for _, name := range []string{"session.json", "debug.jsonl", "context.jsonl"} {
+	for _, name := range []string{"session.json", "debug.jsonl", "context.jsonl", "tools.jsonl"} {
 		info, err := os.Stat(filepath.Join(bundleDir, name))
 		if err != nil {
 			t.Fatalf("missing %s: %v", name, err)
@@ -210,5 +212,30 @@ func TestStoreBundleSurvivesSQLiteIndexFailure(t *testing.T) {
 	}
 	if len(recovered.Messages) != 1 || recovered.Messages[0].Content != "retain this context" {
 		t.Fatalf("unexpected recovered session: %#v", recovered)
+	}
+}
+
+func TestRepeatedEventOnlySavesDoNotFloodSessionLog(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("EPHEMERA_SESSION_LOG_DIR", dir)
+	store := &Store{dir: dir, dbPath: filepath.Join(dir, "history.sqlite"), saveAudits: make(map[string]saveAuditState)}
+	defer store.Close()
+	session := New("quiet checkpoints", "test", "model", reasoning.ModeNormal)
+	session.Append("user", "create a folder")
+	if err := store.Save(session); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 25; index++ {
+		session.AppendEvent(Event{ID: fmt.Sprintf("event-%d", index), Type: EventToolResult, Tool: "create_directory", Status: "done", CreatedAt: time.Now()})
+		if err := store.Save(session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "quiet-checkpoints", "debug.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(data), `"event":"session checkpoint"`); count != 1 {
+		t.Fatalf("session checkpoint log count = %d, want 1; log=%s", count, data)
 	}
 }

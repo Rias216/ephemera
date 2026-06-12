@@ -119,6 +119,9 @@ func (c *AcceptanceContract) Observe(call tools.Call, result tools.Result) {
 			if call.Name == "read_file" && result.OK && path != "" {
 				requirement.Evidence = appendUnique(requirement.Evidence, "read back "+normalizePath(path))
 			}
+			if call.Name == "list_files" && result.OK && path != "" {
+				requirement.Evidence = appendUnique(requirement.Evidence, "read back directory "+normalizePath(path))
+			}
 		case "diff-reviewed":
 			if call.Name == "git_diff" || call.Name == "git_status" {
 				requirement.Status = AcceptancePassed
@@ -130,12 +133,22 @@ func (c *AcceptanceContract) Observe(call tools.Call, result tools.Result) {
 			}
 		default:
 			if strings.TrimSpace(requirement.Command) != "" && call.Name == "go_test" {
+				command := metadataString(result.Metadata, "command")
+				if command == "" {
+					command = strings.TrimSpace(requirement.Command)
+				}
+				scope := metadataString(result.Metadata, "verification_scope")
+				label := "verification command"
+				if scope == "task" {
+					label = "task-scoped verification"
+				}
 				if result.OK {
 					requirement.Status = AcceptancePassed
-					requirement.Evidence = appendUnique(requirement.Evidence, "verification command passed")
+					requirement.Evidence = removeSupersededVerificationFailures(requirement.Evidence)
+					requirement.Evidence = appendUnique(requirement.Evidence, label+" passed: "+command)
 				} else {
 					requirement.Status = AcceptanceFailed
-					requirement.Evidence = appendUnique(requirement.Evidence, "verification command failed: "+compact(result.Error, 180))
+					requirement.Evidence = appendUnique(requirement.Evidence, label+" failed: "+command+" — "+compact(firstNonEmpty(result.Error, result.Output), 180))
 				}
 			}
 		}
@@ -143,6 +156,10 @@ func (c *AcceptanceContract) Observe(call tools.Call, result tools.Result) {
 }
 
 func (c *AcceptanceContract) Evaluate(changedPaths map[string]bool) CompletionGateReport {
+	return c.EvaluateArtifacts(changedPaths, nil)
+}
+
+func (c *AcceptanceContract) EvaluateArtifacts(changedPaths, changedDirectories map[string]bool) CompletionGateReport {
 	report := CompletionGateReport{Passed: true, CheckedAt: time.Now()}
 	if c == nil {
 		return report
@@ -153,15 +170,27 @@ func (c *AcceptanceContract) Evaluate(changedPaths map[string]bool) CompletionGa
 			report.Blockers = append(report.Blockers, "protected path changed: "+path)
 		}
 	}
+	for path := range changedDirectories {
+		if protectedPath(path, c.ForbiddenChanges) {
+			report.Passed = false
+			report.Blockers = append(report.Blockers, "protected path changed: "+path)
+		}
+	}
 	for index := range c.RequiredChecks {
 		requirement := &c.RequiredChecks[index]
 		if requirement.ID == "changed-files-readable" {
-			missing := unreadChangedPaths(changedPaths, requirement.Evidence)
-			if len(missing) == 0 {
+			missingFiles := unreadChangedPaths(changedPaths, requirement.Evidence)
+			missingDirectories := unreadChangedDirectories(changedDirectories, requirement.Evidence)
+			if len(missingFiles) == 0 && len(missingDirectories) == 0 {
 				requirement.Status = AcceptancePassed
 			} else {
 				requirement.Status = AcceptancePending
-				report.Blockers = append(report.Blockers, "changed files not read back: "+strings.Join(missing, ", "))
+				if len(missingFiles) > 0 {
+					report.Blockers = append(report.Blockers, "changed files not read back: "+strings.Join(missingFiles, ", "))
+				}
+				if len(missingDirectories) > 0 {
+					report.Blockers = append(report.Blockers, "changed directories not inspected: "+strings.Join(missingDirectories, ", "))
+				}
 			}
 		}
 		if requirement.Required && requirement.Status != AcceptancePassed {
@@ -176,6 +205,21 @@ func (c *AcceptanceContract) Evaluate(changedPaths map[string]bool) CompletionGa
 	report.PendingChecks = util.UniqueSortedStrings(report.PendingChecks)
 	report.Evidence = util.UniqueSortedStrings(report.Evidence)
 	return report
+}
+
+func (c *AcceptanceContract) MarkVerificationNotApplicable(reason string) {
+	if c == nil {
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	for index := range c.RequiredChecks {
+		requirement := &c.RequiredChecks[index]
+		if strings.TrimSpace(requirement.Command) == "" {
+			continue
+		}
+		requirement.Status = AcceptancePassed
+		requirement.Evidence = appendUnique(requirement.Evidence, "verification not applicable: "+reason)
+	}
 }
 
 func (c *AcceptanceContract) Render() string {
@@ -239,6 +283,37 @@ func unreadChangedPaths(changed map[string]bool, evidence []string) []string {
 	}
 	sort.Strings(missing)
 	return missing
+}
+
+func unreadChangedDirectories(changed map[string]bool, evidence []string) []string {
+	var missing []string
+	for path := range changed {
+		needle := "read back directory " + normalizePath(path)
+		found := false
+		for _, item := range evidence {
+			if item == needle {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, normalizePath(path))
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func removeSupersededVerificationFailures(values []string) []string {
+	out := values[:0]
+	for _, value := range values {
+		lower := strings.ToLower(value)
+		if strings.Contains(lower, "verification") && strings.Contains(lower, " failed:") {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
 }
 
 func appendUnique(values []string, value string) []string {

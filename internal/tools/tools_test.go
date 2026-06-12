@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 )
 
 func TestReadFileStaysInsideWorkspace(t *testing.T) {
@@ -485,5 +486,163 @@ func TestAutoApproveAllowsExternalPathWithoutPrompt(t *testing.T) {
 	result := registry.Execute(context.Background(), call)
 	if !result.OK || !strings.Contains(result.Output, "auto") {
 		t.Fatalf("auto-approved external read = %#v", result)
+	}
+}
+
+func TestCreateDirectoryCreatesEmptyFolderAndStructuredLog(t *testing.T) {
+	root := t.TempDir()
+	logRoot := filepath.Join(t.TempDir(), "sessions")
+	t.Setenv("EPHEMERA_SESSION_LOG_DIR", logRoot)
+	t.Setenv("EPHEMERA_DEBUG_LOG", filepath.Join(logRoot, "global.log"))
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	registry := NewRegistry(cfg)
+	ctx := debuglog.WithScope(context.Background(), debuglog.Scope{
+		Session: "create folder", RunID: "run-create-folder", Provider: "test", Model: "test-model", Workspace: root,
+	})
+
+	result := registry.Execute(ctx, Call{Name: "create_directory", Arguments: map[string]any{"path": "new-folder"}})
+	if !result.OK {
+		t.Fatalf("create_directory failed: %#v", result)
+	}
+	info, err := os.Stat(filepath.Join(root, "new-folder"))
+	if err != nil || !info.IsDir() {
+		t.Fatalf("created directory missing: info=%#v err=%v", info, err)
+	}
+	if result.Metadata["changed"] != true || result.Metadata["directory"] != true {
+		t.Fatalf("unexpected create_directory metadata: %#v", result.Metadata)
+	}
+	data, err := os.ReadFile(debuglog.SessionToolPath("create-folder"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"stage":"started"`) || !strings.Contains(text, `"stage":"completed"`) || !strings.Contains(text, `"path":"new-folder"`) {
+		t.Fatalf("structured tool lifecycle is incomplete: %s", text)
+	}
+	debugData, err := os.ReadFile(debuglog.SessionDebugPath("create-folder"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(debugData), `"arguments":{"path":"new-folder"}`) {
+		t.Fatalf("summary debug log omitted tool arguments: %s", debugData)
+	}
+}
+
+func TestFailedShellDebugLogIncludesCommandAndOutput(t *testing.T) {
+	root := t.TempDir()
+	logRoot := filepath.Join(t.TempDir(), "sessions")
+	t.Setenv("EPHEMERA_SESSION_LOG_DIR", logRoot)
+	t.Setenv("EPHEMERA_DEBUG_LOG", filepath.Join(logRoot, "global.log"))
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	registry := NewRegistry(cfg)
+	ctx := debuglog.WithScope(context.Background(), debuglog.Scope{
+		Session: "failed shell", RunID: "run-failed-shell", Provider: "test", Model: "test-model", Workspace: root,
+	})
+	command := "printf 'log-marker\\n'; exit 1"
+	if runtime.GOOS == "windows" {
+		command = "Write-Output log-marker; exit 1"
+	}
+
+	result := registry.Execute(ctx, Call{Name: "shell", Arguments: map[string]any{"command": command}})
+	if result.OK {
+		t.Fatalf("failing shell command unexpectedly succeeded: %#v", result)
+	}
+	debugData, err := os.ReadFile(debuglog.SessionDebugPath("failed-shell"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(debugData)
+	if !strings.Contains(text, `"arguments":{"command":`) || !strings.Contains(text, "log-marker") {
+		t.Fatalf("failed shell diagnostics omitted command or output: %s", text)
+	}
+	if !strings.Contains(text, `"output_summary":`) {
+		t.Fatalf("failed shell diagnostics omitted output summary: %s", text)
+	}
+}
+
+func TestApplyPatchMissingContentIncludesDeterministicRecovery(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	registry := NewRegistry(cfg)
+	result := registry.Execute(context.Background(), Call{Name: "apply_patch", Arguments: map[string]any{"path": "pong"}})
+	if result.OK || !strings.Contains(result.Error, "create_directory") || !strings.Contains(result.Error, `complete "content"`) {
+		t.Fatalf("missing-content recovery = %#v", result)
+	}
+}
+
+func TestCreateDirectoryRespectsApprovalMiddleware(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.ApprovalPolicy = config.ApprovalApproveWrites
+	registry := NewRegistry(cfg)
+	call := Call{Name: "create_directory", Arguments: map[string]any{"path": "approved-folder"}}
+
+	blocked := registry.Execute(context.Background(), call)
+	if blocked.OK || !strings.Contains(blocked.Error, "explicit user approval") {
+		t.Fatalf("unapproved directory creation = %#v, want approval failure", blocked)
+	}
+	approved := registry.Execute(WithApproval(context.Background()), call)
+	if !approved.OK {
+		t.Fatalf("approved directory creation failed: %#v", approved)
+	}
+	if info, err := os.Stat(filepath.Join(root, "approved-folder")); err != nil || !info.IsDir() {
+		t.Fatalf("approved folder missing: info=%#v err=%v", info, err)
+	}
+}
+
+func TestToolPanicIsContainedAndCrashReportPersisted(t *testing.T) {
+	root := t.TempDir()
+	logRoot := filepath.Join(t.TempDir(), "sessions")
+	t.Setenv("EPHEMERA_SESSION_LOG_DIR", logRoot)
+	t.Setenv("EPHEMERA_DEBUG_LOG", filepath.Join(logRoot, "global.log"))
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	registry := NewRegistry(cfg)
+	if err := registry.Register(Tool{
+		Name: "panic_test", Description: "panic containment test", Risk: RiskRead,
+		Execute: func(context.Context, Registry, Call, func(string)) Result { panic("simulated tool crash") },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := debuglog.WithScope(context.Background(), debuglog.Scope{Session: "panic tool", RunID: "run-panic", Workspace: root})
+	result := registry.Execute(ctx, Call{Name: "panic_test"})
+	if result.OK || !strings.Contains(result.Error, "panic recovered") {
+		t.Fatalf("panic was not contained: %#v", result)
+	}
+	if result.Metadata["panic_recovered"] != true {
+		t.Fatalf("panic metadata missing: %#v", result.Metadata)
+	}
+	crashPath, _ := result.Metadata["crash_report"].(string)
+	if crashPath == "" {
+		crashPath = debuglog.SessionCrashPath("panic-tool")
+	}
+	data, err := os.ReadFile(crashPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "simulated tool crash") || !strings.Contains(string(data), "panic_test") {
+		t.Fatalf("crash report missing panic evidence: %s", data)
+	}
+}
+
+func TestGoTestRejectsArbitraryCommandOverride(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	cfg.AutoTestCommand = "go test ./..."
+	registry := NewRegistry(cfg)
+	result := registry.Execute(context.Background(), Call{Name: "go_test", Arguments: map[string]any{"command": "echo bypass"}})
+	if result.OK || !strings.Contains(result.Error, "recognized standalone test command") {
+		t.Fatalf("arbitrary verification override was accepted: %#v", result)
+	}
+	composed := registry.Execute(context.Background(), Call{Name: "go_test", Arguments: map[string]any{"command": "go test ./... && echo bypass"}})
+	if composed.OK || !strings.Contains(composed.Error, "recognized standalone test command") {
+		t.Fatalf("composed verification override was accepted: %#v", composed)
 	}
 }

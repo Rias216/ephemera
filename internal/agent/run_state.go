@@ -16,6 +16,7 @@ type runState struct {
 	mu                     sync.Mutex
 	toolRegistry           tools.Registry
 	runID                  string
+	sessionName            string
 	observations           []string
 	nativeTurns            []llm.Message
 	toolSequence           []string
@@ -30,10 +31,15 @@ type runState struct {
 	workspaceRevision      int
 	inspectedPaths         map[string]bool
 	changedPaths           map[string]bool
+	changedDirectories     map[string]bool
+	runtimeChangedPaths    map[string]bool
 	changed                bool
 	verified               bool
 	verificationAttempted  bool
 	verificationDeferrals  int
+	verificationCommand    string
+	verificationScope      string
+	verificationReason     string
 	parseFailures          int
 	noProgressRounds       int
 	reviewed               bool
@@ -75,8 +81,8 @@ func (s *runState) contextWorkingMemory() string {
 	if len(s.observations) > 0 {
 		parts = append(parts, "Recent evidence:\n"+strings.Join(tailStrings(s.observations, 6), "\n"))
 	}
-	if len(s.changedPaths) > 0 {
-		parts = append(parts, "Changed paths: "+strings.Join(sortedKeys(s.changedPaths), ", "))
+	if paths := changedArtifactPaths(s); len(paths) > 0 {
+		parts = append(parts, "Changed paths: "+strings.Join(paths, ", "))
 	}
 	if s.verified {
 		parts = append(parts, "Verification state: verified")
@@ -96,6 +102,7 @@ func (r Runner) initialState(session history.Session, started time.Time) *runSta
 	events := eventsSinceLatestUser(session)
 	state := &runState{
 		runID:               fmt.Sprintf("run-%d", started.UnixNano()),
+		sessionName:         session.Name,
 		toolRegistry:        r.Tools,
 		observations:        recentToolObservations(events),
 		nativeTurns:         reconstructNativeToolTurns(events),
@@ -110,6 +117,8 @@ func (r Runner) initialState(session history.Session, started time.Time) *runSta
 		reflectionCounts:    map[int]int{},
 		inspectedPaths:      map[string]bool{},
 		changedPaths:        map[string]bool{},
+		changedDirectories:  map[string]bool{},
+		runtimeChangedPaths: map[string]bool{},
 		contextCache:        NewContextFitCache(),
 		plan:                latestPlan(events),
 		progressGuard:       NewProgressGuard(),
@@ -196,18 +205,14 @@ func (r Runner) initialState(session history.Session, started time.Time) *runSta
 			if path != "" {
 				state.inspectedPaths[normalizePath(path)] = true
 			}
+		case "create_directory":
+			state.recordChangedArtifact(path, true)
 		case "apply_patch", "replace_in_file":
-			state.changed = true
-			if path != "" {
-				state.changedPaths[normalizePath(path)] = true
-			}
-			state.verified = false
+			state.recordChangedArtifact(path, false)
 		case "apply_multi_patch":
-			state.changed = true
 			for _, changedPath := range metadataStringSlice(event.Metadata, "paths") {
-				state.changedPaths[normalizePath(changedPath)] = true
+				state.recordChangedArtifact(changedPath, false)
 			}
-			state.verified = false
 		case "go_test":
 			state.verificationAttempted = true
 			state.verified = true
@@ -220,6 +225,20 @@ func (r Runner) initialState(session history.Session, started time.Time) *runSta
 		}
 	}
 	return state
+}
+
+func changedArtifactPaths(state *runState) []string {
+	if state == nil {
+		return nil
+	}
+	combined := make(map[string]bool, len(state.changedPaths)+len(state.changedDirectories))
+	for path, changed := range state.changedPaths {
+		combined[path] = changed
+	}
+	for path, changed := range state.changedDirectories {
+		combined[path] = changed
+	}
+	return sortedKeys(combined)
 }
 
 func latestUserText(session history.Session) string {

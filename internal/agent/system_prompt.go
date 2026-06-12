@@ -69,6 +69,9 @@ func (r Runner) systemPrompt(session history.Session, state *runState) string {
 	b.WriteString("\nOPERATING RULES:\n")
 	b.WriteString("- Inspect before editing. Existing files must be read before apply_patch or replace_in_file.\n")
 	b.WriteString("- Prefer targeted read ranges and replace_in_file for small changes; use apply_patch only for complete-file writes or new files.\n")
+	b.WriteString("- Use create_directory when the user asks for an empty folder. Do not create placeholder README or .gitkeep files unless the user explicitly requests one.\n")
+	b.WriteString("- Treat only artifacts changed by the current run as the task diff. Ephemera runtime files and unrelated pre-existing workspace failures are diagnostic context, not completion blockers.\n")
+	b.WriteString("- Verify the narrowest affected package or project target first. Do not require a repository-wide suite when the task-scoped suite passes and unrelated packages were already failing.\n")
 	b.WriteString("- Tool results are authoritative and are delivered again as native tool-result messages when supported. Read the latest result before choosing the next action.\n")
 	b.WriteString("- Do not repeat an identical successful, failed, or unhelpful tool call. Repeating list_files, tree, read_file, search, git_status, or git_diff with identical arguments is never progress.\n")
 	b.WriteString("- An explicit empty-directory, no-match, clean-status, or no-diff result is conclusive evidence, not a reason to retry the same tool. Move to a narrower/different tool, create the requested files, or finalize.\n")
@@ -111,8 +114,8 @@ func (r Runner) systemPrompt(session history.Session, state *runState) string {
 		b.WriteString("\n")
 	}
 	fmt.Fprintf(&b, "Provider capabilities: tools=%t format=%s streaming=%s reasoning=%t max_parallel=%d\n", caps.NativeTools, caps.ToolCallFormat, caps.StreamingFormat, caps.SupportsReasoning, caps.MaxParallelTools)
-	if len(state.changedPaths) > 0 {
-		fmt.Fprintf(&b, "Changed paths: %s\n", strings.Join(sortedKeys(state.changedPaths), ", "))
+	if paths := changedArtifactPaths(state); len(paths) > 0 {
+		fmt.Fprintf(&b, "Changed paths: %s\n", strings.Join(paths, ", "))
 	}
 	if strings.TrimSpace(r.Config.AutoTestCommand) != "" {
 		fmt.Fprintf(&b, "Configured verification command: %s\n", r.Config.AutoTestCommand)

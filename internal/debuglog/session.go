@@ -1,6 +1,7 @@
 package debuglog
 
 import (
+	"archive/zip"
 	"bufio"
 	"context"
 	"crypto/sha256"
@@ -8,9 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +23,10 @@ import (
 const (
 	sessionDebugFile   = "debug.jsonl"
 	sessionContextFile = "context.jsonl"
+	sessionToolFile    = "tools.jsonl"
+	sessionCrashFile   = "crash.json"
 	contextMaxBytes    = 32 << 20
+	toolMaxBytes       = 16 << 20
 	contextRotations   = 5
 )
 
@@ -157,6 +163,14 @@ func SessionContextPath(session string) string {
 	return filepath.Join(SessionDirectory(session), sessionContextFile)
 }
 
+func SessionToolPath(session string) string {
+	return filepath.Join(SessionDirectory(session), sessionToolFile)
+}
+
+func SessionCrashPath(session string) string {
+	return filepath.Join(SessionDirectory(session), sessionCrashFile)
+}
+
 // EnsureSession creates the diagnostic files eagerly so even a session that
 // crashes before its first provider call has a discoverable bundle.
 func EnsureSession(session string) error {
@@ -164,7 +178,7 @@ func EnsureSession(session string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	for _, path := range []string{SessionDebugPath(session), SessionContextPath(session)} {
+	for _, path := range []string{SessionDebugPath(session), SessionContextPath(session), SessionToolPath(session)} {
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return err
@@ -401,6 +415,240 @@ func WriteSession(session, level, component, event, message string, fields map[s
 	return writeAt(SessionDebugPath(session), data)
 }
 
+// ToolRecord is one durable tool lifecycle record. Arguments and result fields
+// are sanitized and bounded before persistence so debugging can retain paths,
+// commands, aliases, approval state, and failure evidence without duplicating
+// large patch bodies or provider secrets.
+type ToolRecord struct {
+	Time        time.Time      `json:"time"`
+	Stage       string         `json:"stage"`
+	Session     string         `json:"session"`
+	RunID       string         `json:"run_id,omitempty"`
+	Provider    string         `json:"provider,omitempty"`
+	Model       string         `json:"model,omitempty"`
+	Workspace   string         `json:"workspace,omitempty"`
+	Iteration   int            `json:"iteration,omitempty"`
+	Tool        string         `json:"tool"`
+	Fingerprint string         `json:"fingerprint,omitempty"`
+	Risk        string         `json:"risk,omitempty"`
+	Approval    string         `json:"approval,omitempty"`
+	Arguments   map[string]any `json:"arguments,omitempty"`
+	OK          *bool          `json:"ok,omitempty"`
+	DurationMS  int64          `json:"duration_ms,omitempty"`
+	Error       string         `json:"error,omitempty"`
+	Output      string         `json:"output_summary,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+}
+
+// AppendTool writes one structured tool lifecycle record to tools.jsonl.
+func AppendTool(ctx context.Context, record ToolRecord) error {
+	scope := ScopeFromContext(ctx)
+	if strings.TrimSpace(scope.Session) == "" {
+		return nil
+	}
+	record.Time = time.Now().UTC()
+	record.Stage = fallback(strings.TrimSpace(record.Stage), "tool")
+	record.Session = sanitizeSessionName(scope.Session)
+	record.RunID = firstNonEmptyString(record.RunID, scope.RunID)
+	record.Provider = firstNonEmptyString(record.Provider, scope.Provider)
+	record.Model = firstNonEmptyString(record.Model, scope.Model)
+	record.Workspace = firstNonEmptyString(record.Workspace, scope.Workspace)
+	if record.Iteration == 0 {
+		record.Iteration = scope.Iteration
+	}
+	record.Tool = firstNonEmptyString(strings.TrimSpace(record.Tool), scope.Tool, "unknown")
+	record.Arguments = sanitizeContextMap(record.Arguments, 0)
+	record.Metadata = sanitizeContextMap(record.Metadata, 0)
+	record.Error = redact(limitContextString(strings.ToValidUTF8(record.Error, "�"), 64<<10))
+	record.Output = redact(limitContextString(strings.ToValidUTF8(record.Output, "�"), 64<<10))
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	mu.Lock()
+	defer mu.Unlock()
+	if err := EnsureSession(record.Session); err != nil {
+		return err
+	}
+	path := SessionToolPath(record.Session)
+	if err := rotateBounded(path, int64(len(data)), toolMaxBytes, contextRotations); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_ = file.Chmod(0o600)
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
+// CrashReport is the latest process, TUI, agent, or tool panic associated with
+// a session. It is atomically replaced so bug reports always contain a complete
+// stack rather than a partially written JSON line.
+type CrashReport struct {
+	Time      time.Time      `json:"time"`
+	Session   string         `json:"session"`
+	RunID     string         `json:"run_id,omitempty"`
+	Provider  string         `json:"provider,omitempty"`
+	Model     string         `json:"model,omitempty"`
+	Workspace string         `json:"workspace,omitempty"`
+	Iteration int            `json:"iteration,omitempty"`
+	Tool      string         `json:"tool,omitempty"`
+	Component string         `json:"component"`
+	Message   string         `json:"message"`
+	Stack     string         `json:"stack"`
+	GOOS      string         `json:"goos"`
+	GOARCH    string         `json:"goarch"`
+	GoVersion string         `json:"go_version"`
+	PID       int            `json:"pid"`
+	Fields    map[string]any `json:"fields,omitempty"`
+}
+
+// RecordCrash persists a full stack in the current session and mirrors a
+// compact error into debug.jsonl/global debug.log. The returned path is safe to
+// surface directly in the TUI.
+func RecordCrash(ctx context.Context, component string, recovered any, stack []byte, fields map[string]any) (string, error) {
+	scope := ScopeFromContext(ctx)
+	message := strings.TrimSpace(fmt.Sprint(recovered))
+	if message == "" {
+		message = "unknown panic"
+	}
+	FailureCtx(ctx, fallback(strings.TrimSpace(component), "ephemera"), "panic recovered", message, map[string]any{
+		"stack": string(stack),
+	})
+	if strings.TrimSpace(scope.Session) == "" {
+		return Path(), nil
+	}
+	report := CrashReport{
+		Time: time.Now().UTC(), Session: sanitizeSessionName(scope.Session), RunID: scope.RunID,
+		Provider: scope.Provider, Model: scope.Model, Workspace: scope.Workspace, Iteration: scope.Iteration,
+		Tool: scope.Tool, Component: fallback(strings.TrimSpace(component), "ephemera"),
+		Message: redact(limitContextString(strings.ToValidUTF8(message, "�"), 64<<10)),
+		Stack:   redact(limitContextString(strings.ToValidUTF8(string(stack), "�"), 1<<20)),
+		GOOS:    runtime.GOOS, GOARCH: runtime.GOARCH, GoVersion: runtime.Version(), PID: os.Getpid(),
+		Fields: sanitizeContextMap(fields, 0),
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	data = append(data, '\n')
+	path := SessionCrashPath(report.Session)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := EnsureSession(report.Session); err != nil {
+		return "", err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return "", err
+	}
+	if err := replaceFile(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return path, nil
+}
+
+// replaceFile commits a fully written temporary file. On Windows os.Rename
+// cannot replace an existing destination, so retry after removing the prior
+// file. The temporary file remains available until the final rename succeeds.
+func replaceFile(source, destination string) error {
+	if err := os.Rename(source, destination); err == nil {
+		return nil
+	}
+	if err := os.Remove(destination); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.Rename(source, destination)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// ExportSession creates a portable ZIP containing the crash-recovery snapshot,
+// structured debug/tool/context logs, rotations, and latest crash report.
+func ExportSession(session string) (string, error) {
+	session = sanitizeSessionName(session)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := EnsureSession(session); err != nil {
+		return "", err
+	}
+	root := SessionRoot()
+	stamp := time.Now().Format("20060102-150405.000000000")
+	destination := filepath.Join(root, session+"-diagnostics-"+stamp+".zip")
+	tmp := destination + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	writer := zip.NewWriter(file)
+	closeWithError := func(current error) error {
+		if closeErr := writer.Close(); current == nil {
+			current = closeErr
+		}
+		if closeErr := file.Close(); current == nil {
+			current = closeErr
+		}
+		return current
+	}
+	base := SessionDirectory(session)
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		_ = closeWithError(err)
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name != "session.json" && name != sessionCrashFile &&
+			!strings.HasPrefix(name, sessionDebugFile) && !strings.HasPrefix(name, sessionContextFile) && !strings.HasPrefix(name, sessionToolFile) {
+			continue
+		}
+		source, openErr := os.Open(filepath.Join(base, name))
+		if openErr != nil {
+			_ = closeWithError(openErr)
+			_ = os.Remove(tmp)
+			return "", openErr
+		}
+		target, createErr := writer.Create(filepath.ToSlash(filepath.Join(session, name)))
+		if createErr == nil {
+			_, createErr = io.Copy(target, source)
+		}
+		_ = source.Close()
+		if createErr != nil {
+			_ = closeWithError(createErr)
+			_ = os.Remove(tmp)
+			return "", createErr
+		}
+	}
+	if err := closeWithError(nil); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := replaceFile(tmp, destination); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return destination, nil
+}
+
 // RecentSession returns the newest per-session debug records in chronological order.
 func RecentSession(session string, limit int) ([]Entry, error) {
 	if limit < 1 {
@@ -440,7 +688,7 @@ func ClearSession(session string) error {
 	mu.Lock()
 	defer mu.Unlock()
 	var first error
-	for _, base := range []string{SessionDebugPath(session), SessionContextPath(session)} {
+	for _, base := range []string{SessionDebugPath(session), SessionContextPath(session), SessionToolPath(session)} {
 		for index := 0; index <= contextRotations; index++ {
 			candidate := base
 			if index > 0 {
@@ -450,6 +698,9 @@ func ClearSession(session string) error {
 				first = err
 			}
 		}
+	}
+	if err := os.Remove(SessionCrashPath(session)); err != nil && !errors.Is(err, os.ErrNotExist) && first == nil {
+		first = err
 	}
 	if first != nil {
 		return first

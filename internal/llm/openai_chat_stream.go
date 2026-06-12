@@ -64,7 +64,7 @@ func (p *OpenAI) generateChatCompletionsStream(ctx context.Context, req Request,
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(response.Body, 32<<10))
-		return ToolDecision{}, fmt.Errorf("%s streaming request failed: %s: %s", p.Name(), response.Status, strings.TrimSpace(string(data)))
+		return ToolDecision{}, newHTTPStatusError(p.Name(), "streaming request", response, data)
 	}
 
 	var text strings.Builder

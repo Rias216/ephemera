@@ -107,6 +107,9 @@ func builtinTools() []Tool {
 			arg("event", "string", "APPROVE, REQUEST_CHANGES, or COMMENT for review.", false),
 			arg("max", "integer", "Maximum list results, up to 100.", false),
 		}},
+		{Name: "create_directory", Description: "Create a directory, including missing parent directories. Args: path. Use this for empty folders instead of creating placeholder files or invoking shell commands.", Risk: RiskWrite, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative or absolute directory path to create; external paths require approval.", true),
+		}},
 		{Name: "apply_patch", Description: "Write complete file content. Args: path, content. Prefer replace_in_file for small edits.", Risk: RiskWrite, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
 			arg("path", "string", "Workspace-relative or absolute file path to create or replace; external paths require approval.", true),
 			arg("content", "string", "Complete UTF-8 file content.", true),
@@ -127,7 +130,9 @@ func builtinTools() []Tool {
 		{Name: "shell", Description: "Run a shell command in the workspace. Args: command.", Risk: RiskShell, Arguments: []ArgumentSpec{
 			arg("command", "string", "Shell command to run from the workspace root.", true),
 		}},
-		{Name: "go_test", Description: "Run the configured test command.", Risk: RiskShell},
+		{Name: "go_test", Description: "Run the configured or task-scoped verification command. Args: optional command; overrides are restricted to recognized test commands.", Risk: RiskShell, Arguments: []ArgumentSpec{
+			arg("command", "string", "Optional recognized test command selected by the verification planner.", false),
+		}},
 		{Name: "run_linter", Description: "Detect and run the project's configured linter.", Risk: RiskShell},
 		{Name: "run_formatter", Description: "Detect and run the project's formatter. This may rewrite source files.", Risk: RiskShell},
 		{Name: "security_audit", Description: "Run the ecosystem's available dependency security audit.", Risk: RiskShell},

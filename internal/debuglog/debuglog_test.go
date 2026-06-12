@@ -1,6 +1,7 @@
 package debuglog
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -144,5 +145,68 @@ func TestAppendContextPersistsNormalizedRedactedPayload(t *testing.T) {
 	}
 	if !strings.Contains(text, "[REDACTED]") || !strings.Contains(text, "2048") || !strings.Contains(text, "�") {
 		t.Fatalf("unexpected context record: %s", text)
+	}
+}
+
+func TestToolLifecycleCrashReportAndExport(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("EPHEMERA_SESSION_LOG_DIR", filepath.Join(root, "sessions"))
+	t.Setenv("EPHEMERA_DEBUG_LOG", filepath.Join(root, "global", "debug.log"))
+	ctx := WithScope(context.Background(), Scope{
+		Session: "folder crash", RunID: "run-folder", Provider: "compatible", Model: "test-model",
+		Workspace: filepath.Join(root, "workspace"), Iteration: 2, Tool: "create_directory",
+	})
+	ok := false
+	if err := AppendTool(ctx, ToolRecord{
+		Stage: "completed", Tool: "create_directory", Fingerprint: "create_directory:abc", Risk: "write",
+		Arguments: map[string]any{"path": "new-folder", "api_key": "must-not-leak"},
+		OK:        &ok, Error: "simulated failure", Metadata: map[string]any{"approval": "granted"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	toolData, err := os.ReadFile(SessionToolPath("folder-crash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(toolData)
+	if !strings.Contains(text, "create_directory") || !strings.Contains(text, "new-folder") {
+		t.Fatalf("tool lifecycle record missing evidence: %s", text)
+	}
+	if strings.Contains(text, "must-not-leak") || !strings.Contains(text, "[REDACTED]") {
+		t.Fatalf("tool lifecycle record did not redact secrets: %s", text)
+	}
+
+	crashPath, err := RecordCrash(ctx, "agent.test", "boom", []byte("goroutine 1 [running]:\nagent.test"), map[string]any{"phase": "tool execution"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashData, err := os.ReadFile(crashPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(crashData), "agent.test") || !strings.Contains(string(crashData), "goroutine 1") {
+		t.Fatalf("crash report missing stack/context: %s", crashData)
+	}
+
+	if err := os.WriteFile(filepath.Join(SessionDirectory("folder-crash"), "session.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := ExportSession("folder-crash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := zip.OpenReader(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	seen := map[string]bool{}
+	for _, file := range archive.File {
+		seen[filepath.Base(file.Name)] = true
+	}
+	for _, name := range []string{"session.json", "debug.jsonl", "context.jsonl", "tools.jsonl", "crash.json"} {
+		if !seen[name] {
+			t.Fatalf("diagnostic bundle missing %s: %#v", name, seen)
+		}
 	}
 }

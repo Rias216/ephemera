@@ -64,6 +64,7 @@ var builtinExecutorCatalog = map[string]Handler{
 	"git_merge": func(ctx context.Context, r Registry, call Call, emit func(string)) Result {
 		return r.gitMerge(ctx, call, emit)
 	},
+	"create_directory":  func(_ context.Context, r Registry, call Call, _ func(string)) Result { return r.createDirectory(call) },
 	"apply_patch":       func(_ context.Context, r Registry, call Call, _ func(string)) Result { return r.applyPatch(call) },
 	"apply_multi_patch": func(_ context.Context, r Registry, call Call, _ func(string)) Result { return r.applyMultiPatch(call) },
 	"replace_in_file":   func(_ context.Context, r Registry, call Call, _ func(string)) Result { return r.replaceInFile(call) },
@@ -71,8 +72,8 @@ var builtinExecutorCatalog = map[string]Handler{
 	"shell": func(ctx context.Context, r Registry, call Call, emit func(string)) Result {
 		return r.runCommand(ctx, argString(call, "command"), emit)
 	},
-	"go_test": func(ctx context.Context, r Registry, _ Call, emit func(string)) Result {
-		return r.runCommand(ctx, r.AutoTestCommand, emit)
+	"go_test": func(ctx context.Context, r Registry, call Call, emit func(string)) Result {
+		return r.runVerificationCommand(ctx, call, emit)
 	},
 	"run_linter":     projectCommandExecutor("lint"),
 	"run_formatter":  projectCommandExecutor("format"),

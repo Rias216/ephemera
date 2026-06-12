@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -41,7 +42,7 @@ const helpText = `### Commands
 - **/codex [status|budget <tokens>]** — inspect or tune the isolated Codex bridge
 - **/subagent <on|off|model|status>** — configure lightweight delegation
 - **/director <on|off|model|instrument|status>** — configure dual-model review
-- **/debuglog [tail|clear]** — inspect or clear session debug and provider-context logs
+- **/debuglog [tail|export|clear]** — inspect, export, or clear session diagnostics
 - **/thinking <on|off>** — show or hide Beneath the Surface traces
 - **/surface** — reopen the latest persisted reasoning and verification trace
 - **/eval** — run deterministic local agent capability checks
@@ -139,9 +140,11 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 	spin.Style = lipgloss.NewStyle().Foreground(styles.Primary)
 
 	var session history.Session
+	loadedSession := false
 	if sessionName != "" {
 		if loaded, err := loadFromStore(store, sessionName); err == nil {
 			session = loaded
+			loadedSession = true
 			applyLoadedSessionConfig(&cfg, loaded)
 		} else {
 			debuglog.Error("tui", "startup session load failed", err, map[string]any{
@@ -157,6 +160,10 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 			"session": session.Name,
 		})
 	}
+	_ = debuglog.WriteSession(session.Name, "info", "tui", "session opened", "session initialized for the terminal UI", map[string]any{
+		"loaded": loadedSession, "provider": cfg.Provider, "model": cfg.Model(), "workspace": cfg.WorkspaceRoot,
+		"messages": len(session.Messages), "events": len(session.Events),
+	})
 	if store != nil {
 		if err := store.Save(session); err != nil {
 			debuglog.Error("tui", "startup session save failed", err, map[string]any{
@@ -190,7 +197,31 @@ func (m Model) Init() tea.Cmd {
 	return animationTick(m.animationGeneration)
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if m.agentCancel != nil {
+				m.agentCancel()
+			}
+			ctx := debuglog.WithScope(context.Background(), debuglog.Scope{
+				Session: m.session.Name, RunID: m.liveAgent.RunID, Provider: firstNonEmpty(m.liveAgent.RunProvider, m.cfg.Provider),
+				Model: firstNonEmpty(m.liveAgent.RunModel, m.cfg.Model()), Workspace: m.workspaceRoot(), Iteration: m.liveAgent.Iteration, Tool: m.liveAgent.Tool,
+			})
+			crashPath, _ := debuglog.RecordCrash(ctx, "tui.update", recovered, debug.Stack(), map[string]any{
+				"message_type": fmt.Sprintf("%T", msg), "phase": m.liveAgent.Phase,
+			})
+			m.busy = false
+			m.liveAgent.Active = false
+			m.liveAgent.Phase = "recovered from UI panic"
+			m.liveAgent.Err = fmt.Sprint(recovered)
+			m.agentStream = nil
+			m.agentCancel = nil
+			m.status = "Recovered from an internal UI error. Session and crash logs were saved."
+			m.notice = "**Internal UI error recovered.**\n\nCrash report: `" + escapeMarkdown(crashPath) + "`\n\nSession log: `" + escapeMarkdown(debuglog.SessionDebugPath(m.session.Name)) + "`"
+			model = m
+			cmd = nil
+		}
+	}()
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -616,7 +647,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m Model) View() tea.View {
+func (m Model) View() (view tea.View) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			ctx := debuglog.WithScope(context.Background(), debuglog.Scope{
+				Session: m.session.Name, RunID: m.liveAgent.RunID, Provider: firstNonEmpty(m.liveAgent.RunProvider, m.cfg.Provider),
+				Model: firstNonEmpty(m.liveAgent.RunModel, m.cfg.Model()), Workspace: m.workspaceRoot(), Iteration: m.liveAgent.Iteration, Tool: m.liveAgent.Tool,
+			})
+			crashPath, _ := debuglog.RecordCrash(ctx, "tui.view", recovered, debug.Stack(), map[string]any{
+				"width": m.width, "height": m.height, "phase": m.liveAgent.Phase,
+			})
+			fallback := fmt.Sprintf("Ephemera recovered from a rendering error.\n\nCrash report: %s\nSession log: %s", crashPath, debuglog.SessionDebugPath(m.session.Name))
+			view = tea.NewView(fallback)
+			view.AltScreen = true
+			view.WindowTitle = "Ephemera · recovered"
+		}
+	}()
 	content := "\n  Ephemera is arranging the dark…\n"
 	var cursor *tea.Cursor
 
@@ -666,7 +712,7 @@ func (m Model) View() tea.View {
 		content = m.styles.Error.Render("Ephemera needs a terminal at least 40×16.")
 	}
 
-	view := tea.NewView(content)
+	view = tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
 	view.ReportFocus = true
@@ -996,6 +1042,10 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		}
 		_ = m.saveSession()
 		m.session = history.New(name, m.cfg.Provider, m.cfg.Model(), m.cfg.Mode)
+		_ = debuglog.EnsureSession(m.session.Name)
+		_ = debuglog.WriteSession(m.session.Name, "info", "tui", "session created", "new interactive session created", map[string]any{
+			"provider": m.cfg.Provider, "model": m.cfg.Model(), "workspace": m.workspaceRoot(),
+		})
 		_ = m.saveSession()
 		m.notice = ""
 		m.lastAssistant = ""
@@ -1025,6 +1075,10 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		_ = m.saveSession()
 		m.applyLoadedSession(loaded)
 		_ = debuglog.EnsureSession(m.session.Name)
+		_ = debuglog.WriteSession(m.session.Name, "info", "tui", "session loaded", "saved interactive session loaded", map[string]any{
+			"provider": m.cfg.Provider, "model": m.cfg.Model(), "workspace": m.workspaceRoot(),
+			"messages": len(m.session.Messages), "events": len(m.session.Events),
+		})
 		_ = m.saveSession()
 		m.notice = ""
 		m.status = "Loaded session " + loaded.Name
@@ -1670,6 +1724,15 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		case "", "status", "tail":
 			m.notice = m.debugLogNotice(20)
 			m.status = "Debug log opened · " + debugLogPath()
+		case "export", "bundle":
+			path, err := debuglog.ExportSession(m.session.Name)
+			if err != nil {
+				m.recordError("export debug bundle failed", err, nil)
+				m.status = "Debug bundle export failed: " + err.Error()
+				break
+			}
+			m.notice = "### Diagnostic bundle exported\n\n`" + escapeMarkdown(path) + "`\n\nThe ZIP contains the session snapshot, structured tool/debug/context logs, rotations, and the latest crash report when present."
+			m.status = "Diagnostic bundle exported."
 		case "clear":
 			if err := clearDebugLog(m.session.Name); err != nil {
 				m.recordError("clear debug log failed", err, nil)
@@ -1679,7 +1742,7 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 			m.notice = "### Debug log\n\nGlobal and current-session diagnostics were cleared. New events will be recorded automatically at:\n\n`" + escapeMarkdown(debugLogPath()) + "`"
 			m.status = "Debug log cleared."
 		default:
-			m.status = "Usage: /debuglog [status|tail|clear]"
+			m.status = "Usage: /debuglog [status|tail|export|clear]"
 		}
 
 	case "/memory":

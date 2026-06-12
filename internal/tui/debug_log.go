@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -42,11 +43,18 @@ func (m Model) debugLogNotice(limit int) string {
 	sessionEntries, sessionErr := debuglog.RecentSession(m.session.Name, limit)
 	globalEntries, globalErr := debuglog.Recent(limit)
 	var b strings.Builder
-	fmt.Fprintf(&b, "### Session diagnostics\n\n- Session: `%s`\n- Snapshot: `%s`\n- Debug events: `%s`\n- Provider context: `%s`\n- Global debug log: `%s`\n- Rotation: debug 5 MiB × 4 · context 32 MiB × 6\n- Secrets: automatically redacted\n",
+	crashStatus := "none recorded"
+	if info, err := os.Stat(debuglog.SessionCrashPath(m.session.Name)); err == nil {
+		crashStatus = fmt.Sprintf("%s · %d bytes", info.ModTime().Local().Format("2006-01-02 15:04:05"), info.Size())
+	}
+	fmt.Fprintf(&b, "### Session diagnostics\n\n- Session: `%s`\n- Snapshot: `%s`\n- Debug events: `%s`\n- Tool lifecycle: `%s`\n- Provider context: `%s`\n- Crash report: `%s` — %s\n- Global debug log: `%s`\n- Export: `/debuglog export`\n- Rotation: debug 5 MiB × 4 · tools 16 MiB × 6 · context 32 MiB × 6\n- Secrets: automatically redacted\n",
 		escapeMarkdown(m.session.Name),
 		escapeMarkdown(filepath.Join(debuglog.SessionDirectory(m.session.Name), "session.json")),
 		escapeMarkdown(debuglog.SessionDebugPath(m.session.Name)),
+		escapeMarkdown(debuglog.SessionToolPath(m.session.Name)),
 		escapeMarkdown(debuglog.SessionContextPath(m.session.Name)),
+		escapeMarkdown(debuglog.SessionCrashPath(m.session.Name)),
+		escapeMarkdown(crashStatus),
 		escapeMarkdown(debuglog.Path()),
 	)
 	if sessionErr != nil {

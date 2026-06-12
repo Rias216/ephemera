@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,17 +34,13 @@ func GenerateStreaming(ctx context.Context, provider Provider, req Request, onDe
 	if stream, ok := provider.(StreamingProvider); ok {
 		text, err := stream.GenerateStream(ctx, req, onDelta)
 		if err != nil {
-			debuglog.ErrorCtx(ctx, "provider", "stream generation failed", err, providerLogFields(provider, req, map[string]any{
-				"streaming": true,
-			}))
+			logProviderGenerationError(ctx, provider, req, "stream generation failed", err, true)
 		}
 		return text, err
 	}
 	text, err := provider.Generate(ctx, req)
 	if err != nil {
-		debuglog.ErrorCtx(ctx, "provider", "generation failed", err, providerLogFields(provider, req, map[string]any{
-			"streaming": false,
-		}))
+		logProviderGenerationError(ctx, provider, req, "generation failed", err, false)
 		return "", err
 	}
 	if onDelta != nil && text != "" {
@@ -53,6 +50,15 @@ func GenerateStreaming(ctx context.Context, provider Provider, req Request, onDe
 		}
 	}
 	return text, nil
+}
+
+func logProviderGenerationError(ctx context.Context, provider Provider, req Request, event string, err error, streaming bool) {
+	fields := providerLogFields(provider, req, map[string]any{"streaming": streaming})
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		_ = debuglog.WriteCtx(ctx, "info", "provider", "generation cancelled", "provider request cancelled", fields)
+		return
+	}
+	debuglog.ErrorCtx(ctx, "provider", event, err, fields)
 }
 
 func providerLogFields(provider Provider, req Request, extra map[string]any) map[string]any {

@@ -58,14 +58,14 @@ func (r Runner) learnFromRun(finalText string, state *runState) {
 		evidence[index] = compact(evidence[index], 500)
 	}
 	now := time.Now().UTC()
-	text := goal + "\n" + finalText + "\n" + strings.Join(sortedKeys(state.changedPaths), " ")
+	text := goal + "\n" + finalText + "\n" + strings.Join(changedArtifactPaths(state), " ")
 	vector, _ := embedText(context.Background(), r.embedder(), text)
 	candidate := memoryEpisode{
 		CompletedAt:    now,
 		LastReinforced: now,
 		Goal:           compact(goal, 500),
 		Summary:        compact(finalText, 900),
-		ChangedPaths:   sortedKeys(state.changedPaths),
+		ChangedPaths:   changedArtifactPaths(state),
 		ToolSequence:   compactToolSequence(state.toolSequence, 12),
 		Evidence:       evidence,
 		Embedding:      vector,

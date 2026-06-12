@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/ephemera-ai/ephemera/internal/config"
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 	"github.com/ephemera-ai/ephemera/internal/history"
 	"github.com/ephemera-ai/ephemera/internal/llm"
 	"github.com/ephemera-ai/ephemera/internal/tools"
@@ -33,10 +34,27 @@ func (r Runner) executeAction(ctx context.Context, state *runState, call tools.C
 	}
 	normalized, err := r.normalizeToolCall(call)
 	if err != nil {
-		if state.callCounts[originalFingerprint] > loopLimit {
-			return tools.Result{Tool: call.Name, OK: false, Error: "doom-loop guard: identical invalid tool call repeated; fix the tool name or arguments before retrying"}, nil
+		hint := tools.RepairHint(call, err)
+		message := err.Error()
+		if hint != "" {
+			message += ". Recovery: " + hint
 		}
-		return tools.Result{Tool: call.Name, OK: false, Error: err.Error(), Metadata: map[string]any{"risk": string(r.toolRisk(call.Name)), "error_class": string(errorInvalid)}}, nil
+		if state.callCounts[originalFingerprint] > loopLimit {
+			message = "doom-loop guard: identical invalid tool call repeated; change the tool or arguments before retrying. Last validation error: " + message
+		}
+		logCtx := debuglog.WithScope(ctx, debuglog.Scope{Tool: call.Name, Workspace: r.Tools.WorkspaceRoot, Iteration: iteration})
+		failed := false
+		args := tools.AuditArguments(call.Arguments)
+		_ = debuglog.AppendTool(logCtx, debuglog.ToolRecord{
+			Stage: "normalization_failed", Tool: call.Name, Fingerprint: originalFingerprint, Risk: string(r.toolRisk(call.Name)),
+			Arguments: args, OK: &failed, Error: message, Metadata: map[string]any{"repair_hint": hint},
+		})
+		debuglog.FailureCtx(logCtx, "agent", "tool call rejected before execution", message, map[string]any{
+			"fingerprint": originalFingerprint, "arguments": args, "repair_hint": hint,
+		})
+		return tools.Result{Tool: call.Name, OK: false, Error: message, Metadata: map[string]any{
+			"risk": string(r.toolRisk(call.Name)), "error_class": string(errorInvalid), "repair_hint": hint, "debug_logged": true,
+		}}, nil
 	}
 	call = normalized
 	fingerprint := toolFingerprint(call)
@@ -347,20 +365,18 @@ func (s *runState) observe(call tools.Call, result tools.Result) {
 		if result.OK && path != "" {
 			s.inspectedPaths[normalizePath(path)] = true
 		}
+	case "create_directory":
+		if result.OK && metadataBool(result.Metadata, "changed") {
+			s.recordChangedArtifact(path, true)
+		}
 	case "apply_patch", "replace_in_file":
 		if result.OK {
-			s.changed = true
-			s.verified = false
-			if path != "" {
-				s.changedPaths[normalizePath(path)] = true
-			}
+			s.recordChangedArtifact(path, false)
 		}
 	case "apply_multi_patch":
 		if result.OK {
-			s.changed = true
-			s.verified = false
 			for _, changedPath := range metadataStringSlice(result.Metadata, "paths") {
-				s.changedPaths[normalizePath(changedPath)] = true
+				s.recordChangedArtifact(changedPath, false)
 			}
 		}
 	case "run_formatter", "git_merge", "git_checkout":

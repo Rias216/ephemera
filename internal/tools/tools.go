@@ -278,6 +278,7 @@ func (r Registry) Normalize(call Call) (Call, error) {
 		"git_checkout":      {"branch": "name"},
 		"git_commit":        {"msg": "message", "files": "paths"},
 		"git_merge":         {"name": "branch"},
+		"create_directory":  {"directory": "path", "dir": "path", "folder": "path", "name": "path"},
 		"apply_patch":       {"file": "path", "filename": "path", "text": "content"},
 		"apply_multi_patch": {"files": "patches", "changes": "patches"},
 		"replace_in_file":   {"file": "path", "filename": "path", "old_text": "old", "new_text": "new", "replace_all": "all"},
@@ -343,6 +344,29 @@ func (r Registry) Normalize(call Call) (Call, error) {
 		}
 	}
 	return call, r.Validate(call)
+}
+
+// RepairHint gives the model one deterministic correction after malformed tool
+// arguments without guessing or executing a different write on its behalf.
+func RepairHint(call Call, err error) string {
+	if err == nil {
+		return ""
+	}
+	switch call.Name {
+	case "apply_patch":
+		if strings.TrimSpace(argString(call, "content")) == "" {
+			return `apply_patch writes a file and requires both "path" and complete "content"; to create only a folder, call create_directory with "path" instead`
+		}
+	case "create_directory":
+		if strings.TrimSpace(argString(call, "path")) == "" {
+			return `resend create_directory with a non-empty "path"`
+		}
+	case "shell":
+		if strings.TrimSpace(argString(call, "command")) == "" {
+			return `resend shell with a non-empty "command"; use create_directory for folders and apply_patch for files`
+		}
+	}
+	return "resend the same tool once with every required argument from its schema; do not repeat the unchanged invalid call"
 }
 
 // Validate checks the shape of a tool call before execution.
@@ -445,6 +469,29 @@ func (r Registry) Preview(call Call) Result {
 func (r Registry) preview(call Call) Result {
 	result := Result{Tool: call.Name, OK: true, Metadata: map[string]any{"dry_run": true, "changed": false}}
 	switch call.Name {
+	case "create_directory":
+		path, err := r.safePath(argString(call, "path"))
+		if err != nil {
+			return fail(call.Name, err.Error())
+		}
+		display := r.displayPath(path)
+		info, statErr := os.Stat(path)
+		switch {
+		case statErr == nil && !info.IsDir():
+			return fail(call.Name, "path already exists and is not a directory: "+display)
+		case statErr == nil:
+			result.Output = "DRY RUN: directory already exists: " + display
+			result.Metadata["changed"] = false
+			result.Metadata["existed"] = true
+		case os.IsNotExist(statErr):
+			result.Output = "DRY RUN: would create directory " + display
+			result.Metadata["changed"] = true
+			result.Metadata["existed"] = false
+		default:
+			return fail(call.Name, statErr.Error())
+		}
+		result.Metadata["path"] = display
+		result.Metadata["directory"] = true
 	case "apply_patch":
 		path, err := r.safePath(argString(call, "path"))
 		if err != nil {
@@ -727,6 +774,31 @@ func (r Registry) searchStream(call Call, emit func(string)) Result {
 	return result
 }
 
+func (r Registry) createDirectory(call Call) Result {
+	path, err := r.safePath(argString(call, "path"))
+	if err != nil {
+		return fail(call.Name, err.Error())
+	}
+	display := r.displayPath(path)
+	info, statErr := os.Stat(path)
+	switch {
+	case statErr == nil && !info.IsDir():
+		return fail(call.Name, "path already exists and is not a directory: "+display)
+	case statErr == nil:
+		result := ok(call.Name, "directory already exists: "+display)
+		result.Metadata = map[string]any{"path": display, "changed": false, "directory": true, "existed": true}
+		return result
+	case !os.IsNotExist(statErr):
+		return fail(call.Name, statErr.Error())
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fail(call.Name, err.Error())
+	}
+	result := ok(call.Name, "created directory "+display)
+	result.Metadata = map[string]any{"path": display, "changed": true, "directory": true, "existed": false}
+	return result
+}
+
 func (r Registry) applyPatch(call Call) Result {
 	path, err := r.safePath(argString(call, "path"))
 	if err != nil {
@@ -782,6 +854,46 @@ func (r Registry) replaceInFile(call Call) Result {
 	result := ok(call.Name, fmt.Sprintf("updated %s (%d replacement(s))", display, count))
 	result.Metadata = map[string]any{"path": display, "changed": true, "replacements": count}
 	return result
+}
+
+func (r Registry) runVerificationCommand(ctx context.Context, call Call, emit func(string)) Result {
+	command := strings.TrimSpace(argString(call, "command"))
+	configured := strings.TrimSpace(r.AutoTestCommand)
+	if command == "" {
+		command = configured
+	}
+	if command == "" {
+		return fail(call.Name, "verification command is not configured")
+	}
+	if command != configured && (!recognizedVerificationCommand(command) || unsafeVerificationComposition(command)) {
+		return fail(call.Name, "verification override is not a recognized standalone test command")
+	}
+	result := r.runCommand(ctx, command, emit)
+	if result.Metadata == nil {
+		result.Metadata = map[string]any{}
+	}
+	result.Metadata["command"] = command
+	result.Metadata["verification"] = true
+	return result
+}
+
+func unsafeVerificationComposition(command string) bool {
+	return strings.ContainsAny(command, "\r\n;&|><`\x00") || strings.Contains(command, "$(")
+}
+
+func recognizedVerificationCommand(command string) bool {
+	lower := strings.ToLower(strings.TrimSpace(command))
+	prefixes := []string{
+		"go test", "npm test", "npm run test", "pnpm test", "pnpm run test", "yarn test", "yarn run test",
+		"cargo test", "pytest", "python -m pytest", "python3 -m pytest", "dotnet test", "mvn test", "mvnw test",
+		"gradle test", "gradlew test",
+	}
+	for _, prefix := range prefixes {
+		if lower == prefix || strings.HasPrefix(lower, prefix+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 func (r Registry) runCommand(ctx context.Context, command string, emit func(string)) Result {

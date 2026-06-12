@@ -89,7 +89,7 @@ Use CLEAN when no concrete issue exists. Do not request tools, do not restate th
 		stage,
 		compact(state.lastPlan, 1200),
 		compact(strings.Join(tailStrings(state.observations, 6), "\n"), 2600),
-		strings.Join(sortedKeys(state.changedPaths), ", "),
+		strings.Join(changedArtifactPaths(state), ", "),
 		state.verified,
 		compact(proposedFinal, 1200),
 	)

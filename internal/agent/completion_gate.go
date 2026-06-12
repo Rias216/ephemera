@@ -38,7 +38,7 @@ func (s *runState) completionReport() CompletionGateReport {
 	}
 	report := CompletionGateReport{Passed: s.verified, CheckedAt: time.Now()}
 	if s.contract != nil {
-		report = s.contract.Evaluate(s.changedPaths)
+		report = s.contract.EvaluateArtifacts(s.changedPaths, s.changedDirectories)
 		if !s.verified {
 			report.Passed = false
 			report.Blockers = appendUnique(report.Blockers, "verification has not passed")

@@ -107,6 +107,38 @@ func classifyProviderError(provider llm.Provider, err error) providerErrorClass 
 	}
 }
 
+func providerRetryDelay(provider llm.Provider, err error, configured time.Duration, attempt int) (time.Duration, string) {
+	if configured < 50*time.Millisecond {
+		configured = 350 * time.Millisecond
+	}
+	delay := configured * time.Duration(1<<attempt)
+	source := "configured"
+	taxonomy := llm.ClassifyError(provider, err)
+	if taxonomy.Backoff > delay {
+		delay = taxonomy.Backoff
+		source = "provider"
+	}
+	if taxonomy.Class == "rate_limit" && delay < 2*time.Second {
+		delay = 2 * time.Second
+		source = "rate_limit_floor"
+	}
+	if delay > 60*time.Second {
+		delay = 60 * time.Second
+	}
+	return delay, source
+}
+
+func providerRetryExhausted(provider llm.Provider, class providerErrorClass, attempts int, err error) error {
+	if class != providerErrorRateLimit {
+		return err
+	}
+	name := "provider"
+	if provider != nil && strings.TrimSpace(provider.Name()) != "" {
+		name = provider.Name()
+	}
+	return fmt.Errorf("%s rate limit remained active after %d attempt(s); wait before retrying or switch providers: %w", name, attempts, err)
+}
+
 func compactProviderRequest(req llm.Request) llm.Request {
 	if len(req.Messages) <= 2 {
 		return req
@@ -267,8 +299,11 @@ func (r Runner) generateToolDecisionWithRetry(
 			attempt--
 			continue
 		}
-		if attempt >= maxRetries || class == providerErrorPermanent || ctx.Err() != nil {
-			return llm.ToolDecision{}, err
+		if ctx.Err() != nil {
+			return llm.ToolDecision{}, ctx.Err()
+		}
+		if attempt >= maxRetries || class == providerErrorPermanent {
+			return llm.ToolDecision{}, providerRetryExhausted(r.Provider, class, attempt+1, err)
 		}
 		// Ordinary transient retries remain conservative after visible text. The
 		// tool-protocol fallback above is the sole exception because it is parsed
@@ -283,17 +318,28 @@ func (r Runner) generateToolDecisionWithRetry(
 			}
 			current = compacted
 		}
+		delay, delaySource := providerRetryDelay(r.Provider, err, backoff, attempt)
 		agentmetrics.Default().Inc("agent_provider_retries_total")
 		if onRetry != nil {
 			onRetry(attempt+1, class, err)
 		}
 		debuglog.WarningCtx(ctx, "agent", "provider retry", err.Error(), map[string]any{
-			"provider": r.Provider.Name(),
-			"model":    current.Model,
-			"attempt":  attempt + 1,
-			"class":    string(class),
+			"provider":        r.Provider.Name(),
+			"model":           current.Model,
+			"attempt":         attempt + 1,
+			"class":           string(class),
+			"backoff_ms":      delay.Milliseconds(),
+			"backoff_source":  delaySource,
+			"next_attempt_at": time.Now().Add(delay).UTC().Format(time.RFC3339Nano),
 		})
-		timer := time.NewTimer(backoff * time.Duration(1<<attempt))
+		if onDelta != nil {
+			label := "Provider unavailable"
+			if class == providerErrorRateLimit {
+				label = "Provider rate limited"
+			}
+			_ = onDelta(llm.Delta{Kind: llm.DeltaActivity, Text: fmt.Sprintf("%s; retrying in %s…", label, delay.Round(100*time.Millisecond))})
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

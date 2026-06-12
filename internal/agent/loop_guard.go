@@ -94,7 +94,7 @@ func progressSnapshot(state *runState) ProgressSnapshot {
 		PlanDigest:        digestPlan(state.plan),
 		EvidenceDigest:    digestUniqueEvidence(state.observations),
 		InspectedPaths:    len(state.inspectedPaths),
-		ChangedPaths:      len(state.changedPaths),
+		ChangedPaths:      len(state.changedPaths) + len(state.changedDirectories),
 		Verified:          state.verified,
 	}
 }

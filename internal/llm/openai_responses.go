@@ -61,7 +61,7 @@ func (p *OpenAI) generateResponsesStream(ctx context.Context, req Request, specs
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(response.Body, 32<<10))
-		return ToolDecision{}, fmt.Errorf("OpenAI Responses request failed: %s: %s", response.Status, strings.TrimSpace(string(data)))
+		return ToolDecision{}, newHTTPStatusError(p.Name(), "Responses request", response, data)
 	}
 
 	var text strings.Builder

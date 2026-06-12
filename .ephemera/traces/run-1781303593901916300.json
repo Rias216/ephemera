@@ -1,0 +1,767 @@
+{
+  "version": 1,
+  "id": "run-1781303593901916300",
+  "started_at": "2026-06-13T00:33:13.9019163+02:00",
+  "duration": 8957070600,
+  "provider": "nvidia",
+  "model": "minimaxai/minimax-m3",
+  "mode": "normal",
+  "verified": false,
+  "usage": {
+    "input_tokens": 7514,
+    "output_tokens": 24,
+    "tool_calls": 2
+  },
+  "reasoning": [
+    {
+      "iteration": 1,
+      "goal": "Execute validated tool calls and feed the observed evidence back into the agent loop.",
+      "current_state": "Creating a new folder in the workspace root.",
+      "approach": [
+        "Run requested tool call(s)",
+        "Observe results",
+        "Continue or finalize with evidence"
+      ],
+      "tool_rationale": "Ephemera recovered the requested capability through its provider-neutral tool gateway.",
+      "verification": "Validate each tool call locally, apply the configured approval policy, and observe the normalized result.",
+      "next_step": "Run the requested tool calls."
+    },
+    {
+      "iteration": 2,
+      "goal": "Execute validated tool calls and feed the observed evidence back into the agent loop.",
+      "current_state": "Creating a new empty folder in the workspace root.",
+      "approach": [
+        "Run requested tool call(s)",
+        "Observe results",
+        "Continue or finalize with evidence"
+      ],
+      "tool_rationale": "Ephemera recovered the requested capability through its provider-neutral tool gateway.",
+      "verification": "Validate each tool call locally, apply the configured approval policy, and observe the normalized result.",
+      "next_step": "Run the requested tool calls."
+    }
+  ],
+  "events": [
+    {
+      "id": "evt-1781303594015242800",
+      "type": "acceptance_contract",
+      "title": "Definition of done",
+      "content": "Goal: Create a new folder\nRequired checks:\n- [ ] Every changed file can be read back after the edit.\n- [ ] The final workspace diff or status is inspected before completion.\n- [ ] Verification command passes: go test ./... (`go test ./...`)\nForbidden changes: .git, .env, .env.*, .ephemera/secrets",
+      "status": "active",
+      "metadata": {
+        "contract": {
+          "goal": "Create a new folder",
+          "required_behaviors": [
+            "Create a new folder"
+          ],
+          "required_checks": [
+            {
+              "id": "changed-files-readable",
+              "description": "Every changed file can be read back after the edit.",
+              "required": true,
+              "status": "pending"
+            },
+            {
+              "id": "diff-reviewed",
+              "description": "The final workspace diff or status is inspected before completion.",
+              "required": true,
+              "status": "pending"
+            },
+            {
+              "id": "tests-1",
+              "description": "Verification command passes: go test ./...",
+              "command": "go test ./...",
+              "required": true,
+              "status": "pending"
+            }
+          ],
+          "forbidden_changes": [
+            ".git",
+            ".env",
+            ".env.*",
+            ".ephemera/secrets"
+          ],
+          "evidence": [
+            {
+              "kind": "tool_result",
+              "summary": "apply_patch requires \"content\"",
+              "tool": "apply_patch",
+              "path": "new_folder/.gitkeep",
+              "created_at": "2026-06-13T00:33:15.7642415+02:00"
+            },
+            {
+              "kind": "tool_result",
+              "summary": "directory already exists: new-folder",
+              "tool": "create_directory",
+              "path": "new-folder",
+              "created_at": "2026-06-13T00:33:19.9978735+02:00"
+            }
+          ],
+          "created_at": "2026-06-13T00:33:13.9019163+02:00",
+          "source": "discovered"
+        },
+        "iteration": 0,
+        "run_id": "run-1781303593901916300",
+        "source": "discovered"
+      },
+      "created_at": "2026-06-13T00:33:14.0152428+02:00"
+    },
+    {
+      "id": "evt-1781303595602837500",
+      "type": "plan_update",
+      "title": "Plan",
+      "content": "Goal: Execute validated tool calls and feed the observed evidence back into the agent loop.\n  [ ] Implementation\n  └─ [ ] 1. Run requested tool call(s)\n  [ ] Investigation\n  ├─ [ ] 2. Observe results\n  └─ [ ] 3. Continue or finalize with evidence",
+      "status": "active",
+      "metadata": {
+        "iteration": 1,
+        "plan": {
+          "goal": "Execute validated tool calls and feed the observed evidence back into the agent loop.",
+          "steps": [
+            {
+              "id": 1,
+              "description": "Run requested tool call(s)",
+              "phase": "Investigation",
+              "status": "done",
+              "tools_used": [
+                "apply_patch",
+                "create_directory"
+              ],
+              "evidence": [
+                "apply_patch requires \"content\"",
+                "directory already exists: new-folder"
+              ]
+            },
+            {
+              "id": 2,
+              "description": "Observe results",
+              "phase": "Investigation",
+              "status": "pending"
+            },
+            {
+              "id": 3,
+              "description": "Continue or finalize with evidence",
+              "phase": "Investigation",
+              "status": "pending"
+            }
+          ],
+          "tree": [
+            {
+              "id": "phase-investigation",
+              "description": "Investigation",
+              "status": "pending",
+              "children": [
+                {
+                  "id": "task-1",
+                  "description": "Run requested tool call(s)",
+                  "status": "done",
+                  "tools_used": [
+                    "apply_patch",
+                    "create_directory"
+                  ],
+                  "evidence": [
+                    "apply_patch requires \"content\"",
+                    "directory already exists: new-folder"
+                  ]
+                },
+                {
+                  "id": "task-2",
+                  "description": "Observe results",
+                  "status": "pending"
+                },
+                {
+                  "id": "task-3",
+                  "description": "Continue or finalize with evidence",
+                  "status": "pending"
+                }
+              ]
+            }
+          ],
+          "completed": {
+            "1": true
+          },
+          "evidence": {
+            "1": [
+              "apply_patch requires \"content\"",
+              "directory already exists: new-folder"
+            ]
+          },
+          "revised_at": "2026-06-13T00:33:19.9978735+02:00"
+        },
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:15.6028375+02:00"
+    },
+    {
+      "id": "evt-1781303595602837500",
+      "type": "reasoning_trace",
+      "title": "Beneath the Surface",
+      "content": "**Goal**\nExecute validated tool calls and feed the observed evidence back into the agent loop.\n\n**Current state**\nCreating a new folder in the workspace root.\n\n**Approach**\n1. Run requested tool call(s)\n2. Observe results\n3. Continue or finalize with evidence\n\n**Tool rationale**\nEphemera recovered the requested capability through its provider-neutral tool gateway.\n\n**Verification**\nValidate each tool call locally, apply the configured approval policy, and observe the normalized result.\n\n**Next step**\nRun the requested tool calls.",
+      "status": "done",
+      "metadata": {
+        "iteration": 1,
+        "run_id": "run-1781303593901916300",
+        "trace": {
+          "goal": "Execute validated tool calls and feed the observed evidence back into the agent loop.",
+          "current_state": "Creating a new folder in the workspace root.",
+          "approach": [
+            "Run requested tool call(s)",
+            "Observe results",
+            "Continue or finalize with evidence"
+          ],
+          "tool_rationale": "Ephemera recovered the requested capability through its provider-neutral tool gateway.",
+          "verification": "Validate each tool call locally, apply the configured approval policy, and observe the normalized result.",
+          "next_step": "Run the requested tool calls."
+        }
+      },
+      "created_at": "2026-06-13T00:33:15.6028375+02:00"
+    },
+    {
+      "id": "evt-1781303595602837500",
+      "type": "plan_update",
+      "title": "Plan",
+      "content": "Goal: Execute validated tool calls and feed the observed evidence back into the agent loop.\n  [\u003e] Implementation\n  └─ [\u003e] 1. Run requested tool call(s) (apply_patch)\n  [ ] Investigation\n  ├─ [ ] 2. Observe results\n  └─ [ ] 3. Continue or finalize with evidence",
+      "status": "active",
+      "metadata": {
+        "iteration": 1,
+        "plan": {
+          "goal": "Execute validated tool calls and feed the observed evidence back into the agent loop.",
+          "steps": [
+            {
+              "id": 1,
+              "description": "Run requested tool call(s)",
+              "phase": "Investigation",
+              "status": "done",
+              "tools_used": [
+                "apply_patch",
+                "create_directory"
+              ],
+              "evidence": [
+                "apply_patch requires \"content\"",
+                "directory already exists: new-folder"
+              ]
+            },
+            {
+              "id": 2,
+              "description": "Observe results",
+              "phase": "Investigation",
+              "status": "pending"
+            },
+            {
+              "id": 3,
+              "description": "Continue or finalize with evidence",
+              "phase": "Investigation",
+              "status": "pending"
+            }
+          ],
+          "tree": [
+            {
+              "id": "phase-investigation",
+              "description": "Investigation",
+              "status": "pending",
+              "children": [
+                {
+                  "id": "task-1",
+                  "description": "Run requested tool call(s)",
+                  "status": "done",
+                  "tools_used": [
+                    "apply_patch",
+                    "create_directory"
+                  ],
+                  "evidence": [
+                    "apply_patch requires \"content\"",
+                    "directory already exists: new-folder"
+                  ]
+                },
+                {
+                  "id": "task-2",
+                  "description": "Observe results",
+                  "status": "pending"
+                },
+                {
+                  "id": "task-3",
+                  "description": "Continue or finalize with evidence",
+                  "status": "pending"
+                }
+              ]
+            }
+          ],
+          "completed": {
+            "1": true
+          },
+          "evidence": {
+            "1": [
+              "apply_patch requires \"content\"",
+              "directory already exists: new-folder"
+            ]
+          },
+          "revised_at": "2026-06-13T00:33:19.9978735+02:00"
+        },
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:15.6028375+02:00"
+    },
+    {
+      "id": "evt-1781303595602837500",
+      "type": "tool_call",
+      "title": "apply_patch",
+      "content": "purpose: Validated tool call\nexpected: Normalized local tool result\n{\n  \"content\": \"\",\n  \"path\": \"new_folder/.gitkeep\"\n}",
+      "tool": "apply_patch",
+      "status": "error",
+      "metadata": {
+        "call_fingerprint": "apply_patch:4860b9e63b2b9a2fe6fc93c5589a6595c45b0676f3b411f9ebe43e3a39f2cc24",
+        "iteration": 1,
+        "parallel": false,
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:15.6028375+02:00"
+    },
+    {
+      "id": "evt-1781303595764241500",
+      "type": "tool_result",
+      "title": "apply_patch",
+      "content": "apply_patch requires \"content\"",
+      "tool": "apply_patch",
+      "status": "error",
+      "metadata": {
+        "call_fingerprint": "apply_patch:4860b9e63b2b9a2fe6fc93c5589a6595c45b0676f3b411f9ebe43e3a39f2cc24",
+        "error_class": "invalid",
+        "iteration": 1,
+        "risk": "write",
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:15.7642415+02:00"
+    },
+    {
+      "id": "evt-1781303595764241500",
+      "type": "plan_update",
+      "title": "Plan",
+      "content": "Goal: Execute validated tool calls and feed the observed evidence back into the agent loop.\n  [!] Implementation\n  └─ [!] 1. Run requested tool call(s) (apply_patch)\n  [ ] Investigation\n  ├─ [ ] 2. Observe results\n  └─ [ ] 3. Continue or finalize with evidence",
+      "status": "revised",
+      "metadata": {
+        "iteration": 1,
+        "plan": {
+          "goal": "Execute validated tool calls and feed the observed evidence back into the agent loop.",
+          "steps": [
+            {
+              "id": 1,
+              "description": "Run requested tool call(s)",
+              "phase": "Investigation",
+              "status": "done",
+              "tools_used": [
+                "apply_patch",
+                "create_directory"
+              ],
+              "evidence": [
+                "apply_patch requires \"content\"",
+                "directory already exists: new-folder"
+              ]
+            },
+            {
+              "id": 2,
+              "description": "Observe results",
+              "phase": "Investigation",
+              "status": "pending"
+            },
+            {
+              "id": 3,
+              "description": "Continue or finalize with evidence",
+              "phase": "Investigation",
+              "status": "pending"
+            }
+          ],
+          "tree": [
+            {
+              "id": "phase-investigation",
+              "description": "Investigation",
+              "status": "pending",
+              "children": [
+                {
+                  "id": "task-1",
+                  "description": "Run requested tool call(s)",
+                  "status": "done",
+                  "tools_used": [
+                    "apply_patch",
+                    "create_directory"
+                  ],
+                  "evidence": [
+                    "apply_patch requires \"content\"",
+                    "directory already exists: new-folder"
+                  ]
+                },
+                {
+                  "id": "task-2",
+                  "description": "Observe results",
+                  "status": "pending"
+                },
+                {
+                  "id": "task-3",
+                  "description": "Continue or finalize with evidence",
+                  "status": "pending"
+                }
+              ]
+            }
+          ],
+          "completed": {
+            "1": true
+          },
+          "evidence": {
+            "1": [
+              "apply_patch requires \"content\"",
+              "directory already exists: new-folder"
+            ]
+          },
+          "revised_at": "2026-06-13T00:33:19.9978735+02:00"
+        },
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:15.7642415+02:00"
+    },
+    {
+      "id": "evt-1781303595764241500",
+      "type": "reflection",
+      "title": "Tool outcome mismatch",
+      "content": "Expected outcomes did not match tool evidence. Revise assumptions and choose a materially different next step:\n- apply_patch failed instead of producing Normalized local tool result: apply_patch requires \"content\"",
+      "status": "replan",
+      "metadata": {
+        "iteration": 1,
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:15.7642415+02:00"
+    },
+    {
+      "id": "evt-1781303599509970300",
+      "type": "plan_update",
+      "title": "Plan",
+      "content": "Goal: Execute validated tool calls and feed the observed evidence back into the agent loop.\n  [!] Implementation\n  └─ [!] 1. Run requested tool call(s) (apply_patch)\n  [ ] Investigation\n  ├─ [ ] 2. Observe results\n  └─ [ ] 3. Continue or finalize with evidence",
+      "status": "active",
+      "metadata": {
+        "iteration": 2,
+        "plan": {
+          "goal": "Execute validated tool calls and feed the observed evidence back into the agent loop.",
+          "steps": [
+            {
+              "id": 1,
+              "description": "Run requested tool call(s)",
+              "phase": "Investigation",
+              "status": "done",
+              "tools_used": [
+                "apply_patch",
+                "create_directory"
+              ],
+              "evidence": [
+                "apply_patch requires \"content\"",
+                "directory already exists: new-folder"
+              ]
+            },
+            {
+              "id": 2,
+              "description": "Observe results",
+              "phase": "Investigation",
+              "status": "pending"
+            },
+            {
+              "id": 3,
+              "description": "Continue or finalize with evidence",
+              "phase": "Investigation",
+              "status": "pending"
+            }
+          ],
+          "tree": [
+            {
+              "id": "phase-investigation",
+              "description": "Investigation",
+              "status": "pending",
+              "children": [
+                {
+                  "id": "task-1",
+                  "description": "Run requested tool call(s)",
+                  "status": "done",
+                  "tools_used": [
+                    "apply_patch",
+                    "create_directory"
+                  ],
+                  "evidence": [
+                    "apply_patch requires \"content\"",
+                    "directory already exists: new-folder"
+                  ]
+                },
+                {
+                  "id": "task-2",
+                  "description": "Observe results",
+                  "status": "pending"
+                },
+                {
+                  "id": "task-3",
+                  "description": "Continue or finalize with evidence",
+                  "status": "pending"
+                }
+              ]
+            }
+          ],
+          "completed": {
+            "1": true
+          },
+          "evidence": {
+            "1": [
+              "apply_patch requires \"content\"",
+              "directory already exists: new-folder"
+            ]
+          },
+          "revised_at": "2026-06-13T00:33:19.9978735+02:00"
+        },
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:19.5099703+02:00"
+    },
+    {
+      "id": "evt-1781303599509970300",
+      "type": "reasoning_trace",
+      "title": "Beneath the Surface",
+      "content": "**Goal**\nExecute validated tool calls and feed the observed evidence back into the agent loop.\n\n**Current state**\nCreating a new empty folder in the workspace root.\n\n**Approach**\n1. Run requested tool call(s)\n2. Observe results\n3. Continue or finalize with evidence\n\n**Tool rationale**\nEphemera recovered the requested capability through its provider-neutral tool gateway.\n\n**Verification**\nValidate each tool call locally, apply the configured approval policy, and observe the normalized result.\n\n**Next step**\nRun the requested tool calls.",
+      "status": "done",
+      "metadata": {
+        "iteration": 2,
+        "run_id": "run-1781303593901916300",
+        "trace": {
+          "goal": "Execute validated tool calls and feed the observed evidence back into the agent loop.",
+          "current_state": "Creating a new empty folder in the workspace root.",
+          "approach": [
+            "Run requested tool call(s)",
+            "Observe results",
+            "Continue or finalize with evidence"
+          ],
+          "tool_rationale": "Ephemera recovered the requested capability through its provider-neutral tool gateway.",
+          "verification": "Validate each tool call locally, apply the configured approval policy, and observe the normalized result.",
+          "next_step": "Run the requested tool calls."
+        }
+      },
+      "created_at": "2026-06-13T00:33:19.5099703+02:00"
+    },
+    {
+      "id": "evt-1781303599509970300",
+      "type": "plan_update",
+      "title": "Plan",
+      "content": "Goal: Execute validated tool calls and feed the observed evidence back into the agent loop.\n  [\u003e] Investigation\n  ├─ [\u003e] 1. Run requested tool call(s) (apply_patch, create_directory)\n  ├─ [ ] 2. Observe results\n  └─ [ ] 3. Continue or finalize with evidence",
+      "status": "active",
+      "metadata": {
+        "iteration": 2,
+        "plan": {
+          "goal": "Execute validated tool calls and feed the observed evidence back into the agent loop.",
+          "steps": [
+            {
+              "id": 1,
+              "description": "Run requested tool call(s)",
+              "phase": "Investigation",
+              "status": "done",
+              "tools_used": [
+                "apply_patch",
+                "create_directory"
+              ],
+              "evidence": [
+                "apply_patch requires \"content\"",
+                "directory already exists: new-folder"
+              ]
+            },
+            {
+              "id": 2,
+              "description": "Observe results",
+              "phase": "Investigation",
+              "status": "pending"
+            },
+            {
+              "id": 3,
+              "description": "Continue or finalize with evidence",
+              "phase": "Investigation",
+              "status": "pending"
+            }
+          ],
+          "tree": [
+            {
+              "id": "phase-investigation",
+              "description": "Investigation",
+              "status": "pending",
+              "children": [
+                {
+                  "id": "task-1",
+                  "description": "Run requested tool call(s)",
+                  "status": "done",
+                  "tools_used": [
+                    "apply_patch",
+                    "create_directory"
+                  ],
+                  "evidence": [
+                    "apply_patch requires \"content\"",
+                    "directory already exists: new-folder"
+                  ]
+                },
+                {
+                  "id": "task-2",
+                  "description": "Observe results",
+                  "status": "pending"
+                },
+                {
+                  "id": "task-3",
+                  "description": "Continue or finalize with evidence",
+                  "status": "pending"
+                }
+              ]
+            }
+          ],
+          "completed": {
+            "1": true
+          },
+          "evidence": {
+            "1": [
+              "apply_patch requires \"content\"",
+              "directory already exists: new-folder"
+            ]
+          },
+          "revised_at": "2026-06-13T00:33:19.9978735+02:00"
+        },
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:19.5099703+02:00"
+    },
+    {
+      "id": "evt-1781303599509970300",
+      "type": "tool_call",
+      "title": "create_directory",
+      "content": "purpose: Validated tool call\nexpected: Normalized local tool result\n{\n  \"path\": \"new-folder\"\n}",
+      "tool": "create_directory",
+      "status": "done",
+      "metadata": {
+        "call_fingerprint": "create_directory:e6077448369b368ebf6e641a72a454ada08f3b4c0223a4568632dcc78d45aa22",
+        "iteration": 2,
+        "parallel": false,
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:19.5099703+02:00"
+    },
+    {
+      "id": "evt-1781303599997873500",
+      "type": "tool_result",
+      "title": "create_directory",
+      "content": "directory already exists: new-folder",
+      "tool": "create_directory",
+      "status": "done",
+      "metadata": {
+        "attempt": 1,
+        "attempts_allowed": 1,
+        "call_fingerprint": "create_directory:e6077448369b368ebf6e641a72a454ada08f3b4c0223a4568632dcc78d45aa22",
+        "changed": false,
+        "directory": true,
+        "duration_ms": 57,
+        "error_class": "none",
+        "error_code": "ok",
+        "existed": true,
+        "fingerprint": "create_directory:e6077448369b368ebf6e641a72a454ada08f3b4c0223a4568632dcc78d45aa22",
+        "iteration": 2,
+        "ok": true,
+        "path": "new-folder",
+        "recovered_after_retry": false,
+        "retryable": false,
+        "risk": "write",
+        "run_id": "run-1781303593901916300",
+        "semantic_cache_key": "create_directory:e6077448369b368ebf6e641a72a454ada08f3b4c0223a4568632dcc78d45aa22"
+      },
+      "created_at": "2026-06-13T00:33:19.9978735+02:00"
+    },
+    {
+      "id": "evt-1781303599997873500",
+      "type": "plan_update",
+      "title": "Plan",
+      "content": "Goal: Execute validated tool calls and feed the observed evidence back into the agent loop.\n  [ ] Investigation\n  ├─ [x] 1. Run requested tool call(s) (apply_patch, create_directory)\n  ├─ [ ] 2. Observe results\n  └─ [ ] 3. Continue or finalize with evidence",
+      "status": "active",
+      "metadata": {
+        "iteration": 2,
+        "plan": {
+          "goal": "Execute validated tool calls and feed the observed evidence back into the agent loop.",
+          "steps": [
+            {
+              "id": 1,
+              "description": "Run requested tool call(s)",
+              "phase": "Investigation",
+              "status": "done",
+              "tools_used": [
+                "apply_patch",
+                "create_directory"
+              ],
+              "evidence": [
+                "apply_patch requires \"content\"",
+                "directory already exists: new-folder"
+              ]
+            },
+            {
+              "id": 2,
+              "description": "Observe results",
+              "phase": "Investigation",
+              "status": "pending"
+            },
+            {
+              "id": 3,
+              "description": "Continue or finalize with evidence",
+              "phase": "Investigation",
+              "status": "pending"
+            }
+          ],
+          "tree": [
+            {
+              "id": "phase-investigation",
+              "description": "Investigation",
+              "status": "pending",
+              "children": [
+                {
+                  "id": "task-1",
+                  "description": "Run requested tool call(s)",
+                  "status": "done",
+                  "tools_used": [
+                    "apply_patch",
+                    "create_directory"
+                  ],
+                  "evidence": [
+                    "apply_patch requires \"content\"",
+                    "directory already exists: new-folder"
+                  ]
+                },
+                {
+                  "id": "task-2",
+                  "description": "Observe results",
+                  "status": "pending"
+                },
+                {
+                  "id": "task-3",
+                  "description": "Continue or finalize with evidence",
+                  "status": "pending"
+                }
+              ]
+            }
+          ],
+          "completed": {
+            "1": true
+          },
+          "evidence": {
+            "1": [
+              "apply_patch requires \"content\"",
+              "directory already exists: new-folder"
+            ]
+          },
+          "revised_at": "2026-06-13T00:33:19.9978735+02:00"
+        },
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:19.9978735+02:00"
+    },
+    {
+      "id": "evt-1781303602750656100",
+      "type": "tool_result",
+      "title": "Agent request failed",
+      "content": "nvidia streaming request failed: 429 Too Many Requests: {\"status\":429,\"title\":\"Too Many Requests\"}",
+      "status": "error",
+      "metadata": {
+        "iteration": 3,
+        "run_id": "run-1781303593901916300"
+      },
+      "created_at": "2026-06-13T00:33:22.7506561+02:00"
+    }
+  ],
+  "final_text": "Agent request failed: nvidia streaming request failed: 429 Too Many Requests: {\"status\":429,\"title\":\"Too Many Requests\"}"
+}

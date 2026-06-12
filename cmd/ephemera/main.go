@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -41,8 +42,12 @@ func (values *stringListFlag) Set(value string) error {
 func main() {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			debuglog.Failure("cli", "panic", fmt.Sprint(recovered), nil)
-			panic(recovered)
+			path, _ := debuglog.RecordCrash(context.Background(), "cli", recovered, debug.Stack(), map[string]any{
+				"arguments": os.Args[1:],
+			})
+			fmt.Fprintf(os.Stderr, "ephemera recovered a fatal internal error: %v\n", recovered)
+			fmt.Fprintf(os.Stderr, "debug log: %s\n", path)
+			os.Exit(2)
 		}
 	}()
 	var toolPlugins stringListFlag

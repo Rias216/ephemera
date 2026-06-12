@@ -3,7 +3,9 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -94,6 +96,30 @@ func ClassifyError(provider Provider, err error) ErrorTaxonomy {
 	}
 	text := strings.ToLower(err.Error())
 	result := ErrorTaxonomy{Code: "provider_error", Class: "permanent", Provider: name}
+	var statusErr *HTTPStatusError
+	if errors.As(err, &statusErr) {
+		if result.Provider == "" {
+			result.Provider = statusErr.Provider
+		}
+		switch {
+		case statusErr.StatusCode == http.StatusTooManyRequests:
+			result.Code, result.Class, result.Retryable = "rate_limit", "rate_limit", true
+			result.Backoff = statusErr.RetryAfter
+			if result.Backoff <= 0 {
+				result.Backoff = 2 * time.Second
+			}
+			return result
+		case statusErr.StatusCode == http.StatusRequestTimeout || statusErr.StatusCode == http.StatusBadGateway || statusErr.StatusCode == http.StatusServiceUnavailable || statusErr.StatusCode == http.StatusGatewayTimeout || statusErr.StatusCode >= 500:
+			result.Code, result.Class, result.Retryable, result.Backoff = "transient", "transient", true, 500*time.Millisecond
+			if statusErr.RetryAfter > result.Backoff {
+				result.Backoff = statusErr.RetryAfter
+			}
+			return result
+		case statusErr.StatusCode == http.StatusUnauthorized || statusErr.StatusCode == http.StatusForbidden:
+			result.Code, result.Class = "auth", "permanent"
+			return result
+		}
+	}
 	switch {
 	case strings.Contains(text, "context length"), strings.Contains(text, "context_length"), strings.Contains(text, "too many tokens"), strings.Contains(text, "maximum context"):
 		result.Code, result.Class = "context_length", "context_too_long"
@@ -251,10 +277,15 @@ func GenerateToolDecision(ctx context.Context, provider Provider, req Request, s
 	if toolProvider, ok := provider.(ToolCallingProvider); ok && len(specs) > 0 {
 		decision, err := toolProvider.GenerateWithTools(ctx, req, specs, onDelta)
 		if err != nil {
-			debuglog.ErrorCtx(ctx, "provider", "native tool generation failed", err, providerLogFields(provider, req, map[string]any{
+			fields := providerLogFields(provider, req, map[string]any{
 				"tool_count": len(specs),
 				"transport":  "native",
-			}))
+			})
+			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				_ = debuglog.WriteCtx(ctx, "info", "provider", "generation cancelled", "native tool request cancelled", fields)
+			} else {
+				debuglog.ErrorCtx(ctx, "provider", "native tool generation failed", err, fields)
+			}
 		}
 		return decision, err
 	}

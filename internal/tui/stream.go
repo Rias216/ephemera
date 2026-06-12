@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"strings"
@@ -79,11 +80,15 @@ func (m *Model) generateCmd() tea.Cmd {
 		}
 	}
 	session := m.session
+	runProvider := runCfg.Provider
+	if runProvider == "compatible" && strings.TrimSpace(runCfg.CompatibleName) != "" {
+		runProvider = strings.TrimSpace(runCfg.CompatibleName)
+	}
 	stream := make(chan agent.StreamUpdate, 128)
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = debuglog.WithScope(ctx, debuglog.Scope{
 		Session:   session.Name,
-		Provider:  runCfg.Provider,
+		Provider:  runProvider,
 		Model:     runCfg.Model(),
 		Workspace: runCfg.WorkspaceRoot,
 	})
@@ -99,7 +104,7 @@ func (m *Model) generateCmd() tea.Cmd {
 		Activity:          "Starting the model stream…",
 		ActivityUpdatedAt: now,
 		DirectorMode:      cfg.DirectorEnabled,
-		RunProvider:       runCfg.Provider,
+		RunProvider:       runProvider,
 		RunModel:          runCfg.Model(),
 	}
 	m.session.Agent = history.AgentSnapshot{
@@ -108,6 +113,10 @@ func (m *Model) generateCmd() tea.Cmd {
 		Iteration: 1,
 		UpdatedAt: now,
 	}
+	_ = debuglog.WriteCtx(ctx, "info", "tui", "agent stream started", "background agent stream started", map[string]any{
+		"agent_enabled": runCfg.AgentEnabled, "director_enabled": runCfg.DirectorEnabled, "messages": len(session.Messages),
+		"approval_policy": string(runCfg.ApprovalPolicy), "sandbox": string(runCfg.SandboxMode), "protocol": runCfg.Provider,
+	})
 
 	go func() {
 		defer close(stream)
@@ -119,22 +128,22 @@ func (m *Model) generateCmd() tea.Cmd {
 		}
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				err := fmt.Errorf("agent worker panic: %v", recovered)
-				debuglog.Failure("tui", "agent worker panic", err.Error(), map[string]any{
-					"session":  session.Name,
-					"provider": runCfg.Provider,
-					"model":    runCfg.Model(),
-					"stack":    string(debug.Stack()),
+				stack := debug.Stack()
+				crashPath, _ := debuglog.RecordCrash(ctx, "tui.agent_worker", recovered, stack, map[string]any{
+					"session": session.Name, "provider": runProvider, "protocol": runCfg.Provider, "model": runCfg.Model(),
 				})
-				emit(agent.StreamUpdate{Kind: agent.StreamDone, Phase: "failed", Err: err, Text: "Agent worker failed: " + err.Error()})
+				err := fmt.Errorf("agent worker panic: %v", recovered)
+				emit(agent.StreamUpdate{Kind: agent.StreamDone, Phase: "failed", Err: err, Text: "Agent worker failed: " + err.Error() + "\nCrash report: " + crashPath})
 			}
 		}()
 		if roleErr != nil {
+			debuglog.ErrorCtx(ctx, "tui", "director model setup failed", roleErr, nil)
 			emit(agent.StreamUpdate{Kind: agent.StreamDone, Phase: "failed", Err: roleErr, Text: "Director model setup failed: " + roleErr.Error()})
 			return
 		}
 		provider, err := llm.New(runCfg)
 		if err != nil {
+			debuglog.ErrorCtx(ctx, "tui", "provider setup failed", err, map[string]any{"provider": runCfg.Provider, "model": runCfg.Model()})
 			emit(agent.StreamUpdate{Kind: agent.StreamDone, Phase: "failed", Err: err, Text: "Provider setup failed: " + err.Error()})
 			return
 		}
@@ -396,7 +405,12 @@ func (m *Model) finishAgentStream(update agent.StreamUpdate) {
 		m.liveAgent.RunID = update.RunID
 	}
 	m.liveAgent.UpdatedAt = time.Now()
-	if update.Err != nil {
+	cancelled := strings.EqualFold(strings.TrimSpace(update.Phase), "cancelled") || errors.Is(update.Err, context.Canceled)
+	if cancelled {
+		m.liveAgent.Err = ""
+		m.status = "Agent run cancelled."
+		m.notice = ""
+	} else if update.Err != nil {
 		m.recordError("agent stream failed", update.Err, map[string]any{
 			"phase": update.Phase,
 			"tool":  update.Tool,
@@ -426,6 +440,22 @@ func (m *Model) finishAgentStream(update agent.StreamUpdate) {
 			m.status = "Saved · " + contextSummary(m.currentContextStats())
 		}
 	}
+	logCtx := debuglog.WithScope(context.Background(), debuglog.Scope{
+		Session: m.session.Name, RunID: m.liveAgent.RunID, Provider: firstNonEmpty(m.liveAgent.RunProvider, m.cfg.Provider),
+		Model: firstNonEmpty(m.liveAgent.RunModel, m.cfg.Model()), Workspace: m.workspaceRoot(), Iteration: m.liveAgent.Iteration, Tool: m.liveAgent.Tool,
+	})
+	level := "info"
+	message := "agent stream completed"
+	if cancelled {
+		message = "agent stream cancelled"
+	} else if update.Err != nil {
+		level = "error"
+		message = update.Err.Error()
+	}
+	_ = debuglog.WriteCtx(logCtx, level, "tui", "agent stream finished", message, map[string]any{
+		"phase": update.Phase, "pending_approval": m.pendingApproval != nil, "verified": update.Verified,
+		"duration_ms": time.Since(m.liveAgent.StartedAt).Milliseconds(), "context_tokens": m.liveAgent.ContextTokens, "output_tokens": m.liveAgent.OutputTokens,
+	})
 	m.persistAgentSnapshot(m.pendingApproval == nil)
 	if err := m.saveSession(); err != nil {
 		m.status = "Completed, but session save failed: " + err.Error()
@@ -441,6 +471,11 @@ func (m *Model) cancelGeneration() {
 		return
 	}
 	m.agentCancel()
+	ctx := debuglog.WithScope(context.Background(), debuglog.Scope{
+		Session: m.session.Name, RunID: m.liveAgent.RunID, Provider: firstNonEmpty(m.liveAgent.RunProvider, m.cfg.Provider),
+		Model: firstNonEmpty(m.liveAgent.RunModel, m.cfg.Model()), Workspace: m.workspaceRoot(), Iteration: m.liveAgent.Iteration, Tool: m.liveAgent.Tool,
+	})
+	_ = debuglog.WriteCtx(ctx, "warning", "tui", "agent cancellation requested", "user cancelled the active agent run", map[string]any{"phase": m.liveAgent.Phase})
 	m.liveAgent.Phase = "cancelling"
 	m.liveAgent.UpdatedAt = time.Now()
 	m.status = "Cancelling agent run…"

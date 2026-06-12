@@ -246,3 +246,29 @@ func TestPortableToolCompatibilityIsIsolatedByModel(t *testing.T) {
 		t.Fatal("model-a compatibility incorrectly poisoned model-b")
 	}
 }
+
+type taxonomyBackoffProvider struct{ delay time.Duration }
+
+func (p taxonomyBackoffProvider) Name() string { return "nvidia-backoff-test" }
+func (p taxonomyBackoffProvider) Generate(context.Context, llm.Request) (string, error) {
+	return "", errors.New("rate limited")
+}
+func (p taxonomyBackoffProvider) ClassifyError(error) llm.ErrorTaxonomy {
+	return llm.ErrorTaxonomy{Code: "rate_limit", Class: "rate_limit", Provider: p.Name(), Retryable: true, Backoff: p.delay}
+}
+
+func TestProviderRetryDelayRespectsProviderBackoff(t *testing.T) {
+	provider := taxonomyBackoffProvider{delay: 9 * time.Second}
+	delay, source := providerRetryDelay(provider, errors.New("429"), 350*time.Millisecond, 0)
+	if delay != 9*time.Second || source != "provider" {
+		t.Fatalf("delay=%s source=%q", delay, source)
+	}
+}
+
+func TestProviderRetryDelayUsesRateLimitFloor(t *testing.T) {
+	provider := taxonomyBackoffProvider{delay: 100 * time.Millisecond}
+	delay, source := providerRetryDelay(provider, errors.New("429"), 350*time.Millisecond, 0)
+	if delay != 2*time.Second || source != "rate_limit_floor" {
+		t.Fatalf("delay=%s source=%q", delay, source)
+	}
+}

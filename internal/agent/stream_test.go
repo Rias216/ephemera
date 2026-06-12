@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
@@ -116,5 +117,39 @@ func TestSelectAgentMessagesAddsDeterministicCompactionSummary(t *testing.T) {
 	}
 	if estimateVisibleTokens(strings.Repeat("s", 200))+messageSliceTokens(selected) > 920 {
 		t.Fatalf("compacted context exceeded budget: %d", estimateVisibleTokens(strings.Repeat("s", 200))+messageSliceTokens(selected))
+	}
+}
+
+type cancellationProvider struct{}
+
+func (c cancellationProvider) Name() string { return "cancel-test" }
+func (c cancellationProvider) Generate(ctx context.Context, _ llm.Request) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func TestRunStreamTreatsInFlightCancellationAsCancelled(t *testing.T) {
+	cfg := config.Default()
+	cfg.AgentEnabled = true
+	cfg.ProviderMaxRetries = 2
+	session := history.New("cancel-test", cfg.Provider, cfg.Model(), cfg.Mode)
+	session.Append("user", "create a folder")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	var done StreamUpdate
+	result := NewRunner(cfg, cancellationProvider{}).RunStream(ctx, session, func(update StreamUpdate) {
+		if update.Kind == StreamDone {
+			done = update
+		}
+	})
+	if done.Phase != "cancelled" || done.Err != nil {
+		t.Fatalf("done update = %#v", done)
+	}
+	if !strings.Contains(strings.ToLower(result.Text), "cancel") {
+		t.Fatalf("result = %#v", result)
 	}
 }

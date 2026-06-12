@@ -186,6 +186,16 @@ type Store struct {
 
 	mu sync.Mutex
 	db *sql.DB
+
+	auditMu    sync.Mutex
+	saveAudits map[string]saveAuditState
+}
+
+type saveAuditState struct {
+	Messages int
+	Status   string
+	RunID    string
+	LoggedAt time.Time
 }
 
 // NewStore creates the sessions directory when necessary.
@@ -199,8 +209,9 @@ func NewStore() (*Store, error) {
 		return nil, err
 	}
 	return &Store{
-		dir:    sessionDir,
-		dbPath: filepath.Join(dir, "history.sqlite"),
+		dir:        sessionDir,
+		dbPath:     filepath.Join(dir, "history.sqlite"),
+		saveAudits: make(map[string]saveAuditState),
 	}, nil
 }
 
@@ -216,8 +227,8 @@ func (s *Store) Save(session Session) error {
 	if err := s.writeBundleSnapshot(session); err != nil {
 		return err
 	}
-	if filepath.Clean(debuglog.SessionDirectory(session.Name)) == filepath.Clean(s.bundleDir(session.Name)) {
-		_ = debuglog.WriteSession(session.Name, "info", "history", "session saved", "session snapshot persisted", map[string]any{
+	if filepath.Clean(debuglog.SessionDirectory(session.Name)) == filepath.Clean(s.bundleDir(session.Name)) && s.shouldAuditSave(session) {
+		_ = debuglog.WriteSession(session.Name, "info", "history", "session checkpoint", "crash-recovery snapshot persisted", map[string]any{
 			"messages": len(session.Messages),
 			"events":   len(session.Events),
 			"provider": session.Provider,
@@ -237,6 +248,27 @@ func (s *Store) Save(session Session) error {
 		return nil
 	}
 	return nil
+}
+
+func (s *Store) shouldAuditSave(session Session) bool {
+	now := time.Now()
+	current := saveAuditState{
+		Messages: len(session.Messages),
+		Status:   strings.TrimSpace(session.Agent.Status),
+		RunID:    strings.TrimSpace(session.Agent.RunID),
+		LoggedAt: now,
+	}
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
+	if s.saveAudits == nil {
+		s.saveAudits = make(map[string]saveAuditState)
+	}
+	previous, ok := s.saveAudits[session.Name]
+	logCheckpoint := !ok || previous.Messages != current.Messages || previous.Status != current.Status || previous.RunID != current.RunID || now.Sub(previous.LoggedAt) >= 5*time.Second
+	if logCheckpoint {
+		s.saveAudits[session.Name] = current
+	}
+	return logCheckpoint
 }
 
 func (s *Store) saveSQL(session Session) error {
@@ -608,11 +640,11 @@ func (s *Store) writeBundleSnapshot(session Session) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := replaceSnapshotFile(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
-	for _, fileName := range []string{"debug.jsonl", "context.jsonl"} {
+	for _, fileName := range []string{"debug.jsonl", "context.jsonl", "tools.jsonl"} {
 		file, err := os.OpenFile(filepath.Join(dir, fileName), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return err
@@ -628,6 +660,16 @@ func (s *Store) writeBundleSnapshot(session Session) error {
 		_ = debuglog.EnsureSession(session.Name)
 	}
 	return nil
+}
+
+func replaceSnapshotFile(source, destination string) error {
+	if err := os.Rename(source, destination); err == nil {
+		return nil
+	}
+	if err := os.Remove(destination); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.Rename(source, destination)
 }
 
 func (s *Store) loadBundleSnapshot(name string) (Session, error) {

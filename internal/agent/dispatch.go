@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 	"github.com/ephemera-ai/ephemera/internal/llm"
 	"github.com/ephemera-ai/ephemera/internal/tools"
 )
@@ -129,6 +131,17 @@ func (r Runner) executeParallelActions(ctx context.Context, state *runState, act
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					panicCtx := debuglog.WithScope(ctx, debuglog.Scope{Tool: call.Name, Workspace: r.Tools.WorkspaceRoot, Iteration: iteration})
+					crashPath, _ := debuglog.RecordCrash(panicCtx, "agent.parallel_tool", recovered, debug.Stack(), map[string]any{
+						"batch_size": len(action.Actions), "batch_index": index, "fingerprint": toolFingerprint(call),
+					})
+					out[index].Result = tools.Result{Tool: call.Name, OK: false, Error: fmt.Sprintf("parallel tool worker panic recovered: %v", recovered), Metadata: map[string]any{
+						"parallel": true, "panic_recovered": true, "debug_logged": true, "crash_report": crashPath,
+					}}
+				}
+			}()
 			select {
 			case semaphore <- struct{}{}:
 				defer func() { <-semaphore }()

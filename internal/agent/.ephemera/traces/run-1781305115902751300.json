@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "id": "run-1781305115902751300",
+  "started_at": "2026-06-13T00:58:35.9027513+02:00",
+  "duration": 24796900,
+  "provider": "cancel-test",
+  "model": "qwen3:8b",
+  "mode": "concise",
+  "verified": false,
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "tool_calls": 0
+  },
+  "events": [
+    {
+      "id": "evt-1781305115906506200",
+      "type": "acceptance_contract",
+      "title": "Definition of done",
+      "content": "Goal: create a folder\nRequired checks:\n- [ ] Every changed file can be read back after the edit.\n- [ ] The final workspace diff or status is inspected before completion.\nForbidden changes: .git, .env, .env.*, .ephemera/secrets",
+      "status": "active",
+      "metadata": {
+        "contract": {
+          "goal": "create a folder",
+          "required_behaviors": [
+            "create a folder"
+          ],
+          "required_checks": [
+            {
+              "id": "changed-files-readable",
+              "description": "Every changed file can be read back after the edit.",
+              "required": true,
+              "status": "pending"
+            },
+            {
+              "id": "diff-reviewed",
+              "description": "The final workspace diff or status is inspected before completion.",
+              "required": true,
+              "status": "pending"
+            }
+          ],
+          "forbidden_changes": [
+            ".git",
+            ".env",
+            ".env.*",
+            ".ephemera/secrets"
+          ],
+          "created_at": "2026-06-13T00:58:35.9027513+02:00",
+          "source": "discovered"
+        },
+        "iteration": 0,
+        "run_id": "run-1781305115902751300",
+        "source": "discovered"
+      },
+      "created_at": "2026-06-13T00:58:35.9065062+02:00"
+    }
+  ],
+  "final_text": "Agent run cancelled."
+}

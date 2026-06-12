@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -180,5 +181,28 @@ func TestPlanUpdateRefreshesVisiblePlan(t *testing.T) {
 	m.applyAgentStream(agent.StreamUpdate{Kind: agent.StreamPlan, Phase: "plan step running", Plan: plan})
 	if !strings.Contains(m.liveAgent.Plan, "Goal: upgrade") || !strings.Contains(m.liveAgent.Plan, "inspect") {
 		t.Fatalf("visible plan = %q", m.liveAgent.Plan)
+	}
+}
+
+func TestFinishAgentStreamTreatsUserCancellationAsNormal(t *testing.T) {
+	cfg := config.Default()
+	m := New(cfg, nil, "stream-cancel")
+	m.session.Append("user", "create a folder")
+	before := len(m.session.Messages)
+	m.busy = true
+	m.liveAgent.Active = true
+
+	m.finishAgentStream(agent.StreamUpdate{
+		Kind:  agent.StreamDone,
+		Phase: "cancelled",
+		Text:  "Agent run cancelled.",
+		Err:   context.Canceled,
+	})
+
+	if len(m.session.Messages) != before {
+		t.Fatalf("cancellation was appended to chat: %#v", m.session.Messages)
+	}
+	if m.liveAgent.Err != "" || m.notice != "" || !strings.Contains(strings.ToLower(m.status), "cancel") {
+		t.Fatalf("cancel state: err=%q notice=%q status=%q", m.liveAgent.Err, m.notice, m.status)
 	}
 }

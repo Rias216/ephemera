@@ -199,8 +199,8 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/codex", "show Codex bridge isolation and workspace authority"}, {"/codex budget 2048", "cap the requested Codex response size"}},
 	},
 	{
-		Name: "/debuglog", Usage: "[status|tail|clear]", Description: "inspect or clear per-session debug and provider-context logs", Category: "SYSTEM", Aliases: []string{"/logs"}, Introduced: "v0.9.1", Permission: "filesystem", Choices: []string{"status", "tail", "clear"},
-		Examples: []commandExample{{"/debuglog", "show this session bundle and recent events"}, {"/debuglog clear", "clear current session and global diagnostic logs"}},
+		Name: "/debuglog", Usage: "[status|tail|export|clear]", Description: "inspect, export, or clear per-session diagnostics", Category: "SYSTEM", Aliases: []string{"/logs"}, Introduced: "v0.9.1", Permission: "filesystem", Choices: []string{"status", "tail", "export", "clear"},
+		Examples: []commandExample{{"/debuglog", "show this session bundle and recent events"}, {"/debuglog export", "create a portable diagnostic ZIP"}, {"/debuglog clear", "clear current session and global diagnostic logs"}},
 	},
 	{
 		Name: "/memory", Usage: "[add|project <preference>]", Description: "view or record durable memory", Category: "AGENT", Introduced: "v0.4.0", Permission: "filesystem", Choices: []string{"add", "project"},
@@ -689,6 +689,8 @@ func argumentDescription(command, choice string) string {
 		switch choice {
 		case "clear":
 			return "remove current and rotated diagnostic logs"
+		case "export":
+			return "create a portable ZIP of the current session diagnostics"
 		default:
 			return "show the diagnostic log path and recent failures"
 		}

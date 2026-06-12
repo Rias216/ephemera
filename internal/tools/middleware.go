@@ -2,9 +2,14 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"os/exec"
+	"runtime/debug"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/debuglog"
@@ -29,8 +34,9 @@ func approvalGranted(ctx context.Context) bool {
 
 func defaultMiddlewareChain() []Middleware {
 	return []Middleware{
-		debugMiddleware(),
+		panicRecoveryMiddleware(),
 		normalizationMiddleware(),
+		debugMiddleware(),
 		workspaceScopeMiddleware(),
 		approvalMiddleware(),
 		dryRunMiddleware(),
@@ -39,12 +45,54 @@ func defaultMiddlewareChain() []Middleware {
 	}
 }
 
+func panicRecoveryMiddleware() Middleware {
+	return func(next Handler) Handler {
+		return func(ctx context.Context, r Registry, call Call, emit func(string)) (result Result) {
+			ctx = debuglog.WithScope(ctx, debuglog.Scope{Tool: call.Name, Workspace: r.WorkspaceRoot})
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					stack := debug.Stack()
+					message := fmt.Sprintf("tool panic recovered: %v", recovered)
+					crashPath, _ := debuglog.RecordCrash(ctx, "tool", recovered, stack, map[string]any{
+						"tool": call.Name, "workspace": r.WorkspaceRoot, "fingerprint": Fingerprint(call),
+					})
+					failed := false
+					_ = debuglog.AppendTool(ctx, debuglog.ToolRecord{
+						Stage: "panic", Tool: call.Name, Fingerprint: Fingerprint(call), Arguments: auditToolArguments(call.Arguments),
+						OK: &failed, Error: message, Metadata: map[string]any{"crash_report": crashPath},
+					})
+					result = Result{
+						Tool: call.Name, OK: false, Error: message,
+						Metadata: map[string]any{"panic_recovered": true, "debug_logged": true, "crash_report": crashPath},
+					}
+				}
+			}()
+			return next(ctx, r, call, emit)
+		}
+	}
+}
+
 func normalizationMiddleware() Middleware {
 	return func(next Handler) Handler {
 		return func(ctx context.Context, r Registry, call Call, emit func(string)) Result {
 			normalized, err := r.Normalize(call)
 			if err != nil {
-				return fail(call.Name, err.Error())
+				ctx = debuglog.WithScope(ctx, debuglog.Scope{Tool: call.Name, Workspace: r.WorkspaceRoot})
+				hint := RepairHint(call, err)
+				message := err.Error()
+				if hint != "" {
+					message += ". Recovery: " + hint
+				}
+				args := auditToolArguments(call.Arguments)
+				failed := false
+				_ = debuglog.AppendTool(ctx, debuglog.ToolRecord{
+					Stage: "normalization_failed", Tool: call.Name, Fingerprint: Fingerprint(call), Arguments: args,
+					OK: &failed, Error: message, Metadata: map[string]any{"workspace": r.WorkspaceRoot, "repair_hint": hint},
+				})
+				debuglog.FailureCtx(ctx, "tool", "tool call normalization failed", message, map[string]any{
+					"fingerprint": Fingerprint(call), "workspace": r.WorkspaceRoot, "arguments": args, "repair_hint": hint,
+				})
+				return Result{Tool: call.Name, OK: false, Error: message, Metadata: map[string]any{"debug_logged": true, "error_class": "normalization", "repair_hint": hint}}
 			}
 			return next(ctx, r, normalized, emit)
 		}
@@ -60,7 +108,9 @@ func workspaceScopeMiddleware() Middleware {
 			}
 			approved := approvalGranted(ctx) || r.ApprovalPolicy == config.ApprovalAutoApprove
 			if len(targets) > 0 && !approved {
-				return fail(call.Name, "access outside the active workspace requires explicit approval: "+strings.Join(targets, ", "))
+				return Result{Tool: call.Name, OK: false, Error: "access outside the active workspace requires explicit approval: " + strings.Join(targets, ", "), Metadata: map[string]any{
+					"approval_required": true, "external_targets": targets, "workspace": r.WorkspaceRoot,
+				}}
 			}
 			if approved {
 				r.allowExternalPaths = true
@@ -76,14 +126,14 @@ func approvalMiddleware() Middleware {
 			tool, _ := r.Lookup(call.Name)
 			switch r.ApprovalPolicy {
 			case config.ApprovalChat:
-				return fail(call.Name, "agent tools are disabled by chat approval policy")
+				return Result{Tool: call.Name, OK: false, Error: "agent tools are disabled by chat approval policy", Metadata: map[string]any{"approval_policy": string(r.ApprovalPolicy), "approval_required": true}}
 			case config.ApprovalReadOnly:
 				if tool.Risk != RiskRead {
-					return fail(call.Name, "write and shell tools are disabled by read-only policy")
+					return Result{Tool: call.Name, OK: false, Error: "write and shell tools are disabled by read-only policy", Metadata: map[string]any{"approval_policy": string(r.ApprovalPolicy), "risk": string(tool.Risk)}}
 				}
 			case config.ApprovalApproveWrites:
 				if tool.Risk != RiskRead && !approvalGranted(ctx) {
-					return fail(call.Name, "tool requires explicit user approval")
+					return Result{Tool: call.Name, OK: false, Error: "tool requires explicit user approval", Metadata: map[string]any{"approval_policy": string(r.ApprovalPolicy), "approval_required": true, "risk": string(tool.Risk)}}
 				}
 			}
 			return next(ctx, r, call, emit)
@@ -161,7 +211,23 @@ func debugMiddleware() Middleware {
 		return func(ctx context.Context, r Registry, call Call, emit func(string)) Result {
 			ctx = debuglog.WithScope(ctx, debuglog.Scope{Tool: call.Name, Workspace: r.WorkspaceRoot})
 			started := time.Now()
-			_ = debuglog.WriteCtx(ctx, "info", "tool", "tool execution started", "tool call accepted by registry", map[string]any{"fingerprint": Fingerprint(call)})
+			fingerprint := Fingerprint(call)
+			tool, _ := r.Lookup(call.Name)
+			approval := "not_required"
+			if tool.Risk != RiskRead {
+				approval = "policy_auto"
+				if approvalGranted(ctx) {
+					approval = "granted"
+				} else if r.ApprovalPolicy != config.ApprovalAutoApprove {
+					approval = "not_granted"
+				}
+			}
+			auditArgs := auditToolArguments(call.Arguments)
+			_ = debuglog.AppendTool(ctx, debuglog.ToolRecord{
+				Stage: "started", Tool: call.Name, Fingerprint: fingerprint, Risk: string(tool.Risk), Approval: approval,
+				Arguments: auditArgs, Metadata: map[string]any{"dry_run": r.DryRun, "sandbox": string(r.SandboxMode)},
+			})
+
 			result := next(ctx, r, call, emit)
 			result.Tool = call.Name
 			result.Duration = time.Since(started)
@@ -173,29 +239,126 @@ func debugMiddleware() Middleware {
 			if result.Metadata == nil {
 				result.Metadata = map[string]any{}
 			}
-			tool, _ := r.Lookup(call.Name)
 			result.Metadata["ok"] = result.OK
 			result.Metadata["risk"] = string(tool.Risk)
 			result.Metadata["duration_ms"] = result.Duration.Milliseconds()
+			result.Metadata["fingerprint"] = fingerprint
 			if result.Summary != "" {
 				result.Metadata["summary"] = result.Summary
 			}
-			_ = debuglog.WriteCtx(ctx, "info", "tool", "tool execution completed", "tool call completed", map[string]any{
-				"tool": call.Name, "risk": string(tool.Risk), "workspace": r.WorkspaceRoot,
-				"duration_ms": result.Duration.Milliseconds(), "fingerprint": Fingerprint(call), "ok": result.OK,
+			outputSummary := strings.TrimSpace(result.Summary)
+			if outputSummary == "" {
+				outputSummary = compactAuditText(result.Output, 1200)
+			}
+			okValue := result.OK
+			_ = debuglog.AppendTool(ctx, debuglog.ToolRecord{
+				Stage: "completed", Tool: call.Name, Fingerprint: fingerprint, Risk: string(tool.Risk), Approval: approval,
+				Arguments: auditArgs, OK: &okValue, DurationMS: result.Duration.Milliseconds(), Error: result.Error,
+				Output: outputSummary, Metadata: result.Metadata,
 			})
-			if !result.OK {
+			fields := map[string]any{
+				"risk": string(tool.Risk), "workspace": r.WorkspaceRoot, "duration_ms": result.Duration.Milliseconds(),
+				"fingerprint": fingerprint, "ok": result.OK, "approval": approval, "arguments": auditArgs,
+			}
+			if outputSummary != "" {
+				fields["output_summary"] = compactAuditText(outputSummary, 1200)
+			}
+			if len(result.Metadata) > 0 {
+				fields["result_metadata"] = result.Metadata
+			}
+			if result.OK {
+				_ = debuglog.WriteCtx(ctx, "info", "tool", "tool execution completed", "tool call completed", fields)
+			} else {
 				message := strings.TrimSpace(result.Error)
 				if message == "" {
 					message = strings.TrimSpace(result.Output)
 				}
-				debuglog.FailureCtx(ctx, "tool", "tool execution failed", message, map[string]any{
-					"tool": call.Name, "risk": string(tool.Risk), "workspace": r.WorkspaceRoot,
-					"duration_ms": result.Duration.Milliseconds(), "fingerprint": Fingerprint(call),
-				})
+				fields["error"] = compactAuditText(message, 1200)
+				debuglog.FailureCtx(ctx, "tool", "tool execution failed", message, fields)
 				result.Metadata["debug_logged"] = true
 			}
 			return result
 		}
 	}
+}
+
+// AuditArguments returns the bounded, redacted argument representation used in
+// session diagnostics. Large file bodies are stored as hashes rather than copied.
+func AuditArguments(arguments map[string]any) map[string]any {
+	return auditToolArguments(arguments)
+}
+
+func auditToolArguments(arguments map[string]any) map[string]any {
+	if len(arguments) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(arguments))
+	for key, value := range arguments {
+		out[key] = auditArgumentValue(strings.ToLower(strings.TrimSpace(key)), value, 0)
+	}
+	return out
+}
+
+func auditArgumentValue(key string, value any, depth int) any {
+	if depth > 5 {
+		return "[TRUNCATED]"
+	}
+	if auditPayloadKey(key) {
+		return auditPayloadSummary(value)
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for childKey, childValue := range typed {
+			out[childKey] = auditArgumentValue(strings.ToLower(strings.TrimSpace(childKey)), childValue, depth+1)
+		}
+		return out
+	case []any:
+		limit := min(len(typed), 32)
+		out := make([]any, 0, limit)
+		for _, item := range typed[:limit] {
+			out = append(out, auditArgumentValue("", item, depth+1))
+		}
+		if len(typed) > limit {
+			out = append(out, fmt.Sprintf("[%d more items]", len(typed)-limit))
+		}
+		return out
+	case string:
+		return compactAuditText(typed, 4000)
+	default:
+		return typed
+	}
+}
+
+func auditPayloadKey(key string) bool {
+	switch key {
+	case "content", "old", "new", "body", "data", "diff", "patch":
+		return true
+	default:
+		return false
+	}
+}
+
+func auditPayloadSummary(value any) map[string]any {
+	data, err := json.Marshal(value)
+	if err != nil {
+		data = []byte(fmt.Sprint(value))
+	}
+	sum := sha256.Sum256(data)
+	return map[string]any{
+		"bytes":  len(data),
+		"sha256": fmt.Sprintf("%x", sum[:]),
+	}
+}
+
+func compactAuditText(value string, limit int) string {
+	value = strings.TrimSpace(strings.ToValidUTF8(value, "�"))
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + "…[TRUNCATED]"
 }

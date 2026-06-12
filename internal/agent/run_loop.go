@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/ephemera-ai/ephemera/internal/debuglog"
 	"github.com/ephemera-ai/ephemera/internal/history"
@@ -11,6 +12,7 @@ import (
 	"github.com/ephemera-ai/ephemera/internal/tools"
 	agenttrace "github.com/ephemera-ai/ephemera/internal/trace"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -40,6 +42,7 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 	ctx = debuglog.WithScope(ctx, runScope)
 	debuglog.RegisterRunScope(runScope)
 	defer debuglog.UnregisterRunScope(state.runID)
+	currentIteration := 0
 	runMetrics := agentmetrics.Default()
 	runMetrics.Inc("agent_runs_total")
 	_ = debuglog.WriteCtx(ctx, "info", "agent", "run started", "agent run started", map[string]any{
@@ -89,6 +92,31 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 			"output_tokens": finalResult.Usage.OutputTokens,
 			"tool_calls":    finalResult.Usage.ToolCalls,
 		})
+	}()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			stack := debug.Stack()
+			crashPath, _ := debuglog.RecordCrash(ctx, "agent.run", recovered, stack, map[string]any{
+				"mode": string(r.Config.Mode), "max_steps": r.Config.AgentMaxSteps, "elapsed_ms": time.Since(started).Milliseconds(),
+			})
+			message := fmt.Sprintf("Agent recovered from an internal error: %v", recovered)
+			if strings.TrimSpace(crashPath) != "" {
+				message += "\nCrash report: " + crashPath
+			}
+			state.suspended = true
+			event := runEvent(state.runID, maxInt(1, currentIteration), "recovery", "Agent panic recovered", message, "", "error")
+			event.Metadata["crash_report"] = crashPath
+			finalResult.Text = message
+			finalResult.Events = append(finalResult.Events, event)
+			finalResult.Usage = state.usage
+			if emit != nil {
+				func() {
+					defer func() { _ = recover() }()
+					emit(StreamUpdate{Kind: StreamEvent, RunID: state.runID, Phase: "panic recovered", Iteration: maxInt(1, currentIteration), Event: &event, StartedAt: started, Verified: state.verified})
+					emit(StreamUpdate{Kind: StreamDone, RunID: state.runID, Phase: "failed", Iteration: maxInt(1, currentIteration), Text: message, Err: fmt.Errorf("%v", recovered), StartedAt: started, Verified: state.verified})
+				}()
+			}
+		}
 	}()
 	director, directorErr := newDirectorSession(r)
 	if directorErr != nil {
@@ -246,10 +274,11 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 		state.snapshot.Cleanup()
 	}()
 	for iteration := 1; iteration <= maxSteps; iteration++ {
+		currentIteration = iteration
 		ctx = debuglog.WithScope(ctx, debuglog.Scope{Iteration: iteration})
 		if err := ctx.Err(); err != nil {
 			result := RunResult{Text: "Agent run cancelled.", Events: events, Usage: state.usage}
-			emitUpdate(StreamUpdate{Kind: StreamDone, Phase: "cancelled", Iteration: iteration, Text: result.Text, Err: err, Verified: state.verified})
+			emitUpdate(StreamUpdate{Kind: StreamDone, Phase: "cancelled", Iteration: iteration, Text: result.Text, Verified: state.verified})
 			return result
 		}
 
@@ -358,6 +387,11 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 			}
 		}
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				result := RunResult{Text: "Agent run cancelled.", Events: events, Usage: state.usage}
+				emitUpdate(StreamUpdate{Kind: StreamDone, Phase: "cancelled", Iteration: iteration, Text: result.Text, ContextTokens: contextTokens, OutputTokens: (outputRunes + 3) / 4, Verified: state.verified})
+				return result
+			}
 			event := runEvent(state.runID, iteration, history.EventToolResult, "Agent request failed", err.Error(), "", "error")
 			events = append(events, event)
 			emitEvent(event, iteration)
@@ -726,6 +760,11 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 	}
 
 	state.suspended = true
+	debuglog.WarningCtx(ctx, "agent", "step limit reached", "agent paused after reaching the configured step limit", map[string]any{
+		"max_steps": maxSteps, "changed": state.changed, "verified": state.verified,
+		"tool_sequence": append([]string(nil), state.toolSequence...), "changed_paths": changedArtifactPaths(state),
+		"no_progress_rounds": state.noProgressRounds, "parse_failures": state.parseFailures,
+	})
 	text := "Agent paused after reaching the configured step limit. Review the timeline and run `/run` to continue."
 	event := runEvent(state.runID, maxSteps, "final", "Paused", text, "", "paused")
 	event.Metadata["verified"] = state.verified
