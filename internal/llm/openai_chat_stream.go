@@ -131,6 +131,9 @@ func (p *OpenAI) generateChatCompletionsStream(ctx context.Context, req Request,
 					call.Name += incoming.Function.Name
 				}
 				call.Arguments += incoming.Function.Arguments
+				if err := emitDelta(onDelta, DeltaActivity, toolActivityText(call.Name, len(call.Arguments))); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

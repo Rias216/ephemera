@@ -356,6 +356,9 @@ func (m Model) connectCredentialPreview() string {
 	if m.connect.Step == connectAPIKey && strings.TrimSpace(m.input.Value()) != "" {
 		return "runtime key entered"
 	}
+	if m.cfg.CredentialForConnection(m.connectConnectionID()) != "" {
+		return "remembered key loaded"
+	}
 	if m.connect.Step == connectProvider || m.connect.Step == connectName {
 		profile := connectProfileFor(m.connectPreviewName())
 		if profile.Auth == "not required" || profile.Auth == "usually none" {
@@ -537,7 +540,7 @@ func (m Model) connectFieldState() (string, color.Color) {
 	case connectAPIKey:
 		preview := m.connectCredentialPreview()
 		switch {
-		case strings.Contains(preview, "entered"), strings.Contains(preview, "detected"), preview == "not required":
+		case strings.Contains(preview, "entered"), strings.Contains(preview, "detected"), strings.Contains(preview, "remembered"), preview == "not required":
 			return "✓ " + strings.ToUpper(preview), m.styles.AccentSoft
 		case m.connectKeyOptional():
 			return "✓ OPTIONAL FOR THIS ROUTE", m.styles.AccentSoft

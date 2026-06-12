@@ -118,6 +118,8 @@ func (m Model) doctorNotice() string {
 
 - Provider: %s
 - Model: %s
+- Active route: %s
+- Remembered routes: %d
 - Endpoint: %s
 - Credentials: %s
 - Mode/theme: %s / %s
@@ -125,6 +127,8 @@ func (m Model) doctorNotice() string {
 - Session: %s`,
 		m.providerName(),
 		m.cfg.Model(),
+		m.cfg.ActiveConnection,
+		len(m.cfg.ConnectedConnections()),
 		m.endpointStatus(),
 		m.credentialStatus(),
 		m.cfg.Mode,
@@ -169,7 +173,7 @@ func (m Model) credentialStatus() string {
 
 func keyStatus(explicit string, envs ...string) string {
 	if strings.TrimSpace(explicit) != "" {
-		return "runtime key loaded"
+		return "key loaded"
 	}
 	for _, env := range envs {
 		if strings.TrimSpace(os.Getenv(env)) != "" {

@@ -134,10 +134,16 @@ func (p *OpenAI) generateResponsesStream(ctx context.Context, req Request, specs
 				if event.Item.Arguments != "" {
 					call.Arguments = event.Item.Arguments
 				}
+				if err := emitDelta(onDelta, DeltaActivity, toolActivityText(call.Name, len(call.Arguments))); err != nil {
+					return err
+				}
 			}
 		case "response.function_call_arguments.delta":
 			call := ensureCall(event.ItemID, event.OutputIndex)
 			call.Arguments += event.Delta
+			if err := emitDelta(onDelta, DeltaActivity, toolActivityText(call.Name, len(call.Arguments))); err != nil {
+				return err
+			}
 		case "response.completed":
 			if len(event.Response.Output) > 0 {
 				if err := parseOpenAIResponseOutput(event.Response.Output, &text, &reasoning, calls, onDelta, req.ReasoningSummary); err != nil {
@@ -189,15 +195,40 @@ func (p *OpenAI) generateResponsesStream(ctx context.Context, req Request, specs
 }
 
 func openAIResponsesInput(messages []Message) []map[string]any {
-	out := make([]map[string]any, 0, len(messages))
+	out := make([]map[string]any, 0, len(messages)*2)
 	for _, message := range messages {
-		if message.Role != "user" && message.Role != "assistant" {
-			continue
+		switch message.Role {
+		case "user":
+			out = append(out, map[string]any{
+				"role":    "user",
+				"content": message.Content,
+			})
+		case "assistant":
+			if strings.TrimSpace(message.Content) != "" {
+				out = append(out, map[string]any{
+					"role":    "assistant",
+					"content": message.Content,
+				})
+			}
+			for index, call := range message.ToolCalls {
+				out = append(out, map[string]any{
+					"type":      "function_call",
+					"call_id":   stableToolCallID(call, index),
+					"name":      call.Name,
+					"arguments": toolArgumentsJSON(call.Arguments),
+				})
+			}
+		case "tool":
+			if message.ToolResult == nil {
+				continue
+			}
+			result := *message.ToolResult
+			out = append(out, map[string]any{
+				"type":    "function_call_output",
+				"call_id": result.ID,
+				"output":  toolResultContent(result),
+			})
 		}
-		out = append(out, map[string]any{
-			"role":    message.Role,
-			"content": message.Content,
-		})
 	}
 	return out
 }

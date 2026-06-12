@@ -36,6 +36,8 @@ type suggestion struct {
 	Description string
 }
 
+const modelRouteSeparator = "::"
+
 type modelCatalogState struct {
 	Models    []string
 	Err       error
@@ -77,16 +79,16 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/sessions", "show session names"}, {"/sessions renderer", "search saved session text"}},
 	},
 	{
-		Name: "/provider", Usage: "<provider>", Description: "switch the active provider", Category: "ROUTE", Introduced: "v0.1.0", Permission: "local", Choices: config.ProviderNames(),
-		Examples: []commandExample{{"/provider openai", "select OpenAI"}, {"/provider ollama", "select local Ollama"}},
+		Name: "/provider", Usage: "<connected-route>", Description: "activate a remembered provider route", Category: "ROUTE", Introduced: "v0.1.0", Permission: "local", Choices: config.ProviderNames(),
+		Examples: []commandExample{{"/provider openai", "activate remembered OpenAI"}, {"/provider openrouter", "activate remembered OpenRouter"}},
 	},
 	{
-		Name: "/model", Usage: "<model-id>", Description: "switch the active model", Category: "ROUTE", Introduced: "v0.1.0", Permission: "local",
-		Examples: []commandExample{{"/model gpt-4.1-mini", "select a model by ID"}},
+		Name: "/model", Usage: "<model-id>", Description: "select a model across all remembered routes", Category: "ROUTE", Introduced: "v0.1.0", Permission: "local",
+		Examples: []commandExample{{"/model gpt-4.1-mini", "select a model and its route"}},
 	},
 	{
-		Name: "/models", Description: "open the provider model chooser", Category: "ROUTE", Introduced: "v0.2.0", Permission: "network",
-		Examples: []commandExample{{"/models", "browse available models"}},
+		Name: "/models", Description: "browse models from every remembered connection", Category: "ROUTE", Introduced: "v0.2.0", Permission: "network",
+		Examples: []commandExample{{"/models", "browse all connected models"}},
 	},
 	{
 		Name: "/mode", Usage: "<mode>", Description: "change the reasoning profile", Category: "RESPONSE", Introduced: "v0.1.0", Permission: "local", Choices: []string{"normal", "deep-reason", "concise", "creative"},
@@ -127,6 +129,30 @@ var commandSpecs = []commandSpec{
 	{
 		Name: "/eval", Description: "run deterministic local agent capability eval", Category: "AGENT", Introduced: "v0.6.0", Permission: "local",
 		Examples: []commandExample{{"/eval", "check read, write, native tool, repair, and verification behavior"}},
+	},
+	{
+		Name: "/sandbox", Usage: "<none|snapshot|docker>", Description: "set shell and workspace isolation mode", Category: "SAFETY", Introduced: "v0.7.0", Permission: "workspace", Choices: []string{"none", "snapshot", "docker"},
+		Examples: []commandExample{{"/sandbox snapshot", "capture a restorable workspace snapshot before writes"}, {"/sandbox docker", "run commands in an offline Docker container"}},
+	},
+	{
+		Name: "/dry-run", Usage: "<on|off|toggle>", Description: "preview writes and commands without executing them", Category: "SAFETY", Introduced: "v0.7.0", Permission: "local", Choices: []string{"on", "off", "toggle"},
+		Examples: []commandExample{{"/dry-run on", "preview the next agent run"}, {"/dry-run off", "allow approved changes again"}},
+	},
+	{
+		Name: "/rollback", Usage: "[now|auto|manual|status]", Description: "restore the latest snapshot or configure automatic rollback", Category: "SAFETY", Introduced: "v0.7.0", Permission: "workspace", Choices: []string{"now", "auto", "manual", "status"},
+		Examples: []commandExample{{"/rollback", "restore the latest retained snapshot"}, {"/rollback auto", "restore automatically when a run fails"}, {"/rollback manual", "retain failed-run snapshots for manual restore"}},
+	},
+	{
+		Name: "/index", Usage: "<on|off|rebuild|status>", Description: "control the persistent semantic codebase index", Category: "CONTEXT", Introduced: "v0.7.0", Permission: "filesystem", Choices: []string{"on", "off", "rebuild", "status"},
+		Examples: []commandExample{{"/index rebuild", "discard and lazily rebuild the codebase index"}, {"/index off", "disable semantic codebase context"}},
+	},
+	{
+		Name: "/tdd", Usage: "<on|off|toggle>", Description: "control test-first implementation guidance", Category: "AGENT", Introduced: "v0.7.0", Permission: "local", Choices: []string{"on", "off", "toggle"},
+		Examples: []commandExample{{"/tdd on", "prefer failing tests before implementation"}, {"/tdd off", "use the normal implementation workflow"}},
+	},
+	{
+		Name: "/learn", Usage: "<on|off|toggle>", Description: "control episodic project learning after successful runs", Category: "MEMORY", Introduced: "v0.7.0", Permission: "filesystem", Choices: []string{"on", "off", "toggle"},
+		Examples: []commandExample{{"/learn on", "save compact task learnings to project memory"}, {"/learn off", "stop writing learned memories"}},
 	},
 	{
 		Name: "/thinking", Usage: "<on|off|toggle>", Description: "show or hide Beneath the Surface decision traces", Category: "AGENT", Introduced: "v0.4.0", Permission: "local", Choices: []string{"on", "off", "toggle"},
@@ -305,8 +331,23 @@ func (m *Model) commandChoiceSuggestions(spec commandSpec) []suggestion {
 			out = append(out, suggestion{Value: name, Label: name, Description: argumentDescription(spec.Name, name)})
 		}
 		return out
+	case "/provider":
+		routes := m.cfg.ConnectedConnections()
+		out := make([]suggestion, 0, len(routes))
+		for _, route := range routes {
+			description := route.Connection.Provider + " · connected"
+			if route.ID == m.cfg.ActiveConnection {
+				description = route.Connection.Provider + " · current route"
+			}
+			out = append(out, suggestion{
+				Value:       route.Connection.DisplayName(),
+				Label:       route.Connection.DisplayName(),
+				Description: description,
+			})
+		}
+		return out
 	case "/model":
-		return m.modelSuggestionsForConfig(m.cfg)
+		return m.connectedModelSuggestions()
 	default:
 		out := make([]suggestion, 0, len(spec.Choices))
 		for _, choice := range spec.Choices {
@@ -314,6 +355,70 @@ func (m *Model) commandChoiceSuggestions(spec commandSpec) []suggestion {
 		}
 		return out
 	}
+}
+
+func (m *Model) connectedModelSuggestions() []suggestion {
+	routes := m.cfg.ConnectedConnections()
+	out := make([]suggestion, 0)
+	for _, route := range routes {
+		cfg, ok := m.cfg.ConfigForConnection(route.ID)
+		if !ok {
+			continue
+		}
+		catalog := m.modelCatalogForConfig(cfg, false)
+		if catalog.Err != nil {
+			continue
+		}
+		display := route.Connection.DisplayName()
+		for _, model := range catalog.Models {
+			description := display + " · connected"
+			if route.ID == m.cfg.ActiveConnection && model == m.cfg.Model() {
+				description = display + " · current selection"
+			}
+			out = append(out, suggestion{
+				Value:       modelSelectionValue(route.ID, model),
+				Label:       model,
+				Description: description,
+			})
+		}
+	}
+	return out
+}
+
+func modelSelectionValue(connectionID, model string) string {
+	return strings.TrimSpace(connectionID) + modelRouteSeparator + strings.TrimSpace(model)
+}
+
+func parseModelSelection(value string) (connectionID, model string, explicit bool) {
+	parts := strings.SplitN(strings.TrimSpace(value), modelRouteSeparator, 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", strings.TrimSpace(value), false
+	}
+	return strings.ToLower(strings.TrimSpace(parts[0])), strings.TrimSpace(parts[1]), true
+}
+
+func (m *Model) findConnectedModel(model string) (string, config.Config, bool) {
+	model = strings.TrimSpace(model)
+	var firstID string
+	var firstConfig config.Config
+	for _, route := range m.cfg.ConnectedConnections() {
+		cfg, ok := m.cfg.ConfigForConnection(route.ID)
+		if !ok {
+			continue
+		}
+		available, err := m.modelAvailableForConfig(cfg, model, false)
+		if err != nil || !available {
+			continue
+		}
+		if route.ID == m.cfg.ActiveConnection {
+			return route.ID, cfg, true
+		}
+		if firstID == "" {
+			firstID = route.ID
+			firstConfig = cfg
+		}
+	}
+	return firstID, firstConfig, firstID != ""
 }
 
 func (m *Model) modelSuggestionsForConfig(cfg config.Config) []suggestion {
@@ -497,6 +602,14 @@ func argumentDescription(command, choice string) string {
 		return "connect to " + choice
 	case "/mode":
 		return "reasoning profile"
+	case "/sandbox":
+		return "execution isolation mode"
+	case "/dry-run", "/tdd", "/learn":
+		return "feature state"
+	case "/rollback":
+		return "rollback behavior"
+	case "/index":
+		return "codebase index action"
 	case "/theme":
 		return "terminal palette"
 	case "/load":

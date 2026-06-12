@@ -8,10 +8,14 @@ import (
 	"github.com/ephemera-ai/ephemera/internal/config"
 )
 
-// Message is a provider-neutral chat message.
+// Message is a provider-neutral conversation item. Besides normal text turns,
+// it can preserve native assistant tool calls and their corresponding tool
+// results across stateless provider requests.
 type Message struct {
-	Role    string
-	Content string
+	Role       string
+	Content    string
+	ToolCalls  []ToolCall
+	ToolResult *ToolResult
 }
 
 // Request contains a complete stateless conversation.
@@ -37,8 +41,14 @@ type Provider interface {
 // Providers that do not implement CapableProvider are treated as plain text
 // generators with fallback streaming.
 type ProviderCapabilities struct {
-	Streaming   bool
-	NativeTools bool
+	Streaming         bool
+	NativeTools       bool
+	MaxContextWindow  int
+	SupportsVision    bool
+	SupportsReasoning bool
+	MaxParallelTools  int
+	ToolCallFormat    string // openai, anthropic, ollama, or text
+	StreamingFormat   string // sse, newline-delimited, process, or buffered
 }
 
 // CapableProvider reports provider-specific optional behavior.
@@ -61,12 +71,19 @@ type ToolSchema struct {
 	AdditionalProperties bool                    `json:"additionalProperties"`
 }
 
-// ToolSpec is the provider-neutral shape of one callable tool.
-type ToolSpec struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Parameters  ToolSchema `json:"parameters"`
+// ToolContract is the versioned provider-neutral shape of one callable tool.
+// ProviderHints are optional boundary-only hints; the agent core never branches
+// on them. Provider adapters remain responsible for wire-format conversion.
+type ToolContract struct {
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	Parameters    ToolSchema     `json:"parameters"`
+	Version       string         `json:"version,omitempty"`
+	ProviderHints map[string]any `json:"provider_hints,omitempty"`
 }
+
+// ToolSpec remains the public compatibility name used by existing adapters.
+type ToolSpec = ToolContract
 
 // ToolCall is a provider-neutral request to execute a local tool.
 type ToolCall struct {
@@ -85,13 +102,14 @@ type ToolResult struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// DeltaKind distinguishes final response text from provider-supported,
-// user-visible reasoning summaries.
+// DeltaKind distinguishes final response text, provider-supported reasoning
+// summaries, and safe transport activity such as an in-progress tool call.
 type DeltaKind string
 
 const (
 	DeltaText      DeltaKind = "text"
 	DeltaReasoning DeltaKind = "reasoning"
+	DeltaActivity  DeltaKind = "activity"
 )
 
 // Delta is one incremental provider stream part.
@@ -102,6 +120,16 @@ type Delta struct {
 
 // DeltaFunc receives incremental provider output.
 type DeltaFunc func(Delta) error
+
+func toolActivityText(name string, argumentChars int) string {
+	if name == "" {
+		name = "tool call"
+	}
+	if argumentChars > 0 {
+		return fmt.Sprintf("Preparing %s · %d argument chars", name, argumentChars)
+	}
+	return "Preparing " + name + "…"
+}
 
 // ToolDecision is the assistant's visible text plus any native tool calls.
 type ToolDecision struct {
@@ -121,17 +149,38 @@ func Capabilities(provider Provider) ProviderCapabilities {
 	if provider == nil {
 		return ProviderCapabilities{}
 	}
-	caps := ProviderCapabilities{}
+	caps := ProviderCapabilities{ToolCallFormat: "text", StreamingFormat: "buffered", MaxParallelTools: 1}
 	if _, ok := provider.(StreamingProvider); ok {
 		caps.Streaming = true
+		caps.StreamingFormat = "stream"
 	}
 	if capable, ok := provider.(CapableProvider); ok {
 		reported := capable.Capabilities()
 		caps.Streaming = caps.Streaming || reported.Streaming
 		caps.NativeTools = reported.NativeTools
+		if reported.MaxContextWindow > 0 {
+			caps.MaxContextWindow = reported.MaxContextWindow
+		}
+		caps.SupportsVision = reported.SupportsVision
+		caps.SupportsReasoning = reported.SupportsReasoning
+		if reported.MaxParallelTools > 0 {
+			caps.MaxParallelTools = reported.MaxParallelTools
+		}
+		if reported.ToolCallFormat != "" {
+			caps.ToolCallFormat = reported.ToolCallFormat
+		}
+		if reported.StreamingFormat != "" {
+			caps.StreamingFormat = reported.StreamingFormat
+		}
 	}
 	if _, ok := provider.(ToolCallingProvider); ok {
 		caps.NativeTools = true
+		if caps.ToolCallFormat == "text" {
+			caps.ToolCallFormat = "openai"
+		}
+	}
+	if caps.MaxParallelTools < 1 {
+		caps.MaxParallelTools = 1
 	}
 	return caps
 }

@@ -30,14 +30,16 @@ const helpText = `### Commands
 - **/save [name]** — save, optionally renaming the session
 - **/load <name>** — load a saved session
 - **/sessions** — list saved sessions
-- **/provider <provider>** — select backend
-- **/model <id>** / **/models** — select intelligence
+- **/provider <connected-route>** — activate a remembered route
+- **/model <id>** / **/models** — select any connected model; its route switches automatically
 - **/mode <profile>** — change response character
 - **/usage** / **/budget <tokens>** — inspect or set context
 - **/approval <auto|safe|read-only>** — set agent approval policy
 - **/thinking <on|off>** — show or hide Beneath the Surface traces
 - **/surface** — reopen the latest persisted reasoning and verification trace
 - **/eval** — run deterministic local agent capability checks
+- **/sandbox**, **/dry-run**, **/rollback** — control execution safety
+- **/index**, **/tdd**, **/learn** — control codebase intelligence and learning
 - **/retry** / **/undo** — revise the latest exchange
 - **/stop** — cancel the active streaming agent run
 - **/export [path]** — export the transcript
@@ -886,7 +888,7 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		m.status = fmt.Sprintf("%d session match(es).", len(results))
 
 	case "/provider":
-		provider, ok := requireArg("/provider <ollama|openai|anthropic|compatible>")
+		provider, ok := requireArg("/provider <connected-route>")
 		if !ok {
 			break
 		}
@@ -894,31 +896,20 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		if provider == "chatgpt" {
 			provider = "codex"
 		}
-		if !config.ValidProvider(provider) {
-			m.status = "Unknown provider: " + provider
+		routeID, connected := m.cfg.FindConnection(provider)
+		if !connected {
+			if _, preset := config.Preset(provider); config.ValidProvider(provider) || preset {
+				m.startConnect(provider)
+				m.notice = "### Connection required\n\n`" + escapeMarkdown(provider) + "` has not been connected yet. Complete this setup once; afterward all of its models remain available from `/models`."
+				break
+			}
+			m.status = "Unknown or unconnected provider: " + provider
 			break
 		}
-		candidate := m.cfg
-		candidate.Provider = provider
-		available, err := m.modelAvailableForConfig(candidate, candidate.Model(), false)
-		if err != nil {
-			m.cfg.Provider = provider
-			m.session.Provider = provider
-			m.session.Model = m.cfg.Model()
-			m.status = fmt.Sprintf("Provider → %s · model → %s (unverified)", provider, m.cfg.Model())
-			m.notice = "### Provider selected with unverified model\n\nThe saved route for `" + provider + "` could not be verified:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nThe saved model ID will be used anyway. If generation fails, run `/connect " + provider + "` or choose a model with `/models`."
-			_ = config.Save(m.cfg)
-			break
-		}
-		if !available {
-			m.startConnect(provider)
-			m.notice = "### Model selection recommended\n\nThe saved model `" + escapeMarkdown(candidate.Model()) + "` is not in this provider's live catalog. Complete the connection flow to choose an advertised model, or type the ID manually if the catalog is incomplete."
-			break
-		}
-		m.cfg.Provider = provider
-		m.session.Provider = provider
+		m.cfg.ActivateConnection(routeID)
+		m.session.Provider = m.cfg.Provider
 		m.session.Model = m.cfg.Model()
-		m.status = fmt.Sprintf("Provider → %s · model → %s", provider, m.cfg.Model())
+		m.status = fmt.Sprintf("Route → %s · model → %s", m.providerName(), m.cfg.Model())
 		_ = config.Save(m.cfg)
 
 	case "/models":
@@ -929,37 +920,60 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 			m.openModelChooser()
 			break
 		}
-		model := strings.TrimSpace(strings.Join(args, " "))
-		available, err := m.modelAvailableForConfig(m.cfg, model, false)
+		rawSelection := strings.TrimSpace(strings.Join(args, " "))
+		routeID, model, explicitRoute := parseModelSelection(rawSelection)
+		candidate := m.cfg
+		if explicitRoute {
+			var found bool
+			candidate, found = m.cfg.ConfigForConnection(routeID)
+			if !found {
+				m.status = "Unknown connection: " + routeID
+				m.notice = "### Model not changed\n\nThe selected route is no longer connected. Run `/models` to refresh the unified model list."
+				break
+			}
+		} else if matchedID, matchedConfig, found := m.findConnectedModel(model); found {
+			routeID = matchedID
+			candidate = matchedConfig
+		} else {
+			routeID = m.cfg.ActiveConnection
+		}
+
+		activate := func() {
+			if routeID != "" {
+				m.cfg.ActivateConnection(routeID)
+			}
+			m.cfg.SetModel(model)
+			m.session.Provider = m.cfg.Provider
+			m.session.Model = m.cfg.Model()
+		}
+
+		available, err := m.modelAvailableForConfig(candidate, model, false)
 		if err != nil {
-			if m.cfg.Provider == "codex" {
+			if candidate.Provider == "codex" {
 				m.status = "Codex model change blocked: " + err.Error()
 				m.notice = "### Codex model not changed\n\nThe Codex model list could not be loaded:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nOpen Codex once to refresh its login and model cache, then retry `/models`."
 				break
 			}
-			m.cfg.SetModel(model)
-			m.session.Model = m.cfg.Model()
-			m.status = "Model → " + m.cfg.Model() + " (unverified)"
-			m.notice = "### Model changed without catalog verification\n\nThe provider catalog could not be checked:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nThe typed model ID is active. If the provider rejects it, run `/models` or `/model <id>` to choose another."
+			activate()
+			m.status = "Model → " + m.cfg.Model() + " via " + m.providerName() + " (unverified)"
+			m.notice = "### Model and route changed without catalog verification\n\nThe saved provider catalog could not be checked:\n\n`" + escapeMarkdown(err.Error()) + "`\n\nThe selected remembered route is active."
 			_ = config.Save(m.cfg)
 			break
 		}
 		if !available {
-			if m.cfg.Provider == "codex" {
+			if candidate.Provider == "codex" {
 				m.status = fmt.Sprintf("Model %q is not available from Codex.", model)
-				m.notice = "### Codex model blocked\n\n`" + escapeMarkdown(model) + "` is not in the Codex ChatGPT model list. Choose one of the listed Codex models so this route stays on subscription auth."
+				m.notice = "### Codex model blocked\n\n`" + escapeMarkdown(model) + "` is not in the Codex ChatGPT model list. Choose one of the listed Codex models."
 				break
 			}
-			m.cfg.SetModel(model)
-			m.session.Model = m.cfg.Model()
-			m.status = "Model → " + m.cfg.Model() + " (not advertised)"
-			m.notice = "### Model changed outside catalog\n\n`" + escapeMarkdown(model) + "` was not advertised by `" + escapeMarkdown(m.providerName()) + "`. It is active anyway because provider catalogs can be incomplete."
+			activate()
+			m.status = "Model → " + m.cfg.Model() + " via " + m.providerName() + " (not advertised)"
+			m.notice = "### Model changed outside catalog\n\n`" + escapeMarkdown(model) + "` was not advertised by `" + escapeMarkdown(m.providerName()) + "`. The saved route was still selected because provider catalogs can be incomplete."
 			_ = config.Save(m.cfg)
 			break
 		}
-		m.cfg.SetModel(model)
-		m.session.Model = m.cfg.Model()
-		m.status = "Model → " + m.cfg.Model()
+		activate()
+		m.status = "Model → " + m.cfg.Model() + " · route → " + m.providerName()
 		_ = config.Save(m.cfg)
 
 	case "/mode":
@@ -1075,6 +1089,115 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		} else {
 			m.status = fmt.Sprintf("Agent eval passed · %d/%d", report.Passed(), len(report.Results))
 		}
+
+	case "/sandbox":
+		value, ok := requireArg("/sandbox <none|snapshot|docker>")
+		if !ok {
+			break
+		}
+		mode, valid := parseSandboxMode(value)
+		if !valid {
+			m.status = "Usage: /sandbox <none|snapshot|docker>"
+			break
+		}
+		m.cfg.SandboxMode = mode
+		_ = config.Save(m.cfg)
+		m.notice = m.safetyNotice()
+		m.status = "Sandbox mode → " + string(mode)
+
+	case "/dry-run":
+		value := "toggle"
+		if len(args) > 0 {
+			value = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		enabled, valid := toggleSetting(m.cfg.AgentDryRun, value)
+		if !valid {
+			m.status = "Usage: /dry-run <on|off|toggle>"
+			break
+		}
+		m.cfg.AgentDryRun = enabled
+		_ = config.Save(m.cfg)
+		m.notice = m.safetyNotice()
+		m.status = fmt.Sprintf("Dry run → %t", enabled)
+
+	case "/rollback":
+		value := "now"
+		if len(args) > 0 {
+			value = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		switch value {
+		case "now":
+			m.rollbackLatestSnapshot()
+		case "auto", "on":
+			m.cfg.AgentAutoRollback = true
+			_ = config.Save(m.cfg)
+			m.notice = m.safetyNotice()
+			m.status = "Automatic rollback → enabled"
+		case "manual", "off":
+			m.cfg.AgentAutoRollback = false
+			_ = config.Save(m.cfg)
+			m.notice = m.safetyNotice()
+			m.status = "Automatic rollback → disabled; failed-run snapshots are retained"
+		case "status":
+			m.notice = m.safetyNotice()
+			m.status = "Safety status opened."
+		default:
+			m.status = "Usage: /rollback [now|auto|manual|status]"
+		}
+
+	case "/index":
+		value, ok := requireArg("/index <on|off|rebuild|status>")
+		if !ok {
+			break
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "on":
+			m.cfg.AgentSemanticIndex = true
+			_ = config.Save(m.cfg)
+			m.status = "Semantic codebase index → enabled"
+		case "off":
+			m.cfg.AgentSemanticIndex = false
+			_ = config.Save(m.cfg)
+			m.status = "Semantic codebase index → disabled"
+		case "rebuild":
+			m.rebuildSemanticIndex()
+		case "status":
+			m.status = "Codebase index status opened."
+		default:
+			m.status = "Usage: /index <on|off|rebuild|status>"
+			break
+		}
+		m.notice = m.intelligenceNotice()
+
+	case "/tdd":
+		value := "toggle"
+		if len(args) > 0 {
+			value = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		enabled, valid := toggleSetting(m.cfg.AgentTDDMode, value)
+		if !valid {
+			m.status = "Usage: /tdd <on|off|toggle>"
+			break
+		}
+		m.cfg.AgentTDDMode = enabled
+		_ = config.Save(m.cfg)
+		m.notice = m.intelligenceNotice()
+		m.status = fmt.Sprintf("TDD mode → %t", enabled)
+
+	case "/learn":
+		value := "toggle"
+		if len(args) > 0 {
+			value = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		enabled, valid := toggleSetting(m.cfg.AgentLearnMemory, value)
+		if !valid {
+			m.status = "Usage: /learn <on|off|toggle>"
+			break
+		}
+		m.cfg.AgentLearnMemory = enabled
+		_ = config.Save(m.cfg)
+		m.notice = m.intelligenceNotice()
+		m.status = fmt.Sprintf("Episodic learning → %t", enabled)
 
 	case "/thinking":
 		value := "toggle"
@@ -1267,7 +1390,9 @@ func (m *Model) applyLoadedSession(loaded history.Session) {
 }
 
 func applyLoadedSessionConfig(cfg *config.Config, loaded history.Session) {
-	if config.ValidProvider(loaded.Provider) {
+	if routeID, ok := cfg.FindConnectionForModel(loaded.Provider, loaded.Model); ok {
+		cfg.ActivateConnection(routeID)
+	} else if config.ValidProvider(loaded.Provider) {
 		cfg.Provider = loaded.Provider
 	}
 	if strings.TrimSpace(loaded.Model) != "" {

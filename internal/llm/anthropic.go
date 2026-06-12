@@ -21,7 +21,7 @@ func NewAnthropic(apiKey string) *Anthropic { return &Anthropic{apiKey: apiKey} 
 func (p *Anthropic) Name() string           { return "anthropic" }
 
 func (p *Anthropic) Capabilities() ProviderCapabilities {
-	return ProviderCapabilities{Streaming: true, NativeTools: true}
+	return ProviderCapabilities{Streaming: true, NativeTools: true, SupportsVision: true, SupportsReasoning: true, MaxParallelTools: 8, ToolCallFormat: "anthropic", StreamingFormat: "sse"}
 }
 
 func (p *Anthropic) Generate(ctx context.Context, req Request) (string, error) {

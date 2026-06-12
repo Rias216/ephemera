@@ -82,7 +82,7 @@ func (p *Ollama) GenerateWithTools(ctx context.Context, req Request, specs []Too
 }
 
 func (p *Ollama) Capabilities() ProviderCapabilities {
-	return ProviderCapabilities{Streaming: true, NativeTools: true}
+	return ProviderCapabilities{Streaming: true, NativeTools: true, SupportsReasoning: true, MaxParallelTools: 1, ToolCallFormat: "ollama", StreamingFormat: "newline-delimited"}
 }
 
 func ollamaWireTools(specs []ToolSpec) ollama.Tools {

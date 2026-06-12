@@ -6,12 +6,16 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
@@ -74,6 +78,12 @@ type Registry struct {
 	ApprovalPolicy  config.ApprovalPolicy
 	MaxOutputTokens int
 	AutoTestCommand string
+	CommandTimeout  time.Duration
+	DryRun          bool
+	SandboxMode     config.SandboxMode
+	WebClient       HTTPDoer
+	GitHubToken     string
+	GitHubAPIURL    string
 }
 
 // NewRegistry creates a tool registry rooted in cfg.WorkspaceRoot or cwd.
@@ -96,6 +106,11 @@ func NewRegistry(cfg config.Config) Registry {
 		ApprovalPolicy:  cfg.ApprovalPolicy,
 		MaxOutputTokens: cfg.MaxToolOutputTokens,
 		AutoTestCommand: cfg.AutoTestCommand,
+		CommandTimeout:  time.Duration(cfg.AgentToolTimeoutSec) * time.Second,
+		DryRun:          cfg.AgentDryRun,
+		SandboxMode:     cfg.SandboxMode,
+		GitHubToken:     strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
+		GitHubAPIURL:    "https://api.github.com",
 	}
 }
 
@@ -120,9 +135,86 @@ func Builtins() []Tool {
 			arg("path", "string", "Workspace-relative directory to search.", false),
 			arg("max", "integer", "Maximum matches to return.", false),
 		}},
+		{Name: "grep_regex", Description: "Regex search across text files. Args: pattern, optional path, max, case_sensitive.", Risk: RiskRead, Arguments: []ArgumentSpec{
+			arg("pattern", "string", "Go-compatible regular expression.", true),
+			arg("path", "string", "Workspace-relative directory to search.", false),
+			arg("max", "integer", "Maximum matches to return.", false),
+			arg("case_sensitive", "boolean", "Use case-sensitive matching.", false),
+		}},
+		{Name: "find_symbol", Description: "Find likely definitions of a function, type, class, or variable. Args: symbol, optional path, max.", Risk: RiskRead, Arguments: []ArgumentSpec{
+			arg("symbol", "string", "Exact symbol name.", true),
+			arg("path", "string", "Workspace-relative directory to search.", false),
+			arg("max", "integer", "Maximum matches to return.", false),
+		}},
+		{Name: "find_refs", Description: "Find references to an exact symbol. Args: symbol, optional path, max.", Risk: RiskRead, Arguments: []ArgumentSpec{
+			arg("symbol", "string", "Exact symbol name.", true),
+			arg("path", "string", "Workspace-relative directory to search.", false),
+			arg("max", "integer", "Maximum matches to return.", false),
+		}},
+		{Name: "file_summary", Description: "Summarize a source file's package, imports, and top-level definitions. Args: path.", Risk: RiskRead, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative source file.", true),
+		}},
+		{Name: "dependency_graph", Description: "Show source import relationships for the workspace or a subdirectory. Args: optional path, max.", Risk: RiskRead, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative directory.", false),
+			arg("max", "integer", "Maximum files to inspect.", false),
+		}},
+		{Name: "detect_project_type", Description: "Detect languages, frameworks, build systems, and test commands from project markers.", Risk: RiskRead},
+		{Name: "list_dependencies", Description: "List declared project dependencies and versions from common manifests.", Risk: RiskRead},
 		{Name: "git_status", Description: "Run git status --short.", Risk: RiskRead},
 		{Name: "git_diff", Description: "Run git diff. Args: optional path.", Risk: RiskRead, Arguments: []ArgumentSpec{
 			arg("path", "string", "Optional workspace-relative path to diff.", false),
+		}},
+		{Name: "git_log", Description: "View concise git history. Args: optional max, path.", Risk: RiskRead, Arguments: []ArgumentSpec{
+			arg("max", "integer", "Maximum commits.", false),
+			arg("path", "string", "Optional workspace-relative path.", false),
+		}},
+		{Name: "git_blame", Description: "Show line attribution for a file. Args: path, optional start_line/end_line.", Risk: RiskRead, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative file.", true),
+			arg("start_line", "integer", "Optional first line.", false),
+			arg("end_line", "integer", "Optional final line.", false),
+		}},
+		{Name: "git_create_branch", Description: "Create and checkout a git branch. Args: name.", Risk: RiskShell, Arguments: []ArgumentSpec{
+			arg("name", "string", "New branch name.", true),
+		}},
+		{Name: "git_checkout", Description: "Checkout an existing branch. Args: name.", Risk: RiskShell, Arguments: []ArgumentSpec{
+			arg("name", "string", "Branch name.", true),
+		}},
+		{Name: "git_commit", Description: "Stage selected paths and commit. Args: message, optional paths.", Risk: RiskShell, Arguments: []ArgumentSpec{
+			arg("message", "string", "Commit message.", true),
+			arg("paths", "string", "Space-separated workspace-relative paths; defaults to all changes.", false),
+		}},
+		{Name: "git_stash", Description: "Push, pop, or list stashes. Args: action, optional message.", Risk: RiskShell, Arguments: []ArgumentSpec{
+			arg("action", "string", "push, pop, or list.", true),
+			arg("message", "string", "Optional stash message for push.", false),
+		}},
+		{Name: "git_merge", Description: "Merge a branch with conflict detection. Args: branch.", Risk: RiskShell, Arguments: []ArgumentSpec{
+			arg("branch", "string", "Branch to merge.", true),
+		}},
+		{Name: "web_fetch", Description: "Fetch a public HTTP(S) URL as bounded readable text. Args: url, optional max_chars.", Risk: RiskRead, Arguments: []ArgumentSpec{
+			arg("url", "string", "Public HTTP or HTTPS URL.", true),
+			arg("max_chars", "integer", "Maximum returned characters (1000-200000).", false),
+		}},
+		{Name: "github_issue", Description: "Read, create, update, or comment on a GitHub issue. Args: action, repository, and action-specific fields.", Risk: RiskShell, Arguments: []ArgumentSpec{
+			arg("action", "string", "get, list, create, update, or comment.", true),
+			arg("repository", "string", "GitHub repository as owner/name.", true),
+			arg("number", "integer", "Issue number for get, update, or comment.", false),
+			arg("title", "string", "Issue title for create or update.", false),
+			arg("body", "string", "Issue body or comment text.", false),
+			arg("state", "string", "open or closed.", false),
+			arg("labels", "string", "Comma-separated label names.", false),
+			arg("max", "integer", "Maximum list results, up to 100.", false),
+		}},
+		{Name: "github_pr", Description: "Read, create, update, review, or comment on a GitHub pull request. Args: action, repository, and action-specific fields.", Risk: RiskShell, Arguments: []ArgumentSpec{
+			arg("action", "string", "get, list, create, update, review, or comment.", true),
+			arg("repository", "string", "GitHub repository as owner/name.", true),
+			arg("number", "integer", "Pull request number for get, update, review, or comment.", false),
+			arg("title", "string", "Pull request title for create or update.", false),
+			arg("body", "string", "Pull request body, review body, or comment text.", false),
+			arg("state", "string", "open or closed.", false),
+			arg("head", "string", "Source branch for create.", false),
+			arg("base", "string", "Target branch for create or update.", false),
+			arg("event", "string", "APPROVE, REQUEST_CHANGES, or COMMENT for review.", false),
+			arg("max", "integer", "Maximum list results, up to 100.", false),
 		}},
 		{Name: "apply_patch", Description: "Write complete file content. Args: path, content. Prefer replace_in_file for small edits.", Risk: RiskWrite, Arguments: []ArgumentSpec{
 			arg("path", "string", "Workspace-relative file path to create or replace.", true),
@@ -134,13 +226,16 @@ func Builtins() []Tool {
 			arg("new", "string", "Replacement text. Empty string deletes the old text.", false),
 			arg("all", "boolean", "Replace all occurrences instead of requiring one unique match.", false),
 		}},
-		{Name: "shell", Description: "Run a PowerShell command in the workspace. Args: command.", Risk: RiskShell, Arguments: []ArgumentSpec{
-			arg("command", "string", "PowerShell command to run from the workspace root.", true),
+		{Name: "shell", Description: "Run a shell command in the workspace. Args: command.", Risk: RiskShell, Arguments: []ArgumentSpec{
+			arg("command", "string", "Shell command to run from the workspace root.", true),
 		}},
 		{Name: "go_test", Description: "Run the configured test command.", Risk: RiskShell},
-		{Name: "delegate", Description: "Spawn an isolated read-only specialist. Args: task, optional role (explore/review/debug).", Risk: RiskRead, Arguments: []ArgumentSpec{
+		{Name: "run_linter", Description: "Detect and run the project's configured linter.", Risk: RiskShell},
+		{Name: "run_formatter", Description: "Detect and run the project's formatter. This may rewrite source files.", Risk: RiskShell},
+		{Name: "security_audit", Description: "Run the ecosystem's available dependency security audit.", Risk: RiskShell},
+		{Name: "delegate", Description: "Spawn an isolated read-only specialist. Args: task, optional role (explore/review/debug/critic).", Risk: RiskRead, Arguments: []ArgumentSpec{
 			arg("task", "string", "Focused read-only task for the specialist.", true),
-			arg("role", "string", "Specialist role: explore, review, or debug.", false),
+			arg("role", "string", "Specialist role: explore, review, debug, or critic.", false),
 		}},
 	}
 }
@@ -158,6 +253,7 @@ func ToolSpecs() []llm.ToolSpec {
 			Name:        tool.Name,
 			Description: tool.Description,
 			Parameters:  tool.ParameterSchema(),
+			Version:     "1.0.0",
 		})
 	}
 	return specs
@@ -214,6 +310,89 @@ func (r Registry) RequiresApproval(name string) bool {
 	}
 }
 
+// Normalize applies conservative provider-output repairs and then validates the call.
+// It never guesses between conflicting values.
+func (r Registry) Normalize(call Call) (Call, error) {
+	call.Name = strings.TrimSpace(call.Name)
+	if call.Arguments == nil {
+		call.Arguments = map[string]any{}
+	}
+	aliases := map[string]map[string]string{
+		"list_files":        {"directory": "path", "dir": "path", "limit": "max"},
+		"tree":              {"directory": "path", "dir": "path", "max_depth": "depth"},
+		"read_file":         {"file": "path", "filename": "path", "start": "start_line", "end": "end_line"},
+		"search":            {"pattern": "query", "text": "query", "directory": "path", "dir": "path", "limit": "max"},
+		"grep_regex":        {"query": "pattern", "regex": "pattern", "directory": "path", "dir": "path", "limit": "max"},
+		"find_symbol":       {"name": "symbol", "query": "symbol", "directory": "path", "dir": "path", "limit": "max"},
+		"find_refs":         {"name": "symbol", "query": "symbol", "directory": "path", "dir": "path", "limit": "max"},
+		"file_summary":      {"file": "path", "filename": "path"},
+		"dependency_graph":  {"directory": "path", "dir": "path", "limit": "max"},
+		"web_fetch":         {"link": "url", "uri": "url", "limit": "max_chars"},
+		"github_issue":      {"repo": "repository", "issue": "number", "limit": "max"},
+		"github_pr":         {"repo": "repository", "pr": "number", "limit": "max"},
+		"git_diff":          {"file": "path"},
+		"git_log":           {"file": "path", "limit": "max"},
+		"git_blame":         {"file": "path", "filename": "path", "start": "start_line", "end": "end_line"},
+		"git_create_branch": {"branch": "name"},
+		"git_checkout":      {"branch": "name"},
+		"git_commit":        {"msg": "message", "files": "paths"},
+		"git_merge":         {"name": "branch"},
+		"apply_patch":       {"file": "path", "filename": "path", "text": "content"},
+		"replace_in_file":   {"file": "path", "filename": "path", "old_text": "old", "new_text": "new", "replace_all": "all"},
+		"shell":             {"cmd": "command"},
+		"delegate":          {"prompt": "task", "specialist": "role"},
+	}
+	for alias, canonical := range aliases[call.Name] {
+		value, exists := call.Arguments[alias]
+		if !exists {
+			continue
+		}
+		if current, conflict := call.Arguments[canonical]; conflict && fmt.Sprint(current) != fmt.Sprint(value) {
+			return call, fmt.Errorf("%s received conflicting %q and %q arguments", call.Name, canonical, alias)
+		}
+		if _, exists := call.Arguments[canonical]; !exists {
+			call.Arguments[canonical] = value
+		}
+		delete(call.Arguments, alias)
+	}
+	tool, ok := Lookup(call.Name)
+	if !ok {
+		return call, fmt.Errorf("unknown tool %q", call.Name)
+	}
+	for _, argument := range tool.Arguments {
+		value, exists := call.Arguments[argument.Name]
+		if !exists {
+			continue
+		}
+		if value == nil && !argument.Required {
+			delete(call.Arguments, argument.Name)
+			continue
+		}
+		switch argument.Type {
+		case "integer":
+			switch item := value.(type) {
+			case string:
+				parsed, err := strconv.ParseInt(strings.TrimSpace(item), 10, 64)
+				if err == nil {
+					call.Arguments[argument.Name] = parsed
+				}
+			case float64:
+				if item == float64(int64(item)) {
+					call.Arguments[argument.Name] = int64(item)
+				}
+			}
+		case "boolean":
+			if item, ok := value.(string); ok {
+				parsed, err := strconv.ParseBool(strings.TrimSpace(item))
+				if err == nil {
+					call.Arguments[argument.Name] = parsed
+				}
+			}
+		}
+	}
+	return call, r.Validate(call)
+}
+
 // Validate checks the shape of a tool call before execution.
 func (r Registry) Validate(call Call) error {
 	tool, ok := Lookup(call.Name)
@@ -248,10 +427,18 @@ func (r Registry) ResolvePath(value string) (string, error) { return r.safePath(
 
 // Execute runs one approved tool call.
 func (r Registry) Execute(ctx context.Context, call Call) Result {
+	return r.ExecuteStream(ctx, call, nil)
+}
+
+// ExecuteStream runs a tool and publishes safe incremental command output.
+func (r Registry) ExecuteStream(ctx context.Context, call Call, emit func(string)) Result {
 	started := time.Now()
 	finish := func(result Result, risk Risk) Result {
 		result.Tool = call.Name
 		result.Duration = time.Since(started)
+		if result.OK && strings.TrimSpace(result.Output) == "" {
+			result.Output = emptySuccessOutput(call.Name)
+		}
 		result.Output = truncateApproxTokens(result.Output, r.MaxOutputTokens)
 		result.Error = truncateApproxTokens(result.Error, r.MaxOutputTokens)
 		if result.Metadata == nil {
@@ -262,18 +449,21 @@ func (r Registry) Execute(ctx context.Context, call Call) Result {
 		result.Metadata["duration_ms"] = result.Duration.Milliseconds()
 		return result
 	}
-	tool, ok := Lookup(call.Name)
-	if !ok {
-		return finish(fail(call.Name, "unknown tool"), "")
-	}
-	if err := r.Validate(call); err != nil {
+	normalized, err := r.Normalize(call)
+	if err != nil {
+		tool, _ := Lookup(call.Name)
 		return finish(fail(call.Name, err.Error()), tool.Risk)
 	}
+	call = normalized
+	tool, _ := Lookup(call.Name)
 	if r.ApprovalPolicy == config.ApprovalChat {
 		return finish(fail(call.Name, "agent tools are disabled by chat approval policy"), tool.Risk)
 	}
 	if r.ApprovalPolicy == config.ApprovalReadOnly && tool.Risk != RiskRead {
 		return finish(fail(call.Name, "write and shell tools are disabled by read-only policy"), tool.Risk)
+	}
+	if r.DryRun && tool.Risk != RiskRead {
+		return finish(r.preview(call), tool.Risk)
 	}
 
 	var result Result
@@ -286,28 +476,181 @@ func (r Registry) Execute(ctx context.Context, call Call) Result {
 		result = r.readFile(call)
 	case "search":
 		result = r.search(call)
+	case "grep_regex":
+		result = r.grepRegex(call)
+	case "find_symbol":
+		result = r.findSymbol(call)
+	case "find_refs":
+		result = r.findRefs(call)
+	case "file_summary":
+		result = r.fileSummary(call)
+	case "dependency_graph":
+		result = r.dependencyGraph(call)
+	case "detect_project_type":
+		result = r.detectProjectType(call)
+	case "list_dependencies":
+		result = r.listDependencies(call)
+	case "web_fetch":
+		result = r.webFetch(ctx, call)
+	case "github_issue":
+		result = r.githubIssue(ctx, call)
+	case "github_pr":
+		result = r.githubPullRequest(ctx, call)
 	case "git_status":
-		result = r.runCommand(ctx, "git status --short")
+		result = r.runCommand(ctx, "git status --short", emit)
 	case "git_diff":
 		command := "git diff"
 		if path := strings.TrimSpace(argString(call, "path")); path != "" {
 			command += " -- " + shellQuote(path)
 		}
-		result = r.runCommand(ctx, command)
+		result = r.runCommand(ctx, command, emit)
+	case "git_log":
+		result = r.gitLog(ctx, call, emit)
+	case "git_blame":
+		result = r.gitBlame(ctx, call, emit)
+	case "git_create_branch":
+		result = r.gitCreateBranch(ctx, call, emit)
+	case "git_checkout":
+		result = r.gitCheckout(ctx, call, emit)
+	case "git_commit":
+		result = r.gitCommit(ctx, call, emit)
+	case "git_stash":
+		result = r.gitStash(ctx, call, emit)
+	case "git_merge":
+		result = r.gitMerge(ctx, call, emit)
 	case "apply_patch":
 		result = r.applyPatch(call)
 	case "replace_in_file":
 		result = r.replaceInFile(call)
 	case "shell":
-		result = r.runCommand(ctx, argString(call, "command"))
+		result = r.runCommand(ctx, argString(call, "command"), emit)
 	case "go_test":
-		result = r.runCommand(ctx, r.AutoTestCommand)
+		result = r.runCommand(ctx, r.AutoTestCommand, emit)
+	case "run_linter":
+		if command, commandErr := r.projectCommand("lint"); commandErr != nil {
+			result = fail(call.Name, commandErr.Error())
+		} else {
+			result = r.runCommand(ctx, command, emit)
+		}
+	case "run_formatter":
+		if command, commandErr := r.projectCommand("format"); commandErr != nil {
+			result = fail(call.Name, commandErr.Error())
+		} else {
+			result = r.runCommand(ctx, command, emit)
+		}
+	case "security_audit":
+		if command, commandErr := r.projectCommand("audit"); commandErr != nil {
+			result = fail(call.Name, commandErr.Error())
+		} else {
+			result = r.runCommand(ctx, command, emit)
+		}
 	case "delegate":
 		result = fail(call.Name, "delegate is executed by the agent orchestrator")
 	default:
 		result = fail(call.Name, "tool is not implemented")
 	}
 	return finish(result, tool.Risk)
+}
+
+// Preview simulates a normalized tool call without mutating the workspace.
+func (r Registry) Preview(call Call) Result {
+	normalized, err := r.Normalize(call)
+	if err != nil {
+		return fail(call.Name, err.Error())
+	}
+	return r.preview(normalized)
+}
+
+func (r Registry) preview(call Call) Result {
+	result := Result{Tool: call.Name, OK: true, Metadata: map[string]any{"dry_run": true, "changed": false}}
+	switch call.Name {
+	case "apply_patch":
+		path, err := r.safePath(argString(call, "path"))
+		if err != nil {
+			return fail(call.Name, err.Error())
+		}
+		content, ok := call.Arguments["content"].(string)
+		if !ok {
+			return fail(call.Name, "content is required")
+		}
+		before, _ := os.ReadFile(path)
+		rel, _ := filepath.Rel(r.WorkspaceRoot, path)
+		result.Output = renderDryRunDiff(filepath.ToSlash(rel), string(before), content)
+		result.Metadata["path"] = filepath.ToSlash(rel)
+	case "github_issue", "github_pr":
+		if err := validateGitHubPreview(call); err != nil {
+			return fail(call.Name, err.Error())
+		}
+		result.Output = "DRY RUN: would execute " + call.Name + " " + marshalPreviewArgs(call.Arguments)
+	case "replace_in_file":
+		path, err := r.safePath(argString(call, "path"))
+		if err != nil {
+			return fail(call.Name, err.Error())
+		}
+		before, err := os.ReadFile(path)
+		if err != nil {
+			return fail(call.Name, err.Error())
+		}
+		oldText := argString(call, "old")
+		count := strings.Count(string(before), oldText)
+		if oldText == "" || count == 0 {
+			return fail(call.Name, "old text was not found")
+		}
+		if count > 1 && !argBoolDefault(call, "all", false) {
+			return fail(call.Name, fmt.Sprintf("old text matched %d times; make it unique or set all=true", count))
+		}
+		limit := 1
+		if argBoolDefault(call, "all", false) {
+			limit = -1
+		}
+		after := strings.Replace(string(before), oldText, argString(call, "new"), limit)
+		rel, _ := filepath.Rel(r.WorkspaceRoot, path)
+		result.Output = renderDryRunDiff(filepath.ToSlash(rel), string(before), after)
+		result.Metadata["path"] = filepath.ToSlash(rel)
+		result.Metadata["replacements"] = count
+	default:
+		command := strings.TrimSpace(argString(call, "command"))
+		if command == "" {
+			switch call.Name {
+			case "go_test":
+				command = r.AutoTestCommand
+			case "run_linter":
+				command, _ = r.projectCommand("lint")
+			case "run_formatter":
+				command, _ = r.projectCommand("format")
+			case "security_audit":
+				command, _ = r.projectCommand("audit")
+			default:
+				command = call.Name + " " + marshalPreviewArgs(call.Arguments)
+			}
+		}
+		result.Output = "DRY RUN: would execute " + strings.TrimSpace(command)
+	}
+	return result
+}
+
+func renderDryRunDiff(path, before, after string) string {
+	if before == after {
+		return "DRY RUN: no content change for " + path
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "DRY RUN diff for %s\n--- a/%s\n+++ b/%s\n@@ complete-file preview @@\n", path, path, path)
+	for _, line := range strings.Split(strings.ReplaceAll(before, "\r\n", "\n"), "\n") {
+		b.WriteString("-")
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(after, "\r\n", "\n"), "\n") {
+		b.WriteString("+")
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func marshalPreviewArgs(arguments map[string]any) string {
+	data, _ := json.Marshal(arguments)
+	return string(data)
 }
 
 func (r Registry) listFiles(call Call) Result {
@@ -338,7 +681,10 @@ func (r Registry) listFiles(call Call) Result {
 		return fail(call.Name, err.Error())
 	}
 	sort.Strings(files)
-	return ok(call.Name, strings.Join(files, "\n"))
+	result := ok(call.Name, strings.Join(files, "\n"))
+	requested := filepath.ToSlash(filepath.Clean(argStringDefault(call, "path", ".")))
+	result.Metadata = map[string]any{"path": requested, "count": len(files), "max": maxItems}
+	return result
 }
 
 func (r Registry) tree(call Call) Result {
@@ -379,7 +725,10 @@ func (r Registry) tree(call Call) Result {
 	if err != nil {
 		return fail(call.Name, err.Error())
 	}
-	return ok(call.Name, strings.Join(lines, "\n"))
+	result := ok(call.Name, strings.Join(lines, "\n"))
+	requested := filepath.ToSlash(filepath.Clean(argStringDefault(call, "path", ".")))
+	result.Metadata = map[string]any{"path": requested, "entries": len(lines), "depth": depth}
+	return result
 }
 
 func (r Registry) readFile(call Call) Result {
@@ -449,7 +798,10 @@ func (r Registry) search(call Call) Result {
 		}
 		return nil
 	})
-	return ok(call.Name, strings.Join(matches, "\n"))
+	result := ok(call.Name, strings.Join(matches, "\n"))
+	requested := filepath.ToSlash(filepath.Clean(argStringDefault(call, "path", ".")))
+	result.Metadata = map[string]any{"path": requested, "query": query, "matches": len(matches), "max": maxItems}
+	return result
 }
 
 func (r Registry) applyPatch(call Call) Result {
@@ -509,7 +861,7 @@ func (r Registry) replaceInFile(call Call) Result {
 	return result
 }
 
-func (r Registry) runCommand(ctx context.Context, command string) Result {
+func (r Registry) runCommand(ctx context.Context, command string, emit func(string)) Result {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return fail("shell", "command is required")
@@ -517,19 +869,99 @@ func (r Registry) runCommand(ctx context.Context, command string) Result {
 	if looksDangerousCommand(command) {
 		return Result{OK: false, Error: "refusing destructive shell command"}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	timeout := r.CommandTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", command)
-	cmd.Dir = r.WorkspaceRoot
-	data, err := cmd.CombinedOutput()
-	output := string(data)
+	var cmd *exec.Cmd
+	sandbox := "host"
+	if r.SandboxMode == config.SandboxDocker {
+		dockerPath, err := exec.LookPath("docker")
+		if err != nil {
+			return Result{OK: false, Error: "docker sandbox requested, but docker is not installed or not on PATH", Metadata: map[string]any{"sandbox": "docker"}}
+		}
+		image := r.dockerSandboxImage()
+		inspect := exec.CommandContext(ctx, dockerPath, "image", "inspect", image)
+		if err := inspect.Run(); err != nil {
+			return Result{OK: false, Error: "docker sandbox image is unavailable locally: " + image + " (pull it before running with network isolation)", Metadata: map[string]any{"sandbox": "docker", "image": image}}
+		}
+		mount := r.WorkspaceRoot + ":/workspace"
+		cmd = exec.CommandContext(ctx, dockerPath,
+			"run", "--rm", "--network", "none", "--read-only",
+			"--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
+			"-v", mount, "-w", "/workspace", image, "sh", "-lc", command,
+		)
+		sandbox = "docker"
+	} else if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", command)
+		cmd.Dir = r.WorkspaceRoot
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-lc", command)
+		cmd.Dir = r.WorkspaceRoot
+	}
+	var output synchronizedBuffer
+	writer := io.Writer(&output)
+	if emit != nil {
+		writer = io.MultiWriter(&output, streamWriter{emit: emit})
+	}
+	cmd.Stdout = writer
+	cmd.Stderr = writer
+	err := cmd.Run()
+	text := output.String()
 	if ctx.Err() == context.DeadlineExceeded {
-		return Result{OK: false, Output: output, Error: "command timed out"}
+		return Result{OK: false, Output: text, Error: "command timed out", Metadata: map[string]any{"sandbox": sandbox}}
 	}
 	if err != nil {
-		return Result{OK: false, Output: output, Error: err.Error()}
+		return Result{OK: false, Output: text, Error: err.Error(), Metadata: map[string]any{"sandbox": sandbox}}
 	}
-	return Result{OK: true, Output: output}
+	return Result{OK: true, Output: text, Metadata: map[string]any{"sandbox": sandbox}}
+}
+
+func (r Registry) dockerSandboxImage() string {
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(r.WorkspaceRoot, name))
+		return err == nil
+	}
+	switch {
+	case exists("go.mod"):
+		return "golang:1.25-alpine"
+	case exists("package.json"):
+		return "node:24-alpine"
+	case exists("pyproject.toml") || exists("requirements.txt"):
+		return "python:3.13-alpine"
+	case exists("Cargo.toml"):
+		return "rust:1.88-alpine"
+	default:
+		return "alpine:3.21"
+	}
+}
+
+type synchronizedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (b *synchronizedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(data)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+type streamWriter struct{ emit func(string) }
+
+func (w streamWriter) Write(data []byte) (int, error) {
+	if len(data) > 0 && w.emit != nil {
+		w.emit(string(append([]byte(nil), data...)))
+	}
+	return len(data), nil
 }
 
 func looksDangerousCommand(command string) bool {
@@ -717,7 +1149,10 @@ func argBoolDefault(call Call, key string, fallback bool) bool {
 }
 
 func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	if runtime.GOOS == "windows" {
+		return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func shouldSkipDir(name string) bool {
@@ -743,10 +1178,36 @@ func truncateApproxTokens(value string, maxTokens int) string {
 		maxTokens = 6000
 	}
 	maxChars := maxTokens * 4
-	if len(value) <= maxChars {
+	runes := []rune(value)
+	if len(runes) <= maxChars {
 		return strings.TrimRight(value, "\r\n")
 	}
-	return strings.TrimRight(value[:maxChars], "\r\n") + "\n... truncated ..."
+	head := maxChars * 2 / 3
+	tail := maxChars - head
+	return strings.TrimRight(string(runes[:head]), "\r\n") + "\n... truncated; tail preserved ...\n" + strings.TrimLeft(string(runes[len(runes)-tail:]), "\r\n")
+}
+
+func emptySuccessOutput(tool string) string {
+	switch tool {
+	case "list_files":
+		return "No files found in the requested path. The directory exists and is empty or contains only ignored directories."
+	case "tree":
+		return "The requested path contains no visible entries."
+	case "search":
+		return "No matches found for the requested query."
+	case "read_file":
+		return "The requested file or line range is empty."
+	case "git_status":
+		return "Working tree clean; git status returned no changes."
+	case "git_diff":
+		return "No unstaged diff; git diff returned no changes."
+	case "go_test":
+		return "Verification command completed successfully with no output."
+	case "shell":
+		return "Command completed successfully with no output."
+	default:
+		return "Tool completed successfully with no output."
+	}
 }
 
 func ok(tool, output string) Result {

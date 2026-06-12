@@ -21,7 +21,7 @@ var version = "dev"
 func main() {
 	var (
 		sessionName = flag.String("session", "", "load or create a named session")
-		provider    = flag.String("provider", "", "override provider: ollama, openai, anthropic, compatible")
+		provider    = flag.String("provider", "", "activate a remembered provider route")
 		model       = flag.String("model", "", "override model for the selected provider")
 		mode        = flag.String("mode", "", "override mode: normal, deep-reason, concise, creative")
 		agentEval   = flag.Bool("agent-eval", false, "run deterministic local agent capability eval and exit")
@@ -51,10 +51,13 @@ func main() {
 	}
 	if *provider != "" {
 		value := strings.ToLower(strings.TrimSpace(*provider))
-		if !config.ValidProvider(value) {
-			fatal("provider", fmt.Errorf("unsupported provider %q", *provider))
+		if routeID, ok := cfg.FindConnection(value); ok {
+			cfg.ActivateConnection(routeID)
+		} else if config.ValidProvider(value) {
+			cfg.Provider = value
+		} else {
+			fatal("provider", fmt.Errorf("route %q is not connected", *provider))
 		}
-		cfg.Provider = value
 	}
 	if *model != "" {
 		cfg.SetModel(*model)

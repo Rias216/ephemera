@@ -97,3 +97,24 @@ func TestSelectAgentMessagesHonorsBudget(t *testing.T) {
 		t.Fatal("selection must begin with a user message")
 	}
 }
+
+func TestSelectAgentMessagesAddsDeterministicCompactionSummary(t *testing.T) {
+	var messages []history.Message
+	for index := 0; index < 16; index++ {
+		role := "user"
+		if index%2 == 1 {
+			role = "assistant"
+		}
+		messages = append(messages, history.Message{Role: role, Content: strings.Repeat(string(rune('a'+index%20)), 360)})
+	}
+	selected, stats := selectAgentMessagesWithSummary(messages, strings.Repeat("s", 200), 900, 180)
+	if stats.Dropped == 0 || len(selected) < 2 {
+		t.Fatalf("selection=%d stats=%+v", len(selected), stats)
+	}
+	if selected[0].Role != "user" || !strings.Contains(selected[0].Content, "Condensed earlier conversation") {
+		t.Fatalf("first message = %#v", selected[0])
+	}
+	if estimateVisibleTokens(strings.Repeat("s", 200))+messageSliceTokens(selected) > 920 {
+		t.Fatalf("compacted context exceeded budget: %d", estimateVisibleTokens(strings.Repeat("s", 200))+messageSliceTokens(selected))
+	}
+}

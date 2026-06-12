@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -100,5 +101,89 @@ func TestEmitMissingDeltaAvoidsCompletedEventReplay(t *testing.T) {
 	}
 	if len(emitted) != 0 {
 		t.Fatalf("replayed completed event: %#v", emitted)
+	}
+}
+
+func TestToolActivityTextReportsIncrementalProgress(t *testing.T) {
+	if got := toolActivityText("read_file", 0); got != "Preparing read_file…" {
+		t.Fatalf("initial activity = %q", got)
+	}
+	if got := toolActivityText("read_file", 64); got != "Preparing read_file · 64 argument chars" {
+		t.Fatalf("incremental activity = %q", got)
+	}
+}
+
+func TestOpenAIWireMessagesPreserveNativeToolHistory(t *testing.T) {
+	messages := openAIWireMessages(Request{
+		System: "system",
+		Messages: []Message{
+			{Role: "user", Content: "inspect"},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Name: "list_files", Arguments: map[string]any{"path": "."}}}},
+			{Role: "tool", ToolResult: &ToolResult{ID: "call_1", Name: "list_files", OK: true, Output: "main.go"}},
+		},
+	})
+	data, err := json.Marshal(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{`"role":"assistant"`, `"tool_calls"`, `"id":"call_1"`, `"role":"tool"`, `"tool_call_id":"call_1"`, `\"output\":\"main.go\"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("wire messages missing %s: %s", want, text)
+		}
+	}
+}
+
+func TestOpenAIResponsesInputPreservesFunctionCallAndOutput(t *testing.T) {
+	input := openAIResponsesInput([]Message{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Name: "list_files", Arguments: map[string]any{"path": "."}}}},
+		{Role: "tool", ToolResult: &ToolResult{ID: "call_1", Name: "list_files", OK: true, Output: "main.go"}},
+	})
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{`"type":"function_call"`, `"call_id":"call_1"`, `"name":"list_files"`, `"type":"function_call_output"`, `"output"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("responses input missing %s: %s", want, text)
+		}
+	}
+}
+
+func TestAnthropicWireMessagesPreserveToolUseAndResult(t *testing.T) {
+	messages := anthropicWireMessages([]Message{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "toolu_1", Name: "list_files", Arguments: map[string]any{"path": "."}}}},
+		{Role: "tool", ToolResult: &ToolResult{ID: "toolu_1", Name: "list_files", OK: true, Output: "main.go"}},
+	})
+	data, err := json.Marshal(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{`"type":"tool_use"`, `"id":"toolu_1"`, `"type":"tool_result"`, `"tool_use_id":"toolu_1"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("anthropic messages missing %s: %s", want, text)
+		}
+	}
+}
+
+func TestOllamaWireMessagesPreserveToolHistory(t *testing.T) {
+	messages := ollamaWireMessages(Request{
+		System: "system",
+		Messages: []Message{
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Name: "list_files", Arguments: map[string]any{"path": "."}}}},
+			{Role: "tool", ToolResult: &ToolResult{ID: "call_1", Name: "list_files", OK: true, Output: "main.go"}},
+		},
+	})
+	data, err := json.Marshal(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{`"tool_calls"`, `"name":"list_files"`, `"role":"tool"`, `"tool_name":"list_files"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("ollama messages missing %s: %s", want, text)
+		}
 	}
 }

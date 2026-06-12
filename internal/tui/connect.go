@@ -261,27 +261,22 @@ func (m *Model) finishConnect() {
 			display = flow.Name
 		}
 		m.notice = fmt.Sprintf(
-			"### Connected\n\nProvider: `%s`  \nModel: `%s`\n\nThe connection is active. API keys entered here remain only in this process; use environment variables for persistence.",
+			"### Connected and remembered\n\nProvider: `%s`  \nModel: `%s`\n\nThis route and its model catalog are now reusable from `/models`. Entered credentials are kept in Ephemera's user-local credential file.",
 			display,
 			flow.Model,
 		)
 	}
 
-	m.cfg.Provider = flow.Provider
-	switch flow.Provider {
-	case "ollama":
-		m.cfg.OllamaURL = flow.BaseURL
-	case "openai":
-		m.cfg.OpenAIKey = flow.APIKey
-	case "codex":
-	case "anthropic":
-		m.cfg.AnthropicKey = flow.APIKey
-	case "compatible":
-		m.cfg.CompatibleName = flow.Name
-		m.cfg.CompatibleURL = flow.BaseURL
-		m.cfg.CompatibleKey = flow.APIKey
+	connection := config.SavedConnection{
+		Provider: flow.Provider,
+		Name:     flow.Name,
+		BaseURL:  flow.BaseURL,
+		Model:    flow.Model,
 	}
-	m.cfg.SetModel(flow.Model)
+	if preset, ok := config.Preset(flow.Name); ok {
+		connection.APIKeyEnv = preset.APIKeyEnv
+	}
+	m.cfg.RememberConnection(connection, flow.APIKey)
 	m.session.Provider = m.cfg.Provider
 	m.session.Model = m.cfg.Model()
 	_ = config.Save(m.cfg)
@@ -291,7 +286,7 @@ func (m *Model) finishConnect() {
 	if flow.Provider == "compatible" {
 		display = flow.Name
 	}
-	m.status = fmt.Sprintf("Connected → %s · %s", display, flow.Model)
+	m.status = fmt.Sprintf("Connected and remembered → %s · %s", display, flow.Model)
 	m.connect = nil
 	m.restorePromptInput()
 	m.rebuildSuggestions()
@@ -333,6 +328,9 @@ func (m Model) connectPlaceholder() string {
 		}
 		return "OpenAI-compatible base URL [" + m.defaultCompatibleBaseURL() + "]"
 	case connectAPIKey:
+		if m.cfg.CredentialForConnection(m.connectConnectionID()) != "" {
+			return "API key [Enter uses remembered credential]"
+		}
 		switch m.connect.Provider {
 		case "openai":
 			if os.Getenv("OPENAI_API_KEY") != "" {
@@ -455,7 +453,7 @@ func (m Model) connectStepGuidance() string {
 	case connectBaseURL:
 		return "Enter the API base URL. Press Enter to accept the suggested default shown in brackets."
 	case connectAPIKey:
-		return "Enter an API key, or press Enter to use the detected environment variable when available. The value is never written to config.json."
+		return "Enter an API key, or press Enter to reuse a remembered credential or detected environment variable. Keys stay outside config.json."
 	case connectModel:
 		return "Choose an advertised model, or type a model ID manually when the provider catalog is incomplete."
 	case connectReview:
@@ -478,33 +476,29 @@ func (m *Model) openModelChooser() {
 	m.input.SetValue("/model ")
 	m.input.CursorEnd()
 	m.rebuildSuggestions()
-	catalog := m.modelCatalogForConfig(m.cfg, false)
-	provider := m.cfg.Provider
-	if provider == "compatible" && strings.TrimSpace(m.cfg.CompatibleName) != "" {
-		provider = m.cfg.CompatibleName
-	}
-	if catalog.Err != nil {
-		m.notice = "### Models unavailable\n\nThe live catalog for `" + provider + "` could not be loaded:\n\n`" + escapeMarkdown(catalog.Err.Error()) + "`\n\nCheck the active endpoint and credentials, or type a model ID directly with `/model <id>`."
-		m.status = "Model catalog unavailable: " + catalog.Err.Error()
-		return
-	}
-	if len(catalog.Models) == 0 {
-		m.notice = "### Models unavailable\n\nThe provider returned an empty catalog. Type a model ID directly with `/model <id>` if you know one."
-		m.status = "Provider returned no available models."
+	models := m.connectedModelSuggestions()
+	if len(models) == 0 {
+		m.notice = "### Models unavailable\n\nNone of the remembered connections returned a model catalog. Check credentials with `/doctor`, or add a route with `/connect`."
+		m.status = "No connected model catalogs are currently available."
 		return
 	}
 	m.notice = fmt.Sprintf(
-		"### Available models\n\n`%s` advertised **%d** model(s). Choose one from the live catalog below. Use **↑/↓** and **Enter** to activate the highlighted model, or **Tab** to only fill the input.",
-		provider,
-		len(catalog.Models),
+		"### Models from all connections\n\n**%d** model(s) are available across **%d** remembered route(s). Choose any model below; Ephemera switches its saved route automatically. Use **↑/↓** and **Enter** to activate the highlighted model.",
+		len(models),
+		len(m.cfg.ConnectedConnections()),
 	)
-	m.status = fmt.Sprintf("Choose one of %d available models for %s.", len(catalog.Models), provider)
+	m.status = fmt.Sprintf("Choose one of %d models across connected providers.", len(models))
 }
 
 func (m *Model) connectModelListConfig() config.Config {
 	cfg := m.cfg
 	if m.connect == nil {
 		return cfg
+	}
+	if id := m.connectConnectionID(); id != "" {
+		if remembered, ok := m.cfg.ConfigForConnection(id); ok {
+			cfg = remembered
+		}
 	}
 	cfg.Provider = m.connect.Provider
 	switch m.connect.Provider {
@@ -513,16 +507,29 @@ func (m *Model) connectModelListConfig() config.Config {
 			cfg.OllamaURL = m.connect.BaseURL
 		}
 	case "openai":
-		cfg.OpenAIKey = m.connect.APIKey
+		if strings.TrimSpace(m.connect.APIKey) != "" {
+			cfg.OpenAIKey = m.connect.APIKey
+		}
 	case "codex":
 	case "anthropic":
-		cfg.AnthropicKey = m.connect.APIKey
+		if strings.TrimSpace(m.connect.APIKey) != "" {
+			cfg.AnthropicKey = m.connect.APIKey
+		}
 	case "compatible":
 		cfg.CompatibleName = m.connect.Name
 		cfg.CompatibleURL = m.connect.BaseURL
-		cfg.CompatibleKey = m.connect.APIKey
+		if strings.TrimSpace(m.connect.APIKey) != "" {
+			cfg.CompatibleKey = m.connect.APIKey
+		}
 	}
 	return cfg
+}
+
+func (m Model) connectConnectionID() string {
+	if m.connect == nil || strings.TrimSpace(m.connect.Provider) == "" {
+		return ""
+	}
+	return config.ConnectionID(m.connect.Provider, m.connect.Name)
 }
 
 func (m *Model) connectSuggestions() []suggestion {
@@ -535,10 +542,14 @@ func (m *Model) connectSuggestions() []suggestion {
 	switch m.connect.Step {
 	case connectProvider:
 		for _, provider := range config.ConnectNames() {
+			description := argumentDescription("/connect", provider)
+			if _, ok := m.cfg.FindConnection(provider); ok {
+				description = "remembered route · select a model with /models"
+			}
 			values = append(values, suggestion{
 				Value:       provider,
 				Label:       provider,
-				Description: argumentDescription("/connect", provider),
+				Description: description,
 			})
 		}
 	case connectName:
@@ -600,6 +611,9 @@ func (m Model) connectHasCredential() bool {
 		return false
 	}
 	if strings.TrimSpace(m.connect.APIKey) != "" {
+		return true
+	}
+	if id := m.connectConnectionID(); id != "" && m.cfg.CredentialForConnection(id) != "" {
 		return true
 	}
 	for _, env := range m.connectCredentialEnvs() {
