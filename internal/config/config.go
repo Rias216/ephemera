@@ -19,73 +19,82 @@ const (
 	credentialsFileName = "credentials.json"
 )
 
-// Config contains user preferences and reusable connection metadata. Secrets
-// are excluded from config.json and loaded from a separate private file.
-type Config struct {
-	Provider string            `json:"provider"`
-	Models   map[string]string `json:"models"`
-	// Connections keeps every route that has completed /connect. The active
-	// route is mirrored into the legacy provider fields below so older code and
-	// config files continue to work.
-	Connections      map[string]SavedConnection `json:"connections,omitempty"`
-	ActiveConnection string                     `json:"active_connection,omitempty"`
-	Mode             reasoning.Mode             `json:"mode"`
-	Theme            string                     `json:"theme"`
-	MaxTokens        int64                      `json:"max_tokens"`
-	// ContextTokens caps the approximate prompt tokens sent with each request.
-	ContextTokens int    `json:"context_tokens"`
-	OllamaURL     string `json:"ollama_url"`
-
-	AgentConfigVersion     int                        `json:"agent_config_version"`
-	AgentEnabled           bool                       `json:"agent_enabled"`
-	ApprovalPolicy         ApprovalPolicy             `json:"approval_policy"`
-	WorkspaceRoot          string                     `json:"workspace_root,omitempty"`
-	AutoTestCommand        string                     `json:"auto_test_command,omitempty"`
-	MaxToolOutputTokens    int                        `json:"max_tool_output_tokens"`
-	AgentMaxSteps          int                        `json:"agent_max_steps"`
-	AgentLoopLimit         int                        `json:"agent_loop_limit"`
-	AgentMaxParallelTools  int                        `json:"agent_max_parallel_tools"`
-	AgentToolTimeoutSec    int                        `json:"agent_tool_timeout_seconds"`
-	AgentReadRetries       int                        `json:"agent_read_retries"`
-	AgentContextSummaryTok int                        `json:"agent_context_summary_tokens"`
-	AgentAutoVerify        bool                       `json:"agent_auto_verify"`
-	AgentAutoReview        bool                       `json:"agent_auto_review"`
-	AgentSelfCritique      bool                       `json:"agent_self_critique"`
-	AgentAdaptiveReasoning bool                       `json:"agent_adaptive_reasoning"`
-	AgentTDDMode           bool                       `json:"agent_tdd_mode"`
-	AgentLearnMemory       bool                       `json:"agent_learn_memory"`
-	AgentSemanticIndex     bool                       `json:"agent_semantic_index"`
-	AgentDryRun            bool                       `json:"agent_dry_run"`
-	AgentAutoRollback      bool                       `json:"agent_auto_rollback"`
-	SandboxMode            SandboxMode                `json:"sandbox_mode"`
-	AgentSnapshotMaxMB     int                        `json:"agent_snapshot_max_mb"`
-	AgentContextRecall     int                        `json:"agent_context_recall_messages"`
+// ProviderSettings owns provider routing, model selection, retry behavior, and
+// provider-specific bridge configuration.
+type ProviderSettings struct {
+	Provider               string                     `json:"provider"`
+	Models                 map[string]string          `json:"models"`
+	Connections            map[string]SavedConnection `json:"connections,omitempty"`
+	ActiveConnection       string                     `json:"active_connection,omitempty"`
+	MaxTokens              int64                      `json:"max_tokens"`
+	ContextTokens          int                        `json:"context_tokens"`
+	OllamaURL              string                     `json:"ollama_url"`
+	CompatibleName         string                     `json:"compatible_name,omitempty"`
+	CompatibleURL          string                     `json:"compatible_url,omitempty"`
 	ProviderMaxRetries     int                        `json:"provider_max_retries"`
 	ProviderRetryBackoffMS int                        `json:"provider_retry_backoff_ms"`
-	AgentTaskTokenBudget   int                        `json:"agent_task_token_budget"`
-	RequireReadBeforeEdit  bool                       `json:"require_read_before_edit"`
-	ThemeDensity           string                     `json:"theme_density"`
-	ShowThinking           bool                       `json:"show_thinking"`
-	ToolDetails            bool                       `json:"tool_details"`
-	MCPServers             map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
+	CodexBridgeMaxTokens   int64                      `json:"codex_bridge_max_tokens"`
+}
 
-	// Codex runs as an isolated model bridge inside Ephemera. Ephemera owns
-	// filesystem, shell, web, and approval handling; the nested Codex process is
-	// intentionally prevented from acting as a second autonomous agent.
-	CodexBridgeMaxTokens int64 `json:"codex_bridge_max_tokens"`
+// AgentSettings owns the execution loop, safety policy, workspace, verification,
+// context, and sandbox controls.
+type AgentSettings struct {
+	AgentConfigVersion     int            `json:"agent_config_version"`
+	AgentEnabled           bool           `json:"agent_enabled"`
+	ApprovalPolicy         ApprovalPolicy `json:"approval_policy"`
+	WorkspaceRoot          string         `json:"workspace_root,omitempty"`
+	AutoTestCommand        string         `json:"auto_test_command,omitempty"`
+	MaxToolOutputTokens    int            `json:"max_tool_output_tokens"`
+	AgentMaxSteps          int            `json:"agent_max_steps"`
+	AgentLoopLimit         int            `json:"agent_loop_limit"`
+	AgentMaxParallelTools  int            `json:"agent_max_parallel_tools"`
+	AgentToolTimeoutSec    int            `json:"agent_tool_timeout_seconds"`
+	AgentReadRetries       int            `json:"agent_read_retries"`
+	AgentContextSummaryTok int            `json:"agent_context_summary_tokens"`
+	AgentAutoVerify        bool           `json:"agent_auto_verify"`
+	AgentAutoReview        bool           `json:"agent_auto_review"`
+	AgentSelfCritique      bool           `json:"agent_self_critique"`
+	AgentAdaptiveReasoning bool           `json:"agent_adaptive_reasoning"`
+	AgentTDDMode           bool           `json:"agent_tdd_mode"`
+	AgentLearnMemory       bool           `json:"agent_learn_memory"`
+	AgentSemanticIndex     bool           `json:"agent_semantic_index"`
+	AgentDryRun            bool           `json:"agent_dry_run"`
+	AgentAutoRollback      bool           `json:"agent_auto_rollback"`
+	SandboxMode            SandboxMode    `json:"sandbox_mode"`
+	AgentSnapshotMaxMB     int            `json:"agent_snapshot_max_mb"`
+	AgentContextRecall     int            `json:"agent_context_recall_messages"`
+	AgentTaskTokenBudget   int            `json:"agent_task_token_budget"`
+	RequireReadBeforeEdit  bool           `json:"require_read_before_edit"`
+}
 
-	// Subagent routes isolated exploration, debugging, and review through a
-	// separately selectable lightweight model. Empty route/model values inherit
-	// the active main-agent provider.
-	SubagentEnabled   bool   `json:"subagent_enabled"`
-	SubagentAutoRoute bool   `json:"subagent_auto_route"`
-	SubagentProvider  string `json:"subagent_provider,omitempty"`
-	SubagentModel     string `json:"subagent_model,omitempty"`
-	SubagentMaxSteps  int    `json:"subagent_max_steps"`
-	SubagentMaxTokens int64  `json:"subagent_max_tokens"`
+// UISettings owns reasoning mode and terminal presentation preferences.
+type UISettings struct {
+	Mode         reasoning.Mode `json:"mode"`
+	Theme        string         `json:"theme"`
+	ThemeDensity string         `json:"theme_density"`
+	ShowThinking bool           `json:"show_thinking"`
+	ToolDetails  bool           `json:"tool_details"`
+}
 
-	// Director mode keeps the active provider in control while a second,
-	// read-only instrument model reviews major actions and proposed completion.
+// MCPSettings owns external Model Context Protocol server definitions.
+type MCPSettings struct {
+	MCPServers map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
+}
+
+// PluginSettings owns cross-platform subprocess plugin discovery.
+type PluginSettings struct {
+	PluginDirectories []string `json:"directories,omitempty"`
+	PluginManifests   []string `json:"manifests,omitempty"`
+}
+
+// OrchestrationSettings owns subagent, director, and instrument routing.
+type OrchestrationSettings struct {
+	SubagentEnabled    bool   `json:"subagent_enabled"`
+	SubagentAutoRoute  bool   `json:"subagent_auto_route"`
+	SubagentProvider   string `json:"subagent_provider,omitempty"`
+	SubagentModel      string `json:"subagent_model,omitempty"`
+	SubagentMaxSteps   int    `json:"subagent_max_steps"`
+	SubagentMaxTokens  int64  `json:"subagent_max_tokens"`
 	DirectorEnabled    bool   `json:"director_enabled"`
 	DirectorProvider   string `json:"director_provider,omitempty"`
 	DirectorModel      string `json:"director_model,omitempty"`
@@ -94,17 +103,72 @@ type Config struct {
 	InstrumentWeight   int    `json:"instrument_weight"`
 	DirectorMaxSteps   int    `json:"director_max_steps"`
 	InstrumentMaxSteps int    `json:"instrument_max_steps"`
+}
 
-	CompatibleName string `json:"compatible_name,omitempty"`
-	CompatibleURL  string `json:"compatible_url,omitempty"`
+// RuntimeSecrets are loaded from credentials.json and are never serialized.
+type RuntimeSecrets struct {
+	OpenAIKey     string            `json:"-"`
+	AnthropicKey  string            `json:"-"`
+	CompatibleKey string            `json:"-"`
+	Credentials   map[string]string `json:"-"`
+}
 
-	OpenAIKey     string `json:"-"`
-	AnthropicKey  string `json:"-"`
-	CompatibleKey string `json:"-"`
-	// Credentials are persisted separately with mode 0600 where supported and
-	// never serialized into config.json. This is a local file, not OS-keychain
-	// encryption.
-	Credentials map[string]string `json:"-"`
+// Config is hierarchical on disk while embedded groups preserve concise field
+// access throughout the runtime.
+type Config struct {
+	ProviderSettings      `json:"providers"`
+	AgentSettings         `json:"agent"`
+	UISettings            `json:"ui"`
+	MCPSettings           `json:"mcp"`
+	PluginSettings        `json:"plugins"`
+	OrchestrationSettings `json:"orchestration"`
+	RuntimeSecrets        `json:"-"`
+}
+
+// UnmarshalJSON accepts both the hierarchical schema and every legacy flat
+// configuration written by earlier Ephemera versions. Nested groups win when a
+// file contains both forms.
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type wire Config
+	var nested wire
+	if err := json.Unmarshal(data, &nested); err != nil {
+		return err
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return err
+	}
+	var legacy struct {
+		ProviderSettings
+		AgentSettings
+		UISettings
+		MCPSettings
+		PluginSettings
+		OrchestrationSettings
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	if _, ok := root["providers"]; !ok {
+		nested.ProviderSettings = legacy.ProviderSettings
+	}
+	if _, ok := root["agent"]; !ok {
+		nested.AgentSettings = legacy.AgentSettings
+	}
+	if _, ok := root["ui"]; !ok {
+		nested.UISettings = legacy.UISettings
+	}
+	if _, ok := root["mcp"]; !ok {
+		nested.MCPSettings = legacy.MCPSettings
+	}
+	if _, ok := root["plugins"]; !ok {
+		nested.PluginSettings = legacy.PluginSettings
+	}
+	if _, ok := root["orchestration"]; !ok {
+		nested.OrchestrationSettings = legacy.OrchestrationSettings
+	}
+	*c = Config(nested)
+	return nil
 }
 
 // MCPServerConfig describes one Model Context Protocol server. Standard
@@ -187,63 +251,75 @@ type Connection struct {
 // Default returns a useful local-first configuration.
 func Default() Config {
 	cfg := Config{
-		Provider: "ollama",
-		Models: map[string]string{
-			"ollama":     "qwen3:8b",
-			"openai":     "gpt-4.1-mini",
-			"codex":      "gpt-5.5",
-			"anthropic":  "claude-sonnet-4-6",
-			"compatible": "model-name",
+		ProviderSettings: ProviderSettings{
+			Provider: "ollama",
+			Models: map[string]string{
+				"ollama":     "qwen3:8b",
+				"openai":     "gpt-4.1-mini",
+				"codex":      "gpt-5.5",
+				"anthropic":  "claude-sonnet-4-6",
+				"compatible": "model-name",
+			},
+			MaxTokens:              4096,
+			ContextTokens:          16_000,
+			OllamaURL:              "http://localhost:11434",
+			ProviderMaxRetries:     2,
+			ProviderRetryBackoffMS: 350,
+			CodexBridgeMaxTokens:   2_048,
+			CompatibleName:         "compatible",
+			CompatibleURL:          "http://localhost:1234/v1",
+			Connections:            map[string]SavedConnection{},
 		},
-		Mode:                   reasoning.ModeNormal,
-		Theme:                  "rose",
-		MaxTokens:              4096,
-		ContextTokens:          16_000,
-		OllamaURL:              "http://localhost:11434",
-		AgentConfigVersion:     6,
-		AgentEnabled:           true,
-		ApprovalPolicy:         ApprovalApproveWrites,
-		AutoTestCommand:        "go test ./...",
-		MaxToolOutputTokens:    6_000,
-		AgentMaxSteps:          10,
-		AgentLoopLimit:         2,
-		AgentMaxParallelTools:  4,
-		AgentToolTimeoutSec:    120,
-		AgentReadRetries:       1,
-		AgentContextSummaryTok: 800,
-		AgentAutoVerify:        true,
-		AgentAutoReview:        true,
-		AgentSelfCritique:      false,
-		AgentAdaptiveReasoning: true,
-		AgentTDDMode:           false,
-		AgentLearnMemory:       false,
-		AgentSemanticIndex:     true,
-		AgentDryRun:            false,
-		AgentAutoRollback:      false,
-		SandboxMode:            SandboxNone,
-		AgentSnapshotMaxMB:     128,
-		AgentContextRecall:     8,
-		ProviderMaxRetries:     2,
-		ProviderRetryBackoffMS: 350,
-		AgentTaskTokenBudget:   100_000,
-		RequireReadBeforeEdit:  true,
-		ThemeDensity:           "comfortable",
-		ShowThinking:           true,
-		ToolDetails:            true,
-		CodexBridgeMaxTokens:   2_048,
-		MCPServers:             map[string]MCPServerConfig{},
-		SubagentEnabled:        true,
-		SubagentAutoRoute:      false,
-		SubagentMaxSteps:       4,
-		SubagentMaxTokens:      2_000,
-		DirectorEnabled:        false,
-		InstrumentWeight:       20,
-		DirectorMaxSteps:       12,
-		InstrumentMaxSteps:     2,
-		CompatibleName:         "compatible",
-		CompatibleURL:          "http://localhost:1234/v1",
-		Connections:            map[string]SavedConnection{},
-		Credentials:            map[string]string{},
+		AgentSettings: AgentSettings{
+			AgentConfigVersion:     7,
+			AgentEnabled:           true,
+			ApprovalPolicy:         ApprovalApproveWrites,
+			AutoTestCommand:        "go test ./...",
+			MaxToolOutputTokens:    6_000,
+			AgentMaxSteps:          10,
+			AgentLoopLimit:         2,
+			AgentMaxParallelTools:  4,
+			AgentToolTimeoutSec:    120,
+			AgentReadRetries:       1,
+			AgentContextSummaryTok: 800,
+			AgentAutoVerify:        true,
+			AgentAutoReview:        true,
+			AgentSelfCritique:      false,
+			AgentAdaptiveReasoning: true,
+			AgentTDDMode:           false,
+			AgentLearnMemory:       false,
+			AgentSemanticIndex:     true,
+			AgentDryRun:            false,
+			AgentAutoRollback:      false,
+			SandboxMode:            SandboxNone,
+			AgentSnapshotMaxMB:     128,
+			AgentContextRecall:     8,
+			AgentTaskTokenBudget:   100_000,
+			RequireReadBeforeEdit:  true,
+		},
+		UISettings: UISettings{
+			Mode:         reasoning.ModeNormal,
+			Theme:        "rose",
+			ThemeDensity: "comfortable",
+			ShowThinking: true,
+			ToolDetails:  true,
+		},
+		MCPSettings: MCPSettings{MCPServers: map[string]MCPServerConfig{}},
+		PluginSettings: PluginSettings{
+			PluginDirectories: []string{},
+			PluginManifests:   []string{},
+		},
+		OrchestrationSettings: OrchestrationSettings{
+			SubagentEnabled:    true,
+			SubagentAutoRoute:  false,
+			SubagentMaxSteps:   4,
+			SubagentMaxTokens:  2_000,
+			DirectorEnabled:    false,
+			InstrumentWeight:   20,
+			DirectorMaxSteps:   12,
+			InstrumentMaxSteps: 2,
+		},
+		RuntimeSecrets: RuntimeSecrets{Credentials: map[string]string{}},
 	}
 	cfg.RememberConnection(SavedConnection{
 		Provider: "ollama",
@@ -306,15 +382,21 @@ func DefaultAPIKeyEnv(name string) string {
 	return prefix + "_API_KEY"
 }
 
-// ValidProvider reports whether value names a supported provider type.
+// ValidProvider reports whether value is a safe provider registry key. Runtime
+// support is decided by llm.ProviderRegistry, so adding an adapter does not
+// require changing the config package's built-in provider list.
 func ValidProvider(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
-	for _, provider := range ProviderNames() {
-		if value == provider {
-			return true
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for index, r := range value {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+		if !valid || (index == 0 && (r == '-' || r == '_')) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // ValidApprovalPolicy reports whether value is a supported agent autonomy mode.
@@ -384,6 +466,10 @@ func Load() (Config, error) {
 	}
 	cfg.Credentials = credentials
 	cfg.normalize()
+	// Workspaces are process-local. Older releases persisted this field, which
+	// allowed tests or a one-off launch to poison every later session with a
+	// stale temporary directory. The CLI resolves the active root each launch.
+	cfg.WorkspaceRoot = ""
 	return cfg, nil
 }
 
@@ -405,6 +491,9 @@ func Save(cfg Config) (retErr error) {
 	if cfg.Credentials == nil {
 		cfg.Credentials, _ = loadCredentials(dir)
 	}
+	// WorkspaceRoot is runtime state, not a global preference. Never serialize
+	// it, so unit tests and temporary projects cannot redirect future launches.
+	cfg.WorkspaceRoot = ""
 	cfg.normalize()
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -897,6 +986,14 @@ func (c *Config) normalize() {
 		// Automatic delegation used to be implicit. Keep it opt-in so the main
 		// agent always receives exact file/tool evidence unless the user enables it.
 		c.SubagentAutoRoute = defaults.SubagentAutoRoute
+	}
+	if c.AgentConfigVersion < 7 {
+		if c.PluginDirectories == nil {
+			c.PluginDirectories = append([]string(nil), defaults.PluginDirectories...)
+		}
+		if c.PluginManifests == nil {
+			c.PluginManifests = append([]string(nil), defaults.PluginManifests...)
+		}
 		c.AgentConfigVersion = defaults.AgentConfigVersion
 	}
 	if c.ThemeDensity != "compact" && c.ThemeDensity != "comfortable" {
@@ -911,6 +1008,8 @@ func (c *Config) normalize() {
 	if strings.TrimSpace(c.CompatibleURL) == "" {
 		c.CompatibleURL = defaults.CompatibleURL
 	}
+	c.PluginDirectories = normalizeStringList(c.PluginDirectories)
+	c.PluginManifests = normalizeStringList(c.PluginManifests)
 	if c.MCPServers == nil {
 		c.MCPServers = map[string]MCPServerConfig{}
 	}
@@ -1028,4 +1127,19 @@ func (c *Config) normalize() {
 	}
 	c.ActiveConnection = active
 	c.applyConnection(active)
+}
+
+func normalizeStringList(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }

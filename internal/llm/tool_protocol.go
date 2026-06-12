@@ -86,28 +86,18 @@ func TruncatedToolDecisionError(provider string, decision ToolDecision) error {
 	return nil
 }
 
-// IsNativeToolCompatibilityError recognizes endpoints that advertise an
-// OpenAI/Anthropic-compatible API but reject or mishandle the tool fields.
-func IsNativeToolCompatibilityError(err error) bool {
+// IsNativeToolCompatibilityError delegates transport compatibility detection
+// to the active provider. A structurally malformed tool call is always safe to
+// recover through the portable gateway because no local tool has executed.
+func IsNativeToolCompatibilityError(provider Provider, err error) bool {
 	if err == nil {
 		return false
 	}
 	if IsToolProtocolError(err) {
 		return true
 	}
-	text := strings.ToLower(err.Error())
-	markers := []string{
-		"tool_choice", "tool choice", "tools is not supported", "tools are not supported",
-		"function calling", "function_call", "tool calls are not supported",
-		"invalid tool schema", "unsupported schema", "invalid function schema",
-		"does not support tools", "doesn't support tools", "unknown field \"tools\"",
-	}
-	for _, marker := range markers {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
+	classifier, ok := provider.(NativeToolCompatibilityClassifier)
+	return ok && classifier.IsNativeToolCompatibilityError(err)
 }
 
 func newToolProtocolError(provider, tool, raw string, cause error) error {

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ func main() {
 	var toolPlugins stringListFlag
 	var (
 		sessionName = flag.String("session", "", "load or create a named session")
+		workspace   = flag.String("workspace", "", "use this directory as the active workspace (defaults to the launch directory)")
 		provider    = flag.String("provider", "", "activate a remembered provider route")
 		model       = flag.String("model", "", "override model for the selected provider")
 		mode        = flag.String("mode", "", "override mode: normal, deep-reason, concise, creative")
@@ -61,7 +63,7 @@ func main() {
 		initProject = flag.Bool("init-project", false, "write .ephemera/project.json from conservative project discovery")
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
-	flag.Var(&toolPlugins, "tool", "load a Go plugin that registers custom tools (repeatable)")
+	flag.Var(&toolPlugins, "tool", "load a subprocess tool plugin manifest (repeatable)")
 	flag.Parse()
 
 	for _, path := range toolPlugins {
@@ -117,13 +119,11 @@ func main() {
 	if err := config.Save(cfg); err != nil {
 		fatal("save config", err)
 	}
-	workspaceRoot := strings.TrimSpace(cfg.WorkspaceRoot)
-	if workspaceRoot == "" {
-		workspaceRoot, err = os.Getwd()
-		if err != nil {
-			fatal("resolve workspace", err)
-		}
+	workspaceRoot, err := resolveWorkspaceRoot(*workspace)
+	if err != nil {
+		fatal("resolve workspace", err)
 	}
+	cfg.WorkspaceRoot = workspaceRoot
 	if *evalHistory {
 		history, err := evalsuite.LoadHistory(workspaceRoot)
 		if err != nil {
@@ -225,6 +225,32 @@ func main() {
 	if _, err := program.Run(); err != nil {
 		fatal("run TUI", err)
 	}
+}
+
+func resolveWorkspaceRoot(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		value = cwd
+	}
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace is not a directory: %s", abs)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	return abs, nil
 }
 
 func parseEvalDiff(value string, positional []string) (string, string, error) {

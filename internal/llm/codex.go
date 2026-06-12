@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ephemera-ai/ephemera/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,10 @@ type Codex struct {
 	bridgeMaxTokens int64
 }
 
+func init() {
+	RegisterProvider("codex", func(cfg config.Config) (Provider, error) { return NewCodex(cfg.CodexBridgeMaxTokens), nil })
+}
+
 func NewCodex(bridgeMaxTokens int64) *Codex {
 	if bridgeMaxTokens < 512 {
 		bridgeMaxTokens = defaultCodexBridgeMaxTokens
@@ -35,6 +40,10 @@ func NewCodex(bridgeMaxTokens int64) *Codex {
 }
 
 func (p *Codex) Name() string { return "codex" }
+
+func (p *Codex) ListModels(context.Context) ([]string, error) {
+	return ListCodexModels()
+}
 
 func (p *Codex) Capabilities() ProviderCapabilities {
 	return ProviderCapabilities{

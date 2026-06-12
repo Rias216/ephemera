@@ -91,7 +91,7 @@ func classifyProviderError(provider llm.Provider, err error) providerErrorClass 
 	if llm.IsTruncatedToolProtocolError(err) {
 		return providerErrorToolTruncated
 	}
-	if llm.IsNativeToolCompatibilityError(err) {
+	if llm.IsNativeToolCompatibilityError(provider, err) {
 		return providerErrorToolProtocol
 	}
 	taxonomy := llm.ClassifyError(provider, err)

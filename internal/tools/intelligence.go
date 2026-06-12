@@ -96,7 +96,7 @@ func (r Registry) regexSearchStream(call Call, expression *regexp.Regexp, emit f
 			return nil
 		}
 		defer file.Close()
-		rel, _ := filepath.Rel(r.WorkspaceRoot, path)
+		display := r.displayPath(path)
 		scanner := bufio.NewScanner(file)
 		scanner.Buffer(make([]byte, 64<<10), 2<<20)
 		lineNo := 0
@@ -104,7 +104,7 @@ func (r Registry) regexSearchStream(call Call, expression *regexp.Regexp, emit f
 			lineNo++
 			line := scanner.Text()
 			if expression.MatchString(line) {
-				match := fmt.Sprintf("%s:%d:%s", filepath.ToSlash(rel), lineNo, strings.TrimSpace(line))
+				match := fmt.Sprintf("%s:%d:%s", display, lineNo, strings.TrimSpace(line))
 				matches = append(matches, match)
 				if emit != nil {
 					emit(match + "\n")
@@ -138,10 +138,10 @@ func (r Registry) fileSummary(call Call) Result {
 	if err != nil {
 		return fail(call.Name, err.Error())
 	}
-	rel, _ := filepath.Rel(r.WorkspaceRoot, path)
+	display := r.displayPath(path)
 	ext := strings.ToLower(filepath.Ext(path))
 	var lines []string
-	lines = append(lines, "File: "+filepath.ToSlash(rel))
+	lines = append(lines, "File: "+display)
 	if ext == ".go" {
 		file, parseErr := parser.ParseFile(token.NewFileSet(), path, data, parser.SkipObjectResolution)
 		if parseErr != nil {
@@ -189,7 +189,7 @@ func (r Registry) fileSummary(call Call) Result {
 		}
 	}
 	result := ok(call.Name, strings.Join(lines, "\n"))
-	result.Metadata = map[string]any{"path": filepath.ToSlash(rel), "bytes": len(data)}
+	result.Metadata = map[string]any{"path": display, "bytes": len(data)}
 	return result
 }
 
@@ -247,8 +247,7 @@ func (r Registry) dependencyGraph(call Call) Result {
 		if len(dependencies) == 0 {
 			return nil
 		}
-		rel, _ := filepath.Rel(r.WorkspaceRoot, path)
-		lines = append(lines, filepath.ToSlash(rel)+" -> "+strings.Join(dependencies, ", "))
+		lines = append(lines, r.displayPath(path)+" -> "+strings.Join(dependencies, ", "))
 		files++
 		return nil
 	})

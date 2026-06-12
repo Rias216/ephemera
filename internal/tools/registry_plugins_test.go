@@ -19,7 +19,7 @@ func TestDynamicToolRegistrationAndStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistry(config.Config{WorkspaceRoot: t.TempDir(), ApprovalPolicy: config.ApprovalAutoApprove, MaxToolOutputTokens: 100})
+	registry := NewRegistry(config.Config{AgentSettings: config.AgentSettings{WorkspaceRoot: t.TempDir(), ApprovalPolicy: config.ApprovalAutoApprove, MaxToolOutputTokens: 100}})
 	var chunks []string
 	result := registry.ExecuteStream(context.Background(), Call{Name: name}, func(chunk string) { chunks = append(chunks, chunk) })
 	if !result.OK || result.Output != "complete" || len(chunks) != 1 || chunks[0] != "partial" {

@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "id": "run-1781299079152169200",
+  "started_at": "2026-06-12T23:17:59.1521692+02:00",
+  "duration": 26076000,
+  "provider": "native-fake",
+  "model": "qwen3:8b",
+  "mode": "concise",
+  "verified": false,
+  "usage": {
+    "input_tokens": 1810,
+    "output_tokens": 3,
+    "tool_calls": 0
+  },
+  "events": [
+    {
+      "id": "evt-1781299079158872200",
+      "type": "acceptance_contract",
+      "title": "Definition of done",
+      "content": "Goal: hello\nRequired checks:\n- [ ] Every changed file can be read back after the edit.\n- [ ] The final workspace diff or status is inspected before completion.\nForbidden changes: .git, .env, .env.*, .ephemera/secrets",
+      "status": "active",
+      "metadata": {
+        "contract": {
+          "goal": "hello",
+          "required_behaviors": [
+            "hello"
+          ],
+          "required_checks": [
+            {
+              "id": "changed-files-readable",
+              "description": "Every changed file can be read back after the edit.",
+              "required": true,
+              "status": "pending"
+            },
+            {
+              "id": "diff-reviewed",
+              "description": "The final workspace diff or status is inspected before completion.",
+              "required": true,
+              "status": "pending"
+            }
+          ],
+          "forbidden_changes": [
+            ".git",
+            ".env",
+            ".env.*",
+            ".ephemera/secrets"
+          ],
+          "created_at": "2026-06-12T23:17:59.1527071+02:00",
+          "source": "discovered"
+        },
+        "iteration": 0,
+        "run_id": "run-1781299079152169200",
+        "source": "discovered"
+      },
+      "created_at": "2026-06-12T23:17:59.1588722+02:00"
+    },
+    {
+      "id": "evt-1781299079178245200",
+      "type": "final",
+      "title": "Final",
+      "content": "Hello there.",
+      "status": "done",
+      "metadata": {
+        "changed": false,
+        "changed_paths": [],
+        "completion_gate": {
+          "passed": true,
+          "checked_at": "2026-06-12T23:17:59.1782452+02:00"
+        },
+        "iteration": 1,
+        "run_id": "run-1781299079152169200",
+        "verified": false
+      },
+      "created_at": "2026-06-12T23:17:59.1782452+02:00"
+    }
+  ],
+  "final_text": "Hello there."
+}

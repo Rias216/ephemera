@@ -9,6 +9,7 @@ import (
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/debuglog"
+	"github.com/ephemera-ai/ephemera/internal/tools"
 )
 
 // Message is a provider-neutral conversation item. Besides normal text turns,
@@ -55,9 +56,23 @@ type ErrorClassifier interface {
 	ClassifyError(error) ErrorTaxonomy
 }
 
+// NativeToolCompatibilityClassifier lets each adapter decide whether its own
+// transport rejected native tool fields. The shared agent never infers this
+// from provider names or a global list of error substrings.
+type NativeToolCompatibilityClassifier interface {
+	IsNativeToolCompatibilityError(error) bool
+}
+
 // HealthChecker is an optional lightweight provider readiness probe.
 type HealthChecker interface {
 	HealthCheck(context.Context) error
+}
+
+// ModelCatalogProvider is implemented by adapters that can enumerate models
+// from their own endpoint or local runtime. Catalog behavior stays with the
+// adapter instead of adding provider branches to shared code.
+type ModelCatalogProvider interface {
+	ListModels(context.Context) ([]string, error)
 }
 
 // ClassifyError delegates to a provider classifier and falls back to a
@@ -111,35 +126,11 @@ type CapableProvider interface {
 	Capabilities() ProviderCapabilities
 }
 
-// ToolProperty is a small JSON-schema-compatible property description used by
-// provider-native tool APIs and by local validation/help surfaces.
-type ToolProperty struct {
-	Type        string      `json:"type"`
-	Description string      `json:"description,omitempty"`
-	Items       *ToolSchema `json:"items,omitempty"`
-}
-
-// ToolSchema describes a JSON object accepted by a tool.
-type ToolSchema struct {
-	Type                 string                  `json:"type"`
-	Properties           map[string]ToolProperty `json:"properties,omitempty"`
-	Required             []string                `json:"required,omitempty"`
-	AdditionalProperties bool                    `json:"additionalProperties"`
-}
-
-// ToolContract is the versioned provider-neutral shape of one callable tool.
-// ProviderHints are optional boundary-only hints; the agent core never branches
-// on them. Provider adapters remain responsible for wire-format conversion.
-type ToolContract struct {
-	Name          string         `json:"name"`
-	Description   string         `json:"description"`
-	Parameters    ToolSchema     `json:"parameters"`
-	Version       string         `json:"version,omitempty"`
-	ProviderHints map[string]any `json:"provider_hints,omitempty"`
-}
-
-// ToolSpec remains the public compatibility name used by existing adapters.
-type ToolSpec = ToolContract
+// ToolProperty, ToolSchema, and ToolSpec alias the executable tool contract.
+// The provider layer sees the same definition the registry executes.
+type ToolProperty = tools.ToolProperty
+type ToolSchema = tools.ToolSchema
+type ToolSpec = tools.Tool
 
 // ToolCall is a provider-neutral request to execute a local tool.
 type ToolCall struct {
@@ -272,25 +263,6 @@ func GenerateToolDecision(ctx context.Context, provider Provider, req Request, s
 		return ToolDecision{}, err
 	}
 	return ToolDecision{Text: text, Transport: ToolTransportText}, nil
-}
-
-// New constructs the configured provider. Environment variables remain valid,
-// while /connect may supply runtime-only credentials in cfg.
-func New(cfg config.Config) (Provider, error) {
-	switch cfg.Provider {
-	case "openai":
-		return NewOpenAI(cfg.OpenAIKey), nil
-	case "codex":
-		return NewCodex(cfg.CodexBridgeMaxTokens), nil
-	case "anthropic":
-		return NewAnthropic(cfg.AnthropicKey), nil
-	case "ollama":
-		return NewOllama(cfg.OllamaURL), nil
-	case "compatible":
-		return NewOpenAICompatible(cfg.CompatibleName, cfg.CompatibleURL, cfg.CompatibleKey), nil
-	default:
-		return nil, fmt.Errorf("unsupported provider %q", cfg.Provider)
-	}
 }
 
 // NewSubagentProvider creates the separately configured lightweight specialist.

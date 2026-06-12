@@ -41,7 +41,7 @@ func (r Runner) canParallelActions(actions []modelToolAction) bool {
 			return false
 		}
 		call, err := r.normalizeToolCall(tools.Call{Name: firstNonEmpty(item.Name, item.Tool), Arguments: cloneArguments(item.Arguments)})
-		if err != nil || call.Name == "delegate" || r.requiresApproval(call.Name) {
+		if err != nil || call.Name == "delegate" || r.requiresApproval(call) {
 			return false
 		}
 		risk := r.toolRisk(call.Name)

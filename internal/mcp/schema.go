@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/ephemera-ai/ephemera/internal/llm"
+	"github.com/ephemera-ai/ephemera/internal/tools"
 )
 
 type objectSchema struct {
@@ -22,8 +22,8 @@ type propertySchema struct {
 	Description string `json:"description"`
 }
 
-func providerSchema(raw json.RawMessage) llm.ToolSchema {
-	result := llm.ToolSchema{Type: "object", Properties: map[string]llm.ToolProperty{}, AdditionalProperties: false}
+func providerSchema(raw json.RawMessage) tools.ToolSchema {
+	result := tools.ToolSchema{Type: "object", Properties: map[string]tools.ToolProperty{}, AdditionalProperties: false}
 	if len(raw) == 0 {
 		return result
 	}
@@ -41,9 +41,9 @@ func providerSchema(raw json.RawMessage) llm.ToolSchema {
 	for name, value := range schema.Properties {
 		var property propertySchema
 		_ = json.Unmarshal(value, &property)
-		result.Properties[name] = llm.ToolProperty{Type: firstSchemaType(property.Type), Description: property.Description}
+		result.Properties[name] = tools.ToolProperty{Type: firstSchemaType(property.Type), Description: property.Description}
 		if result.Properties[name].Type == "" {
-			result.Properties[name] = llm.ToolProperty{Type: "string", Description: property.Description}
+			result.Properties[name] = tools.ToolProperty{Type: "string", Description: property.Description}
 		}
 	}
 	return result

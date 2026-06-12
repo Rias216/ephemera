@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -42,7 +43,7 @@ func (m Model) renderHeader() string {
 	}
 
 	right := m.renderActivityBadge()
-	if m.width >= 78 {
+	if m.width >= 78 && m.inspectorTab != inspectorContext {
 		right += "  " + m.renderContextMeter(m.currentContextStats(), 12)
 	}
 
@@ -89,7 +90,7 @@ func (m Model) renderMetaRail() string {
 	if m.cfg.DirectorEnabled {
 		candidates = append(candidates, m.renderChip("council", clip(firstNonEmpty(m.cfg.InstrumentModel, "inherit"), 18)))
 	}
-	candidates = append(candidates, m.renderChip("session", clip(m.session.Name, 22)))
+	candidates = append(candidates, m.renderChip("root", clip(m.workspaceDisplayName(), 22)))
 	if m.connect != nil {
 		step, total := m.connectProgress()
 		candidates = append(candidates, m.renderChip("setup", fmt.Sprintf("%d/%d %s", step, total, strings.ToLower(m.connectStepTitle()))))
@@ -105,6 +106,18 @@ func (m Model) renderMetaRail() string {
 		items = append(items, candidate)
 	}
 	return strings.Join(items, "  ·  ")
+}
+
+func (m Model) workspaceDisplayName() string {
+	root := strings.TrimSpace(m.workspaceRoot())
+	if root == "" {
+		return "cwd"
+	}
+	name := filepath.Base(filepath.Clean(root))
+	if name == "." || name == string(filepath.Separator) || strings.TrimSpace(name) == "" {
+		return root
+	}
+	return name
 }
 
 func (m Model) renderChip(label, value string) string {

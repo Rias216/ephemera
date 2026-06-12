@@ -121,8 +121,7 @@ func (r Registry) prepareMultiPatch(call Call) ([]multiPatchTarget, error) {
 			return nil, fmt.Errorf("patch %d repeats target %q", index+1, spec.Path)
 		}
 		seen[key] = true
-		rel, _ := filepath.Rel(r.WorkspaceRoot, path)
-		target := multiPatchTarget{path: path, rel: filepath.ToSlash(rel), content: spec.Content}
+		target := multiPatchTarget{path: path, rel: r.displayPath(path), content: spec.Content}
 		info, statErr := os.Stat(path)
 		switch {
 		case statErr == nil:

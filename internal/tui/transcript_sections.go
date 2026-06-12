@@ -29,9 +29,9 @@ type transcriptSection struct {
 	createdAt  time.Time
 }
 
-// buildTranscriptSections merges persisted messages and agent events by time so
-// tool calls, results, plans, and the final response appear where they happened
-// instead of being detached into a second transcript at the bottom.
+// buildTranscriptSections merges persisted messages and the currently relevant
+// agent events by time. Normal view keeps only actionable/error events; timeline
+// focus exposes the complete tool and reasoning history without duplicating final text.
 func (m Model) buildTranscriptSections() []transcriptSection {
 	sections := make([]transcriptSection, 0, len(m.session.Messages)+len(m.session.Events)+2)
 	for index := range m.session.Messages {
@@ -48,6 +48,9 @@ func (m Model) buildTranscriptSections() []transcriptSection {
 	visible := m.visibleAgentEvents()
 	for index := range visible {
 		event := visible[index]
+		if !m.showAgentEventInline(event) {
+			continue
+		}
 		copy := event
 		sections = append(sections, transcriptSection{kind: sectionAgentEvent, event: &copy, eventIndex: index, createdAt: event.CreatedAt})
 	}
@@ -71,6 +74,43 @@ func (m Model) buildTranscriptSections() []transcriptSection {
 		return left.Before(right)
 	})
 	return sections
+}
+
+func (m Model) showAgentEventInline(event history.Event) bool {
+	if m.timelineFocus {
+		return true
+	}
+	if event.Status == "error" || event.Status == "failed" {
+		return true
+	}
+	if event.Type == history.EventApprovalRequest && event.Status == "pending" {
+		return true
+	}
+	switch event.Type {
+	case "recovery":
+		return true
+	case "final":
+		return !m.eventDuplicatedByAssistant(event)
+	default:
+		return false
+	}
+}
+
+func (m Model) eventDuplicatedByAssistant(event history.Event) bool {
+	content := strings.TrimSpace(event.Content)
+	if content == "" {
+		return false
+	}
+	for _, message := range m.session.Messages {
+		if message.Role != "assistant" {
+			continue
+		}
+		answer := strings.TrimSpace(message.Content)
+		if answer == content || (len(content) >= 48 && strings.Contains(answer, content)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) renderTranscriptSection(section transcriptSection, renderer cliRenderer, selected int) []string {

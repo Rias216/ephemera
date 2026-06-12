@@ -60,9 +60,9 @@ The high-impact, locally verifiable parts of the frontier plan are implemented. 
 - Added progressive streaming for file reads, directory traversal, text search, and regex search.
 - Added informative head/tail truncation with total-size summaries.
 - Added `Result.Summary` metadata.
-- Added a unified dynamic tool registry used by built-ins and custom handlers.
-- Added repeatable `--tool <plugin.so>` loading on platforms supported by Go plugins.
-- Added explicit unsupported-platform reporting on Windows rather than silently failing.
+- Added a per-run executable tool registry shared by built-ins, subprocess plugins, and MCP capabilities.
+- Added a shared middleware chain for normalization, approvals, dry-run, timeout, sandbox routing, and debug logging.
+- Added repeatable `--tool <manifest.json>` loading through a line-delimited JSON-RPC subprocess protocol on Windows, Linux, and macOS.
 
 ### Diagnostics
 
@@ -88,7 +88,6 @@ Native `go test ./...` could not run in this environment because the repository 
 - **Automatic isolated-node deletion:** deferred because graph isolation does not prove dead code.
 - **ONNX dependency:** adapted to a local zero-network semantic embedder plus an opt-in remote protocol to avoid adding a large native runtime.
 - **OpenTelemetry SDK:** adapted to dependency-free JSON and Prometheus export. The registry is ready for a small OTLP adapter later without coupling agent logic to a vendor SDK.
-- **Go plugins on Windows:** Go’s standard `plugin` package is unsupported on Windows; the CLI returns a clear error there. MCP and registered built-ins remain portable.
 
 ## New environment variables
 

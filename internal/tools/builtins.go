@@ -1,61 +1,66 @@
 package tools
 
+import (
+	"encoding/json"
+	"strings"
+)
+
 // Builtins returns the V1 local tool catalog.
 func builtinTools() []Tool {
-	return []Tool{
-		{Name: "list_files", Description: "List workspace files. Args: optional path, max.", Risk: RiskRead, Arguments: []ArgumentSpec{
-			arg("path", "string", "Workspace-relative directory to list.", false),
+	definitions := []Tool{
+		{Name: "list_files", Description: "List files in a directory. Args: optional path, max.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative or absolute directory to list; external paths require approval.", false),
 			arg("max", "integer", "Maximum number of files to return.", false),
 		}},
-		{Name: "tree", Description: "Show a shallow workspace tree. Args: optional path, depth.", Risk: RiskRead, Arguments: []ArgumentSpec{
-			arg("path", "string", "Workspace-relative directory to inspect.", false),
+		{Name: "tree", Description: "Show a shallow directory tree. Args: optional path, depth.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative or absolute directory to inspect; external paths require approval.", false),
 			arg("depth", "integer", "Maximum directory depth.", false),
 		}},
-		{Name: "read_file", Description: "Read a UTF-8 text file. Args: path, optional start_line/end_line.", Risk: RiskRead, Arguments: []ArgumentSpec{
-			arg("path", "string", "Workspace-relative file path.", true),
+		{Name: "read_file", Description: "Read a UTF-8 text file. Args: path, optional start_line/end_line.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative or absolute file path; external paths require approval.", true),
 			arg("start_line", "integer", "1-based first line to read.", false),
 			arg("end_line", "integer", "1-based final line to read.", false),
 		}},
-		{Name: "search", Description: "Search text files. Args: query, optional path, max.", Risk: RiskRead, Arguments: []ArgumentSpec{
+		{Name: "search", Description: "Search text files. Args: query, optional path, max.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
 			arg("query", "string", "Case-insensitive text query.", true),
-			arg("path", "string", "Workspace-relative directory to search.", false),
+			arg("path", "string", "Workspace-relative or absolute directory to search; external paths require approval.", false),
 			arg("max", "integer", "Maximum matches to return.", false),
 		}},
-		{Name: "grep_regex", Description: "Regex search across text files. Args: pattern, optional path, max, case_sensitive.", Risk: RiskRead, Arguments: []ArgumentSpec{
+		{Name: "grep_regex", Description: "Regex search across text files. Args: pattern, optional path, max, case_sensitive.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
 			arg("pattern", "string", "Go-compatible regular expression.", true),
-			arg("path", "string", "Workspace-relative directory to search.", false),
+			arg("path", "string", "Workspace-relative or absolute directory to search; external paths require approval.", false),
 			arg("max", "integer", "Maximum matches to return.", false),
 			arg("case_sensitive", "boolean", "Use case-sensitive matching.", false),
 		}},
-		{Name: "find_symbol", Description: "Find likely definitions of a function, type, class, or variable. Args: symbol, optional path, max.", Risk: RiskRead, Arguments: []ArgumentSpec{
+		{Name: "find_symbol", Description: "Find likely definitions of a function, type, class, or variable. Args: symbol, optional path, max.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
 			arg("symbol", "string", "Exact symbol name.", true),
-			arg("path", "string", "Workspace-relative directory to search.", false),
+			arg("path", "string", "Workspace-relative or absolute directory to search; external paths require approval.", false),
 			arg("max", "integer", "Maximum matches to return.", false),
 		}},
-		{Name: "find_refs", Description: "Find references to an exact symbol. Args: symbol, optional path, max.", Risk: RiskRead, Arguments: []ArgumentSpec{
+		{Name: "find_refs", Description: "Find references to an exact symbol. Args: symbol, optional path, max.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
 			arg("symbol", "string", "Exact symbol name.", true),
-			arg("path", "string", "Workspace-relative directory to search.", false),
+			arg("path", "string", "Workspace-relative or absolute directory to search; external paths require approval.", false),
 			arg("max", "integer", "Maximum matches to return.", false),
 		}},
-		{Name: "file_summary", Description: "Summarize a source file's package, imports, and top-level definitions. Args: path.", Risk: RiskRead, Arguments: []ArgumentSpec{
-			arg("path", "string", "Workspace-relative source file.", true),
+		{Name: "file_summary", Description: "Summarize a source file's package, imports, and top-level definitions. Args: path.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative or absolute source file; external paths require approval.", true),
 		}},
-		{Name: "dependency_graph", Description: "Show source import relationships for the workspace or a subdirectory. Args: optional path, max.", Risk: RiskRead, Arguments: []ArgumentSpec{
-			arg("path", "string", "Workspace-relative directory.", false),
+		{Name: "dependency_graph", Description: "Show source import relationships for the workspace or a subdirectory. Args: optional path, max.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative or absolute directory; external paths require approval.", false),
 			arg("max", "integer", "Maximum files to inspect.", false),
 		}},
 		{Name: "detect_project_type", Description: "Detect languages, frameworks, build systems, and test commands from project markers.", Risk: RiskRead},
 		{Name: "list_dependencies", Description: "List declared project dependencies and versions from common manifests.", Risk: RiskRead},
 		{Name: "git_status", Description: "Run git status --short.", Risk: RiskRead},
-		{Name: "git_diff", Description: "Run git diff. Args: optional path.", Risk: RiskRead, Arguments: []ArgumentSpec{
-			arg("path", "string", "Optional workspace-relative path to diff.", false),
+		{Name: "git_diff", Description: "Run git diff. Args: optional path.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
+			arg("path", "string", "Optional workspace-relative or absolute path to diff; external paths require approval.", false),
 		}},
-		{Name: "git_log", Description: "View concise git history. Args: optional max, path.", Risk: RiskRead, Arguments: []ArgumentSpec{
+		{Name: "git_log", Description: "View concise git history. Args: optional max, path.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
 			arg("max", "integer", "Maximum commits.", false),
-			arg("path", "string", "Optional workspace-relative path.", false),
+			arg("path", "string", "Optional workspace-relative or absolute path; external paths require approval.", false),
 		}},
-		{Name: "git_blame", Description: "Show line attribution for a file. Args: path, optional start_line/end_line.", Risk: RiskRead, Arguments: []ArgumentSpec{
-			arg("path", "string", "Workspace-relative file.", true),
+		{Name: "git_blame", Description: "Show line attribution for a file. Args: path, optional start_line/end_line.", Risk: RiskRead, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative or absolute file; external paths require approval.", true),
 			arg("start_line", "integer", "Optional first line.", false),
 			arg("end_line", "integer", "Optional final line.", false),
 		}},
@@ -65,9 +70,9 @@ func builtinTools() []Tool {
 		{Name: "git_checkout", Description: "Checkout an existing branch. Args: name.", Risk: RiskShell, Arguments: []ArgumentSpec{
 			arg("name", "string", "Branch name.", true),
 		}},
-		{Name: "git_commit", Description: "Stage selected paths and commit. Args: message, optional paths.", Risk: RiskShell, Arguments: []ArgumentSpec{
+		{Name: "git_commit", Description: "Stage selected paths and commit. Args: message, optional paths.", Risk: RiskShell, PathExtractor: gitCommitPathTargets, Arguments: []ArgumentSpec{
 			arg("message", "string", "Commit message.", true),
-			arg("paths", "string", "Space-separated workspace-relative paths; defaults to all changes.", false),
+			arg("paths", "string", "Space-separated workspace-relative or absolute paths; external paths require approval; defaults to all changes.", false),
 		}},
 		{Name: "git_stash", Description: "Push, pop, or list stashes. Args: action, optional message.", Risk: RiskShell, Arguments: []ArgumentSpec{
 			arg("action", "string", "push, pop, or list.", true),
@@ -102,15 +107,15 @@ func builtinTools() []Tool {
 			arg("event", "string", "APPROVE, REQUEST_CHANGES, or COMMENT for review.", false),
 			arg("max", "integer", "Maximum list results, up to 100.", false),
 		}},
-		{Name: "apply_patch", Description: "Write complete file content. Args: path, content. Prefer replace_in_file for small edits.", Risk: RiskWrite, Arguments: []ArgumentSpec{
-			arg("path", "string", "Workspace-relative file path to create or replace.", true),
+		{Name: "apply_patch", Description: "Write complete file content. Args: path, content. Prefer replace_in_file for small edits.", Risk: RiskWrite, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative or absolute file path to create or replace; external paths require approval.", true),
 			arg("content", "string", "Complete UTF-8 file content.", true),
 		}},
-		{Name: "apply_multi_patch", Description: "Atomically write multiple complete files. Args: patches array of {path, content}. If any write fails, every target is rolled back.", Risk: RiskWrite, Arguments: []ArgumentSpec{
-			arg("patches", "array", "Two or more objects with workspace-relative path and complete UTF-8 content fields.", true),
+		{Name: "apply_multi_patch", Description: "Atomically write multiple complete files. Args: patches array of {path, content}. If any write fails, every target is rolled back.", Risk: RiskWrite, PathExtractor: multiPatchPathTargets, Arguments: []ArgumentSpec{
+			arg("patches", "array", "Two or more objects with workspace-relative or absolute path and complete UTF-8 content fields; external paths require approval.", true),
 		}},
-		{Name: "replace_in_file", Description: "Replace one exact text occurrence. Args: path, old, new, optional all.", Risk: RiskWrite, Arguments: []ArgumentSpec{
-			arg("path", "string", "Workspace-relative file path.", true),
+		{Name: "replace_in_file", Description: "Replace one exact text occurrence. Args: path, old, new, optional all.", Risk: RiskWrite, PathArguments: []string{"path"}, Arguments: []ArgumentSpec{
+			arg("path", "string", "Workspace-relative or absolute file path; external paths require approval.", true),
 			arg("old", "string", "Exact existing text to replace.", true),
 			arg("new", "string", "Replacement text. Empty string deletes the old text.", false),
 			arg("all", "boolean", "Replace all occurrences instead of requiring one unique match.", false),
@@ -131,4 +136,32 @@ func builtinTools() []Tool {
 			arg("role", "string", "Specialist role: explore, review, debug, or critic.", false),
 		}},
 	}
+	for index := range definitions {
+		definitions[index].Execute = builtinExecutor(definitions[index].Name)
+	}
+	return definitions
+}
+
+func gitCommitPathTargets(call Call) []string {
+	return strings.Fields(argString(call, "paths"))
+}
+
+func multiPatchPathTargets(call Call) []string {
+	data, err := json.Marshal(call.Arguments["patches"])
+	if err != nil {
+		return nil
+	}
+	var patches []struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal(data, &patches) != nil {
+		return nil
+	}
+	paths := make([]string, 0, len(patches))
+	for _, patch := range patches {
+		if path := strings.TrimSpace(patch.Path); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }

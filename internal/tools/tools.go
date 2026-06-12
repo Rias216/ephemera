@@ -20,7 +20,6 @@ import (
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/debuglog"
-	"github.com/ephemera-ai/ephemera/internal/llm"
 )
 
 // Risk describes the permissions needed to execute a tool.
@@ -32,15 +31,49 @@ const (
 	RiskShell Risk = "shell"
 )
 
-// Tool describes a local capability available to the agent.
-type Tool struct {
-	Name        string
-	Description string
-	Risk        Risk
-	Arguments   []ArgumentSpec
+// ToolProperty is a JSON-schema-compatible argument property.
+type ToolProperty struct {
+	Type        string      `json:"type"`
+	Description string      `json:"description,omitempty"`
+	Items       *ToolSchema `json:"items,omitempty"`
 }
 
-// ArgumentSpec describes one JSON argument accepted by a tool.
+// ToolSchema describes the JSON object accepted by a tool.
+type ToolSchema struct {
+	Type                 string                  `json:"type"`
+	Properties           map[string]ToolProperty `json:"properties,omitempty"`
+	Required             []string                `json:"required,omitempty"`
+	AdditionalProperties bool                    `json:"additionalProperties"`
+}
+
+// Handler executes a tool against the active registry runtime.
+type Handler func(context.Context, Registry, Call, func(string)) Result
+
+// Tool is the single source of truth for provider schemas, policy metadata,
+// and executable behavior. Provider adapters serialize Parameters while the
+// registry invokes Execute through the middleware chain.
+type Tool struct {
+	Name          string           `json:"name"`
+	Description   string           `json:"description"`
+	Risk          Risk             `json:"risk"`
+	Parameters    ToolSchema       `json:"parameters"`
+	Version       string           `json:"version,omitempty"`
+	ProviderHints map[string]any   `json:"provider_hints,omitempty"`
+	ValidateCall  func(Call) error `json:"-"`
+	Execute       Handler          `json:"-"`
+
+	// PathArguments declares arguments that address local filesystem targets.
+	// Relative values resolve from WorkspaceRoot; absolute and escaping values
+	// are permitted only when the exact call is explicitly approved.
+	PathArguments []string            `json:"-"`
+	PathExtractor func(Call) []string `json:"-"`
+
+	// Arguments is retained as a source-compatible declaration helper. Register
+	// compiles it into Parameters and validation reads only the schema.
+	Arguments []ArgumentSpec `json:"-"`
+}
+
+// ArgumentSpec is the concise declaration form used by built-in tools.
 type ArgumentSpec struct {
 	Name        string
 	Type        string
@@ -76,16 +109,20 @@ type Result struct {
 
 // Registry owns the local tool catalog and execution policy.
 type Registry struct {
-	WorkspaceRoot   string
-	ApprovalPolicy  config.ApprovalPolicy
-	MaxOutputTokens int
-	AutoTestCommand string
-	CommandTimeout  time.Duration
-	DryRun          bool
-	SandboxMode     config.SandboxMode
-	WebClient       HTTPDoer
-	GitHubToken     string
-	GitHubAPIURL    string
+	WorkspaceRoot      string
+	ApprovalPolicy     config.ApprovalPolicy
+	MaxOutputTokens    int
+	AutoTestCommand    string
+	CommandTimeout     time.Duration
+	DryRun             bool
+	SandboxMode        config.SandboxMode
+	WebClient          HTTPDoer
+	GitHubToken        string
+	GitHubAPIURL       string
+	middlewares        []Middleware
+	catalog            *toolCatalogState
+	resources          *registryResources
+	allowExternalPaths bool
 }
 
 // NewRegistry creates a tool registry rooted in cfg.WorkspaceRoot or cwd.
@@ -103,7 +140,7 @@ func NewRegistry(cfg config.Config) Registry {
 	if realRoot, err := filepath.EvalSymlinks(root); err == nil {
 		root = realRoot
 	}
-	return Registry{
+	registry := Registry{
 		WorkspaceRoot:   root,
 		ApprovalPolicy:  cfg.ApprovalPolicy,
 		MaxOutputTokens: cfg.MaxToolOutputTokens,
@@ -113,39 +150,37 @@ func NewRegistry(cfg config.Config) Registry {
 		SandboxMode:     cfg.SandboxMode,
 		GitHubToken:     strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
 		GitHubAPIURL:    "https://api.github.com",
+		catalog:         defaultToolCatalog.clone(),
+		resources:       &registryResources{},
 	}
+	registry.middlewares = defaultMiddlewareChain()
+	for _, pluginErr := range registry.LoadConfiguredPlugins(context.Background(), cfg.PluginDirectories, cfg.PluginManifests) {
+		debuglog.Error("plugin", "plugin discovery failed", pluginErr, map[string]any{"workspace": root})
+	}
+	return registry
 }
 
 func arg(name, kind, description string, required bool) ArgumentSpec {
 	return ArgumentSpec{Name: name, Type: kind, Description: description, Required: required}
 }
 
-// ToolSpecs returns provider-neutral schemas for all built-in tools.
-func ToolSpecs() []llm.ToolSpec {
-	builtins := Builtins()
-	specs := make([]llm.ToolSpec, 0, len(builtins))
-	for _, tool := range builtins {
-		specs = append(specs, llm.ToolSpec{
-			Name:        tool.Name,
-			Description: tool.Description,
-			Parameters:  tool.ParameterSchema(),
-			Version:     "1.0.0",
-		})
-	}
-	return specs
-}
+// ToolSpecs returns a deterministic snapshot of process-wide default tools.
+func ToolSpecs() []Tool { return Builtins() }
 
-// ParameterSchema converts a tool argument catalog to a JSON-object schema.
-func (tool Tool) ParameterSchema() llm.ToolSchema {
-	properties := make(map[string]llm.ToolProperty, len(tool.Arguments))
+// ParameterSchema compiles concise argument declarations into JSON Schema.
+func (tool Tool) ParameterSchema() ToolSchema {
+	if tool.Parameters.Type != "" || len(tool.Parameters.Properties) > 0 {
+		return tool.Parameters
+	}
+	properties := make(map[string]ToolProperty, len(tool.Arguments))
 	var required []string
-	for _, argument := range tool.Arguments {
-		property := llm.ToolProperty{Type: argument.Type, Description: argument.Description}
+	for _, argument := range toolArgumentSpecs(tool) {
+		property := ToolProperty{Type: argument.Type, Description: argument.Description}
 		if tool.Name == "apply_multi_patch" && argument.Name == "patches" {
-			property.Items = &llm.ToolSchema{
+			property.Items = &ToolSchema{
 				Type: "object",
-				Properties: map[string]llm.ToolProperty{
-					"path":    {Type: "string", Description: "Workspace-relative file path."},
+				Properties: map[string]ToolProperty{
+					"path":    {Type: "string", Description: "Workspace-relative or absolute file path; external paths require approval."},
 					"content": {Type: "string", Description: "Complete UTF-8 file content."},
 				},
 				Required:             []string{"path", "content"},
@@ -157,25 +192,12 @@ func (tool Tool) ParameterSchema() llm.ToolSchema {
 			required = append(required, argument.Name)
 		}
 	}
-	return llm.ToolSchema{
-		Type:                 "object",
-		Properties:           properties,
-		Required:             required,
-		AdditionalProperties: false,
-	}
+	return ToolSchema{Type: "object", Properties: properties, Required: required, AdditionalProperties: false}
 }
 
-// Lookup finds a builtin tool.
-func Lookup(name string) (Tool, bool) {
-	for _, tool := range Builtins() {
-		if tool.Name == name {
-			return tool, true
-		}
-	}
-	return Tool{}, false
-}
-
-// RequiresApproval reports whether the configured policy needs user approval.
+// RequiresApproval reports whether the configured policy needs user approval
+// based only on tool risk. Call-aware code must use RequiresApprovalCall so an
+// out-of-workspace path can be routed through the same approval flow.
 func (r Registry) RequiresApproval(name string) bool {
 	// Auto-approve intentionally attempts every requested action immediately.
 	// Unknown tools still fail safely in Execute instead of creating a useless
@@ -184,7 +206,7 @@ func (r Registry) RequiresApproval(name string) bool {
 		return false
 	}
 
-	tool, ok := Lookup(name)
+	tool, ok := r.Lookup(name)
 	if !ok {
 		return true
 	}
@@ -196,6 +218,37 @@ func (r Registry) RequiresApproval(name string) bool {
 	default:
 		return tool.Risk != RiskRead
 	}
+}
+
+// RequiresApprovalCall reports whether this exact call needs confirmation. In
+// addition to the configured risk policy, every filesystem target outside the
+// active workspace requires approval unless auto-approve is enabled.
+func (r Registry) RequiresApprovalCall(call Call) bool {
+	if r.ApprovalPolicy == config.ApprovalAutoApprove {
+		return false
+	}
+	if r.RequiresApproval(call.Name) {
+		return true
+	}
+	normalized, err := r.Normalize(call)
+	if err != nil {
+		return false
+	}
+	targets, err := r.externalTargets(normalized)
+	return err == nil && len(targets) > 0
+}
+
+// ApprovalReason returns a concise call-specific explanation for the prompt.
+func (r Registry) ApprovalReason(call Call) string {
+	normalized, err := r.Normalize(call)
+	if err != nil {
+		return ""
+	}
+	targets, err := r.externalTargets(normalized)
+	if err != nil || len(targets) == 0 {
+		return ""
+	}
+	return "Access outside the active workspace: " + strings.Join(targets, ", ") + ". Workspace snapshots and rollback do not cover external targets."
 }
 
 // Normalize applies conservative provider-output repairs and then validates the call.
@@ -245,7 +298,7 @@ func (r Registry) Normalize(call Call) (Call, error) {
 		}
 		delete(call.Arguments, alias)
 	}
-	tool, ok := Lookup(call.Name)
+	tool, ok := r.Lookup(call.Name)
 	if !ok {
 		return call, fmt.Errorf("unknown tool %q", call.Name)
 	}
@@ -258,7 +311,7 @@ func (r Registry) Normalize(call Call) (Call, error) {
 			call.Arguments["patches"] = normalized
 		}
 	}
-	for _, argument := range tool.Arguments {
+	for _, argument := range toolArgumentSpecs(tool) {
 		value, exists := call.Arguments[argument.Name]
 		if !exists {
 			continue
@@ -294,20 +347,21 @@ func (r Registry) Normalize(call Call) (Call, error) {
 
 // Validate checks the shape of a tool call before execution.
 func (r Registry) Validate(call Call) error {
-	tool, ok := Lookup(call.Name)
+	tool, ok := r.Lookup(call.Name)
 	if !ok {
 		return fmt.Errorf("unknown tool %q", call.Name)
 	}
-	allowed := make(map[string]ArgumentSpec, len(tool.Arguments))
-	for _, argument := range tool.Arguments {
+	arguments := toolArgumentSpecs(tool)
+	allowed := make(map[string]ArgumentSpec, len(arguments))
+	for _, argument := range arguments {
 		allowed[argument.Name] = argument
 	}
 	for key := range call.Arguments {
-		if _, ok := allowed[key]; !ok {
+		if _, ok := allowed[key]; !ok && !tool.Parameters.AdditionalProperties {
 			return fmt.Errorf("%s does not accept argument %q", call.Name, key)
 		}
 	}
-	for _, argument := range tool.Arguments {
+	for _, argument := range arguments {
 		if argument.Required && strings.TrimSpace(argString(call, argument.Name)) == "" {
 			return fmt.Errorf("%s requires %q", call.Name, argument.Name)
 		}
@@ -318,174 +372,65 @@ func (r Registry) Validate(call Call) error {
 			return err
 		}
 	}
+	if tool.ValidateCall != nil {
+		return tool.ValidateCall(call)
+	}
 	return nil
 }
 
-// ResolvePath returns a workspace-confined absolute path.
+// ResolvePath returns an absolute path after enforcing the active approval scope.
 func (r Registry) ResolvePath(value string) (string, error) { return r.safePath(value) }
+
+// PathIdentity returns the stable path label used by agent state without granting
+// access to the target. Workspace paths are relative; external paths are absolute.
+func (r Registry) PathIdentity(value string) (string, error) {
+	abs, outside, err := r.classifyPath(value)
+	if err != nil {
+		return "", err
+	}
+	if outside {
+		return filepath.ToSlash(abs), nil
+	}
+	rel, err := filepath.Rel(r.WorkspaceRoot, abs)
+	if err != nil {
+		return filepath.ToSlash(abs), nil
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+func (r Registry) displayPath(absolute string) string {
+	identity, err := r.PathIdentity(absolute)
+	if err != nil || strings.TrimSpace(identity) == "" {
+		return filepath.ToSlash(filepath.Clean(absolute))
+	}
+	return identity
+}
 
 // Execute runs one approved tool call.
 func (r Registry) Execute(ctx context.Context, call Call) Result {
 	return r.ExecuteStream(ctx, call, nil)
 }
 
-// ExecuteStream runs a tool and publishes safe incremental command output.
+// ExecuteStream runs a tool through the shared middleware pipeline.
 func (r Registry) ExecuteStream(ctx context.Context, call Call, emit func(string)) Result {
-	ctx = debuglog.WithScope(ctx, debuglog.Scope{Tool: call.Name, Workspace: r.WorkspaceRoot})
-	started := time.Now()
-	_ = debuglog.WriteCtx(ctx, "info", "tool", "tool execution started", "tool call accepted by registry", map[string]any{
-		"fingerprint": Fingerprint(call),
+	chain := r.middlewares
+	if len(chain) == 0 {
+		chain = defaultMiddlewareChain()
+	}
+	terminal := Handler(func(ctx context.Context, runtime Registry, call Call, emit func(string)) Result {
+		definition, ok := runtime.Lookup(call.Name)
+		if !ok {
+			return fail(call.Name, "tool is not registered")
+		}
+		if definition.Execute == nil {
+			return fail(call.Name, "tool has no executor")
+		}
+		return definition.Execute(ctx, runtime, call, emit)
 	})
-	finish := func(result Result, risk Risk) Result {
-		result.Tool = call.Name
-		result.Duration = time.Since(started)
-		if result.OK && strings.TrimSpace(result.Output) == "" {
-			result.Output = emptySuccessOutput(call.Name)
-		}
-		result.Output, result.Summary = truncateApproxTokensWithSummary(result.Output, r.MaxOutputTokens)
-		result.Error, _ = truncateApproxTokensWithSummary(result.Error, r.MaxOutputTokens)
-		if result.Metadata == nil {
-			result.Metadata = map[string]any{}
-		}
-		result.Metadata["ok"] = result.OK
-		result.Metadata["risk"] = string(risk)
-		result.Metadata["duration_ms"] = result.Duration.Milliseconds()
-		if result.Summary != "" {
-			result.Metadata["summary"] = result.Summary
-		}
-		_ = debuglog.WriteCtx(ctx, "info", "tool", "tool execution completed", "tool call completed", map[string]any{
-			"tool":        call.Name,
-			"risk":        string(risk),
-			"workspace":   r.WorkspaceRoot,
-			"duration_ms": result.Duration.Milliseconds(),
-			"fingerprint": Fingerprint(call),
-			"ok":          result.OK,
-		})
-		if !result.OK {
-			message := strings.TrimSpace(result.Error)
-			if message == "" {
-				message = strings.TrimSpace(result.Output)
-			}
-			debuglog.FailureCtx(ctx, "tool", "tool execution failed", message, map[string]any{
-				"tool":        call.Name,
-				"risk":        string(risk),
-				"workspace":   r.WorkspaceRoot,
-				"duration_ms": result.Duration.Milliseconds(),
-				"fingerprint": Fingerprint(call),
-			})
-			result.Metadata["debug_logged"] = true
-		}
-		return result
+	for index := len(chain) - 1; index >= 0; index-- {
+		terminal = chain[index](terminal)
 	}
-	normalized, err := r.Normalize(call)
-	if err != nil {
-		tool, _ := Lookup(call.Name)
-		return finish(fail(call.Name, err.Error()), tool.Risk)
-	}
-	call = normalized
-	tool, _ := Lookup(call.Name)
-	if r.ApprovalPolicy == config.ApprovalChat {
-		return finish(fail(call.Name, "agent tools are disabled by chat approval policy"), tool.Risk)
-	}
-	if r.ApprovalPolicy == config.ApprovalReadOnly && tool.Risk != RiskRead {
-		return finish(fail(call.Name, "write and shell tools are disabled by read-only policy"), tool.Risk)
-	}
-	if r.DryRun && tool.Risk != RiskRead {
-		return finish(r.preview(call), tool.Risk)
-	}
-
-	var result Result
-	if handler := registeredHandler(call.Name); handler != nil {
-		result = handler(ctx, r, call, emit)
-		return finish(result, tool.Risk)
-	}
-	switch call.Name {
-	case "list_files":
-		result = r.listFilesStream(call, emit)
-	case "tree":
-		result = r.treeStream(call, emit)
-	case "read_file":
-		result = r.readFileStream(call, emit)
-	case "search":
-		result = r.searchStream(call, emit)
-	case "grep_regex":
-		result = r.grepRegexStream(call, emit)
-	case "find_symbol":
-		result = r.findSymbol(call)
-	case "find_refs":
-		result = r.findRefs(call)
-	case "file_summary":
-		result = r.fileSummary(call)
-	case "dependency_graph":
-		result = r.dependencyGraph(call)
-	case "detect_project_type":
-		result = r.detectProjectType(call)
-	case "list_dependencies":
-		result = r.listDependencies(call)
-	case "web_fetch":
-		result = r.webFetch(ctx, call)
-	case "github_issue":
-		result = r.githubIssue(ctx, call)
-	case "github_pr":
-		result = r.githubPullRequest(ctx, call)
-	case "git_status":
-		result = r.runCommand(ctx, "git status --short", emit)
-	case "git_diff":
-		command := "git diff"
-		if path := strings.TrimSpace(argString(call, "path")); path != "" {
-			command += " -- " + shellQuote(path)
-		}
-		result = r.runCommand(ctx, command, emit)
-	case "git_log":
-		result = r.gitLog(ctx, call, emit)
-	case "git_blame":
-		result = r.gitBlame(ctx, call, emit)
-	case "git_create_branch":
-		result = r.gitCreateBranch(ctx, call, emit)
-	case "git_checkout":
-		result = r.gitCheckout(ctx, call, emit)
-	case "git_commit":
-		result = r.gitCommit(ctx, call, emit)
-	case "git_stash":
-		result = r.gitStash(ctx, call, emit)
-	case "git_merge":
-		result = r.gitMerge(ctx, call, emit)
-	case "apply_patch":
-		result = r.applyPatch(call)
-	case "apply_multi_patch":
-		result = r.applyMultiPatch(call)
-	case "replace_in_file":
-		result = r.replaceInFile(call)
-	case "prefer":
-		result = r.recordPreference(call)
-	case "shell":
-		result = r.runCommand(ctx, argString(call, "command"), emit)
-	case "go_test":
-		result = r.runCommand(ctx, r.AutoTestCommand, emit)
-	case "run_linter":
-		if command, commandErr := r.projectCommand("lint"); commandErr != nil {
-			result = fail(call.Name, commandErr.Error())
-		} else {
-			result = r.runCommand(ctx, command, emit)
-		}
-	case "run_formatter":
-		if command, commandErr := r.projectCommand("format"); commandErr != nil {
-			result = fail(call.Name, commandErr.Error())
-		} else {
-			result = r.runCommand(ctx, command, emit)
-		}
-	case "security_audit":
-		if command, commandErr := r.projectCommand("audit"); commandErr != nil {
-			result = fail(call.Name, commandErr.Error())
-		} else {
-			result = r.runCommand(ctx, command, emit)
-		}
-	case "delegate":
-		result = fail(call.Name, "delegate is executed by the agent orchestrator")
-	default:
-		result = fail(call.Name, "tool is not implemented")
-	}
-	return finish(result, tool.Risk)
+	return terminal(ctx, r, call, emit)
 }
 
 // Preview simulates a normalized tool call without mutating the workspace.
@@ -510,9 +455,9 @@ func (r Registry) preview(call Call) Result {
 			return fail(call.Name, "content is required")
 		}
 		before, _ := os.ReadFile(path)
-		rel, _ := filepath.Rel(r.WorkspaceRoot, path)
-		result.Output = renderDryRunDiff(filepath.ToSlash(rel), string(before), content)
-		result.Metadata["path"] = filepath.ToSlash(rel)
+		display := r.displayPath(path)
+		result.Output = renderDryRunDiff(display, string(before), content)
+		result.Metadata["path"] = display
 	case "apply_multi_patch":
 		result = r.previewMultiPatch(call)
 	case "github_issue", "github_pr":
@@ -542,9 +487,9 @@ func (r Registry) preview(call Call) Result {
 			limit = -1
 		}
 		after := strings.Replace(string(before), oldText, argString(call, "new"), limit)
-		rel, _ := filepath.Rel(r.WorkspaceRoot, path)
-		result.Output = renderDryRunDiff(filepath.ToSlash(rel), string(before), after)
-		result.Metadata["path"] = filepath.ToSlash(rel)
+		display := r.displayPath(path)
+		result.Output = renderDryRunDiff(display, string(before), after)
+		result.Metadata["path"] = display
 		result.Metadata["replacements"] = count
 	default:
 		command := strings.TrimSpace(argString(call, "command"))
@@ -610,8 +555,7 @@ func (r Registry) listFilesStream(call Call, emit func(string)) Result {
 		if d.IsDir() {
 			return nil
 		}
-		rel, _ := filepath.Rel(r.WorkspaceRoot, path)
-		item := filepath.ToSlash(rel)
+		item := r.displayPath(path)
 		files = append(files, item)
 		if emit != nil {
 			emit(item + "\n")
@@ -655,7 +599,7 @@ func (r Registry) treeStream(call Call, emit func(string)) Result {
 			}
 			return nil
 		}
-		rel, _ := filepath.Rel(r.WorkspaceRoot, path)
+		rel := r.displayPath(path)
 		if rel == "." {
 			lines = append(lines, ".")
 			if emit != nil {
@@ -722,10 +666,10 @@ func (r Registry) readFileStream(call Call, emit func(string)) Result {
 		emit(chunk.String())
 	}
 	result := ok(call.Name, out.String())
-	rel, _ := filepath.Rel(r.WorkspaceRoot, path)
+	display := r.displayPath(path)
 	hash := sha256.Sum256(data)
 	result.Metadata = map[string]any{
-		"path":           filepath.ToSlash(rel),
+		"path":           display,
 		"start_line":     startLine,
 		"end_line":       endLine,
 		"content_sha256": fmt.Sprintf("%x", hash[:]),
@@ -764,8 +708,8 @@ func (r Registry) searchStream(call Call, emit func(string)) Result {
 		}
 		for i, line := range strings.Split(string(data), "\n") {
 			if strings.Contains(strings.ToLower(line), lower) {
-				rel, _ := filepath.Rel(r.WorkspaceRoot, path)
-				match := fmt.Sprintf("%s:%d: %s", filepath.ToSlash(rel), i+1, strings.TrimSpace(line))
+				display := r.displayPath(path)
+				match := fmt.Sprintf("%s:%d: %s", display, i+1, strings.TrimSpace(line))
 				matches = append(matches, match)
 				if emit != nil {
 					emit(match + "\n")
@@ -798,9 +742,9 @@ func (r Registry) applyPatch(call Call) Result {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return fail(call.Name, err.Error())
 	}
-	rel, _ := filepath.Rel(r.WorkspaceRoot, path)
-	result := ok(call.Name, "wrote "+filepath.ToSlash(rel))
-	result.Metadata = map[string]any{"path": filepath.ToSlash(rel), "changed": true}
+	display := r.displayPath(path)
+	result := ok(call.Name, "wrote "+display)
+	result.Metadata = map[string]any{"path": display, "changed": true}
 	return result
 }
 
@@ -834,9 +778,9 @@ func (r Registry) replaceInFile(call Call) Result {
 	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
 		return fail(call.Name, err.Error())
 	}
-	rel, _ := filepath.Rel(r.WorkspaceRoot, path)
-	result := ok(call.Name, fmt.Sprintf("updated %s (%d replacement(s))", filepath.ToSlash(rel), count))
-	result.Metadata = map[string]any{"path": filepath.ToSlash(rel), "changed": true, "replacements": count}
+	display := r.displayPath(path)
+	result := ok(call.Name, fmt.Sprintf("updated %s (%d replacement(s))", display, count))
+	result.Metadata = map[string]any{"path": display, "changed": true, "replacements": count}
 	return result
 }
 
@@ -848,31 +792,19 @@ func (r Registry) runCommand(ctx context.Context, command string, emit func(stri
 	if looksDangerousCommand(command) {
 		return Result{OK: false, Error: "refusing destructive shell command"}
 	}
-	timeout := r.CommandTimeout
-	if timeout <= 0 {
-		timeout = 2 * time.Minute
+	route, _ := ctx.Value(sandboxRouteKey{}).(sandboxRoute)
+	if route.mode == "" {
+		route.mode = "host"
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	var cmd *exec.Cmd
-	sandbox := "host"
-	if r.SandboxMode == config.SandboxDocker {
-		dockerPath, err := exec.LookPath("docker")
-		if err != nil {
-			return Result{OK: false, Error: "docker sandbox requested, but docker is not installed or not on PATH", Metadata: map[string]any{"sandbox": "docker"}}
-		}
-		image := r.dockerSandboxImage()
-		inspect := exec.CommandContext(ctx, dockerPath, "image", "inspect", image)
-		if err := inspect.Run(); err != nil {
-			return Result{OK: false, Error: "docker sandbox image is unavailable locally: " + image + " (pull it before running with network isolation)", Metadata: map[string]any{"sandbox": "docker", "image": image}}
-		}
+	sandbox := route.mode
+	if route.mode == "docker" {
 		mount := r.WorkspaceRoot + ":/workspace"
-		cmd = exec.CommandContext(ctx, dockerPath,
+		cmd = exec.CommandContext(ctx, route.dockerPath,
 			"run", "--rm", "--network", "none", "--read-only",
 			"--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
-			"-v", mount, "-w", "/workspace", image, "sh", "-lc", command,
+			"-v", mount, "-w", "/workspace", route.image, "sh", "-lc", command,
 		)
-		sandbox = "docker"
 	} else if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", command)
 		cmd.Dir = r.WorkspaceRoot
@@ -891,6 +823,9 @@ func (r Registry) runCommand(ctx context.Context, command string, emit func(stri
 	text := output.String()
 	if ctx.Err() == context.DeadlineExceeded {
 		return Result{OK: false, Output: text, Error: "command timed out", Metadata: map[string]any{"sandbox": sandbox}}
+	}
+	if ctx.Err() == context.Canceled {
+		return Result{OK: false, Output: text, Error: "command canceled", Metadata: map[string]any{"sandbox": sandbox}}
 	}
 	if err != nil {
 		return Result{OK: false, Output: text, Error: err.Error(), Metadata: map[string]any{"sandbox": sandbox}}
@@ -963,34 +898,82 @@ func looksDangerousCommand(command string) bool {
 }
 
 func (r Registry) safePath(value string) (string, error) {
+	abs, outside, err := r.classifyPath(value)
+	if err != nil {
+		return "", err
+	}
+	if outside && !r.allowExternalPaths {
+		return "", fmt.Errorf("path is outside the active workspace and requires explicit approval: %s", abs)
+	}
+	return abs, nil
+}
+
+func (r Registry) classifyPath(value string) (absolute string, outside bool, err error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "", fmt.Errorf("path is required")
+		return "", false, fmt.Errorf("path is required")
 	}
 	if !filepath.IsAbs(value) {
 		value = filepath.Join(r.WorkspaceRoot, value)
 	}
 	abs, err := filepath.Abs(value)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-
-	root, err := filepath.EvalSymlinks(r.WorkspaceRoot)
+	root, err := filepath.Abs(r.WorkspaceRoot)
 	if err != nil {
-		root = r.WorkspaceRoot
+		return "", false, err
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil {
+		root = resolved
 	}
 	candidate, err := resolveForBoundary(abs)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	rel, err := filepath.Rel(root, candidate)
 	if err != nil {
-		return "", err
+		rootVolume := filepath.VolumeName(root)
+		candidateVolume := filepath.VolumeName(candidate)
+		if rootVolume != "" && candidateVolume != "" && !strings.EqualFold(rootVolume, candidateVolume) {
+			return abs, true, nil
+		}
+		return "", false, err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("path escapes workspace: %s", value)
+	outside = rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+	return abs, outside, nil
+}
+
+func (r Registry) externalTargets(call Call) ([]string, error) {
+	tool, ok := r.Lookup(call.Name)
+	if !ok {
+		return nil, nil
 	}
-	return abs, nil
+	values := make([]string, 0, len(tool.PathArguments)+2)
+	for _, name := range tool.PathArguments {
+		value := strings.TrimSpace(argString(call, name))
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	if tool.PathExtractor != nil {
+		values = append(values, tool.PathExtractor(call)...)
+	}
+	seen := map[string]bool{}
+	var external []string
+	for _, value := range values {
+		abs, outside, err := r.classifyPath(value)
+		if err != nil {
+			return nil, err
+		}
+		key := filepath.Clean(abs)
+		if outside && !seen[key] {
+			seen[key] = true
+			external = append(external, key)
+		}
+	}
+	sort.Strings(external)
+	return external, nil
 }
 
 func resolveForBoundary(path string) (string, error) {

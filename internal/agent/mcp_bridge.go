@@ -3,65 +3,60 @@ package agent
 import (
 	"context"
 	"fmt"
-	"strings"
-	"time"
 
-	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
 	"github.com/ephemera-ai/ephemera/internal/tools"
 )
 
-func (r Runner) hasMCPTool(name string) bool { return r.MCP != nil && r.MCP.HasTool(name) }
+// discoverMCPTools translates every discovered MCP capability into the normal
+// runtime registry. From this point onward MCP tools use the same validation,
+// approval, dry-run, timeout, sandbox, and debug middleware as built-ins.
+func (r Runner) discoverMCPTools(ctx context.Context) []error {
+	if r.MCP == nil || !r.MCP.Configured() {
+		return nil
+	}
+	errs := r.MCP.Discover(ctx)
+	definitions := r.MCP.Definitions()
+	current := make(map[string]bool, len(definitions))
+	for _, definition := range definitions {
+		current[definition.Name] = true
+		if existing, exists := r.Tools.Lookup(definition.Name); exists {
+			source, _ := existing.ProviderHints["source"].(string)
+			server, _ := existing.ProviderHints["server"].(string)
+			remote, _ := existing.ProviderHints["remote_name"].(string)
+			newServer, _ := definition.ProviderHints["server"].(string)
+			newRemote, _ := definition.ProviderHints["remote_name"].(string)
+			if source == "mcp" && server == newServer && remote == newRemote {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("register MCP tool %s: name collides with existing %s tool", definition.Name, firstNonEmpty(source, "built-in")))
+			continue
+		}
+		if err := r.Tools.Register(definition); err != nil {
+			errs = append(errs, fmt.Errorf("register MCP tool %s: %w", definition.Name, err))
+		}
+	}
+	for _, definition := range r.Tools.ToolSpecs() {
+		source, _ := definition.ProviderHints["source"].(string)
+		if source == "mcp" && !current[definition.Name] {
+			r.Tools.Unregister(definition.Name)
+		}
+	}
+	return errs
+}
 
 func (r Runner) normalizeToolCall(call tools.Call) (tools.Call, error) {
-	call.Name = strings.TrimSpace(call.Name)
-	if call.Arguments == nil {
-		call.Arguments = map[string]any{}
-	}
-	if r.hasMCPTool(call.Name) {
-		return call, r.MCP.Validate(call.Name, call.Arguments)
-	}
 	return r.Tools.Normalize(call)
 }
 
 func (r Runner) toolRisk(name string) tools.Risk {
-	if tool, ok := tools.Lookup(name); ok {
+	if tool, ok := r.Tools.Lookup(name); ok {
 		return tool.Risk
-	}
-	if r.hasMCPTool(name) {
-		if r.MCP.ReadOnly(name) {
-			return tools.RiskRead
-		}
-		return tools.RiskShell
 	}
 	return ""
 }
 
-func (r Runner) requiresApproval(name string) bool {
-	if !r.hasMCPTool(name) {
-		return r.Tools.RequiresApproval(name)
-	}
-	switch r.Config.ApprovalPolicy {
-	case config.ApprovalAutoApprove, config.ApprovalWorkspaceWrite:
-		return false
-	case config.ApprovalApproveWrites, config.ApprovalReadOnly:
-		return !r.MCP.ReadOnly(name)
-	default:
-		return true
-	}
-}
-
-func (r Runner) executeMCPTool(ctx context.Context, call tools.Call) tools.Result {
-	started := time.Now()
-	result := r.MCP.Call(ctx, call.Name, call.Arguments)
-	metadata := result.Metadata
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	metadata["risk"] = string(r.toolRisk(call.Name))
-	metadata["duration_ms"] = time.Since(started).Milliseconds()
-	return tools.Result{Tool: call.Name, OK: result.OK, Output: result.Output, Error: result.Error, Metadata: metadata, Duration: time.Since(started)}
-}
+func (r Runner) requiresApproval(call tools.Call) bool { return r.Tools.RequiresApprovalCall(call) }
 
 func (r Runner) eventRisk(event history.Event) tools.Risk {
 	if risk := metadataString(event.Metadata, "risk"); risk != "" {

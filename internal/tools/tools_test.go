@@ -25,7 +25,7 @@ func TestReadFileStaysInsideWorkspace(t *testing.T) {
 		Arguments: map[string]any{"path": filepath.Join(root, "..", "outside.txt")},
 	})
 
-	if result.OK || !strings.Contains(result.Error, "escapes workspace") {
+	if result.OK || !strings.Contains(result.Error, "outside the active workspace") {
 		t.Fatalf("read outside workspace = %#v, want blocked", result)
 	}
 }
@@ -48,7 +48,7 @@ func TestReadFileBlocksSymlinkEscape(t *testing.T) {
 		Arguments: map[string]any{"path": filepath.Join("outside", "secret.txt")},
 	})
 
-	if result.OK || !strings.Contains(result.Error, "escapes workspace") {
+	if result.OK || !strings.Contains(result.Error, "outside the active workspace") {
 		t.Fatalf("symlink escape read = %#v, want blocked", result)
 	}
 }
@@ -72,7 +72,7 @@ func TestApplyPatchBlocksSymlinkEscapeForNewFile(t *testing.T) {
 		},
 	})
 
-	if result.OK || !strings.Contains(result.Error, "escapes workspace") {
+	if result.OK || !strings.Contains(result.Error, "outside the active workspace") {
 		t.Fatalf("symlink escape write = %#v, want blocked", result)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "created.txt")); !os.IsNotExist(err) {
@@ -233,7 +233,7 @@ func TestListFilesReturnsExplicitEmptyDirectoryEvidence(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "pong game"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	registry := NewRegistry(config.Config{WorkspaceRoot: root, ApprovalPolicy: config.ApprovalAutoApprove})
+	registry := NewRegistry(config.Config{AgentSettings: config.AgentSettings{WorkspaceRoot: root, ApprovalPolicy: config.ApprovalAutoApprove}})
 	result := registry.Execute(context.Background(), Call{
 		Name:      "list_files",
 		Arguments: map[string]any{"path": "pong game"},
@@ -369,5 +369,121 @@ func TestDryRunDoesNotExecuteShellCommands(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "changed.txt")); !os.IsNotExist(err) {
 		t.Fatalf("dry shell executed: %v", err)
+	}
+}
+
+func TestApprovalMiddlewareRequiresScopedGrant(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.ApprovalPolicy = config.ApprovalApproveWrites
+	registry := NewRegistry(cfg)
+	call := Call{Name: "apply_patch", Arguments: map[string]any{"path": "approved.txt", "content": "ok\n"}}
+
+	blocked := registry.Execute(context.Background(), call)
+	if blocked.OK || !strings.Contains(blocked.Error, "explicit user approval") {
+		t.Fatalf("unapproved write = %#v", blocked)
+	}
+	approved := registry.Execute(WithApproval(context.Background()), call)
+	if !approved.OK {
+		t.Fatalf("approved write = %#v", approved)
+	}
+}
+
+func TestExternalReadRequiresCallApprovalAndRunsAfterGrant(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "workspace")
+	external := filepath.Join(parent, "external")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(external, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(external, "note.txt")
+	if err := os.WriteFile(path, []byte("outside data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.WorkspaceRoot = workspace
+	cfg.ApprovalPolicy = config.ApprovalWorkspaceWrite
+	registry := NewRegistry(cfg)
+	call := Call{Name: "read_file", Arguments: map[string]any{"path": path}}
+
+	if !registry.RequiresApprovalCall(call) {
+		t.Fatal("external read did not request approval")
+	}
+	if reason := registry.ApprovalReason(call); !strings.Contains(reason, path) {
+		t.Fatalf("approval reason = %q, want external target", reason)
+	}
+	blocked := registry.Execute(context.Background(), call)
+	if blocked.OK || !strings.Contains(blocked.Error, "requires explicit approval") {
+		t.Fatalf("unapproved external read = %#v", blocked)
+	}
+	approved := registry.Execute(WithApproval(context.Background()), call)
+	if !approved.OK || !strings.Contains(approved.Output, "outside data") {
+		t.Fatalf("approved external read = %#v", approved)
+	}
+	if got, _ := approved.Metadata["path"].(string); filepath.Clean(got) != filepath.Clean(path) {
+		t.Fatalf("external metadata path = %q, want %q", got, path)
+	}
+}
+
+func TestExternalWriteRequiresApprovalAndWritesExactTarget(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "workspace")
+	external := filepath.Join(parent, "external")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(external, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.WorkspaceRoot = workspace
+	cfg.ApprovalPolicy = config.ApprovalWorkspaceWrite
+	registry := NewRegistry(cfg)
+	path := filepath.Join(external, "created.txt")
+	call := Call{Name: "apply_patch", Arguments: map[string]any{"path": path, "content": "approved\n"}}
+
+	blocked := registry.Execute(context.Background(), call)
+	if blocked.OK {
+		t.Fatalf("external write ran without approval: %#v", blocked)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("external file exists before approval: %v", err)
+	}
+	approved := registry.Execute(WithApproval(context.Background()), call)
+	if !approved.OK {
+		t.Fatalf("approved external write = %#v", approved)
+	}
+	if got, _ := approved.Metadata["path"].(string); filepath.Clean(got) != filepath.Clean(path) {
+		t.Fatalf("external metadata path = %q, want %q", got, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "approved\n" {
+		t.Fatalf("external content = %q, err=%v", data, err)
+	}
+}
+
+func TestAutoApproveAllowsExternalPathWithoutPrompt(t *testing.T) {
+	workspace := t.TempDir()
+	external := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(external, []byte("auto\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.WorkspaceRoot = workspace
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	registry := NewRegistry(cfg)
+	call := Call{Name: "read_file", Arguments: map[string]any{"path": external}}
+	if registry.RequiresApprovalCall(call) {
+		t.Fatal("auto-approve requested an external-path prompt")
+	}
+	result := registry.Execute(context.Background(), call)
+	if !result.OK || !strings.Contains(result.Output, "auto") {
+		t.Fatalf("auto-approved external read = %#v", result)
 	}
 }

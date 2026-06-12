@@ -79,7 +79,7 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/sessions", "show session names"}, {"/sessions renderer", "search saved session text"}},
 	},
 	{
-		Name: "/provider", Usage: "<connected-route>", Description: "activate a remembered provider route", Category: "ROUTE", Introduced: "v0.1.0", Permission: "local", Choices: config.ProviderNames(),
+		Name: "/provider", Usage: "<connected-route>", Description: "activate a remembered provider route", Category: "ROUTE", Introduced: "v0.1.0", Permission: "local", Choices: llm.ProviderNames(),
 		Examples: []commandExample{{"/provider openai", "activate remembered OpenAI"}, {"/provider openrouter", "activate remembered OpenRouter"}},
 	},
 	{

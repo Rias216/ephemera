@@ -49,7 +49,7 @@ func TestCodexBridgeBudgetBounds(t *testing.T) {
 func TestNormalizeRepairsPartialConfig(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{Provider: "openai", Models: map[string]string{"openai": "custom-model"}}
+	cfg := Config{ProviderSettings: ProviderSettings{Provider: "openai", Models: map[string]string{"openai": "custom-model"}}}
 	cfg.normalize()
 
 	if cfg.Model() != "custom-model" {
@@ -87,7 +87,7 @@ func TestDefaultAgentPolicy(t *testing.T) {
 func TestNormalizePreservesExplicitOpenAIModel(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{Provider: "openai", Models: map[string]string{"openai": "gpt-5.5"}}
+	cfg := Config{ProviderSettings: ProviderSettings{Provider: "openai", Models: map[string]string{"openai": "gpt-5.5"}}}
 	cfg.normalize()
 
 	if got := cfg.Model(); got != "gpt-5.5" {
@@ -98,7 +98,7 @@ func TestNormalizePreservesExplicitOpenAIModel(t *testing.T) {
 func TestSetModelInitializesMap(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{Provider: "openai"}
+	cfg := Config{ProviderSettings: ProviderSettings{Provider: "openai"}}
 	cfg.SetModel("gpt-test")
 	if got := cfg.Model(); got != "gpt-test" {
 		t.Fatalf("Model() = %q, want gpt-test", got)
@@ -282,12 +282,12 @@ func TestSaveLoadPersistsConnectionCredentialOutsideConfigJSON(t *testing.T) {
 func TestNormalizeMigratesLegacyProviderToConnection(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{
+	cfg := Config{ProviderSettings: ProviderSettings{
 		Provider:       "compatible",
 		Models:         map[string]string{"compatible": "legacy-model"},
 		CompatibleName: "legacy-host",
 		CompatibleURL:  "https://legacy.example/v1",
-	}
+	}}
 	cfg.normalize()
 
 	id := ConnectionID("compatible", "legacy-host")
@@ -400,5 +400,136 @@ func TestConfigForRoleUsesRememberedRouteWithoutMutatingMainSelection(t *testing
 	}
 	if cfg.Provider != mainProvider || cfg.Model() != mainModel {
 		t.Fatalf("main config mutated: provider=%q model=%q", cfg.Provider, cfg.Model())
+	}
+}
+
+func TestConfigMarshalsHierarchicalSchema(t *testing.T) {
+	cfg := Default()
+	cfg.PluginDirectories = []string{"plugins"}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range []string{"providers", "agent", "ui", "mcp", "plugins", "orchestration"} {
+		if _, ok := root[group]; !ok {
+			t.Fatalf("hierarchical config is missing %q: %s", group, data)
+		}
+	}
+	if _, flat := root["provider"]; flat {
+		t.Fatalf("provider leaked into the root object: %s", data)
+	}
+}
+
+func TestConfigUnmarshalMigratesLegacyFlatSchema(t *testing.T) {
+	legacy := []byte(`{
+		"provider":"openai",
+		"models":{"openai":"gpt-legacy"},
+		"max_tokens":1234,
+		"approval_policy":"read-only",
+		"agent_max_steps":7,
+		"theme":"mono",
+		"mcp_servers":{"local":{"transport":"stdio","command":"helper"}},
+		"subagent_enabled":false
+	}`)
+	var cfg Config
+	if err := json.Unmarshal(legacy, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.normalize()
+	if cfg.Provider != "openai" || cfg.Model() != "gpt-legacy" || cfg.MaxTokens != 1234 {
+		t.Fatalf("legacy provider settings were not migrated: %#v", cfg.ProviderSettings)
+	}
+	if cfg.ApprovalPolicy != ApprovalReadOnly || cfg.AgentMaxSteps != 7 || cfg.Theme != "mono" {
+		t.Fatalf("legacy agent/UI settings were not migrated: %#v %#v", cfg.AgentSettings, cfg.UISettings)
+	}
+	if _, ok := cfg.MCPServers["local"]; !ok {
+		t.Fatalf("legacy MCP settings were not migrated: %#v", cfg.MCPServers)
+	}
+}
+
+func TestValidProviderAcceptsRegisteredAdapterKeysWithoutEnumeration(t *testing.T) {
+	for _, value := range []string{"custom-provider", "provider_2", "x"} {
+		if !ValidProvider(value) {
+			t.Fatalf("ValidProvider(%q) = false", value)
+		}
+	}
+	for _, value := range []string{"", "-bad", "bad/provider", "bad provider"} {
+		if ValidProvider(value) {
+			t.Fatalf("ValidProvider(%q) = true", value)
+		}
+	}
+}
+
+func TestConfigUnmarshalNestedGroupsOverrideLegacyFlatFields(t *testing.T) {
+	data := []byte(`{
+		"provider":"openai",
+		"max_tokens":999,
+		"theme":"legacy",
+		"providers":{"provider":"anthropic","max_tokens":2048},
+		"ui":{"theme":"nested"}
+	}`)
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "anthropic" || cfg.MaxTokens != 2048 {
+		t.Fatalf("nested provider settings did not win: %#v", cfg.ProviderSettings)
+	}
+	if cfg.Theme != "nested" {
+		t.Fatalf("nested UI settings did not win: %#v", cfg.UISettings)
+	}
+}
+
+func TestSaveDoesNotPersistRuntimeWorkspace(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("APPDATA", configHome)
+
+	cfg := Default()
+	cfg.WorkspaceRoot = filepath.Join(t.TempDir(), "temporary-workspace")
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(configHome, "ephemera", fileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "temporary-workspace") || strings.Contains(string(data), "workspace_root") {
+		t.Fatalf("runtime workspace leaked into config: %s", data)
+	}
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.WorkspaceRoot != "" {
+		t.Fatalf("loaded workspace = %q, want process-local empty value", loaded.WorkspaceRoot)
+	}
+}
+
+func TestLoadDropsLegacyPersistedWorkspace(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("APPDATA", configHome)
+	dir := filepath.Join(configHome, "ephemera")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(`{"workspace_root":"C:\\Users\\test\\AppData\\Local\\Temp\\TestPoisonedWorkspace"}`)
+	if err := os.WriteFile(filepath.Join(dir, fileName), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkspaceRoot != "" {
+		t.Fatalf("legacy workspace survived load: %q", cfg.WorkspaceRoot)
 	}
 }

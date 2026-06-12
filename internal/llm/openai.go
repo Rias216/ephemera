@@ -19,6 +19,13 @@ type OpenAI struct {
 	baseURL   string
 }
 
+func init() {
+	RegisterProvider("openai", func(cfg config.Config) (Provider, error) { return NewOpenAI(cfg.OpenAIKey), nil })
+	RegisterProvider("compatible", func(cfg config.Config) (Provider, error) {
+		return NewOpenAICompatible(cfg.CompatibleName, cfg.CompatibleURL, cfg.CompatibleKey), nil
+	})
+}
+
 func NewOpenAI(apiKey string) *OpenAI {
 	return &OpenAI{name: "openai", apiKey: apiKey}
 }
@@ -32,6 +39,18 @@ func NewOpenAICompatible(name, baseURL, apiKey string) *OpenAI {
 }
 
 func (p *OpenAI) Name() string { return p.name }
+
+func (p *OpenAI) ListModels(ctx context.Context) ([]string, error) {
+	key, err := p.resolvedAPIKey()
+	if err != nil {
+		return nil, err
+	}
+	baseURL := p.baseURL
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+	return listOpenAICompatibleModels(ctx, baseURL, key)
+}
 
 func (p *OpenAI) Capabilities() ProviderCapabilities {
 	format := "openai"

@@ -63,15 +63,11 @@ func (r Runner) executeWithRecovery(ctx context.Context, call tools.Call, iterat
 			timeout = 120 * time.Second
 		}
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
-		if r.hasMCPTool(call.Name) {
-			result = r.executeMCPTool(callCtx, call)
-		} else {
-			result = r.Tools.ExecuteStream(callCtx, call, func(chunk string) {
-				if emit != nil && chunk != "" {
-					emit(StreamUpdate{Kind: StreamToolProgress, Phase: "tool output", Iteration: iteration, Tool: call.Name, Delta: chunk})
-				}
-			})
-		}
+		result = r.Tools.ExecuteStream(callCtx, call, func(chunk string) {
+			if emit != nil && chunk != "" {
+				emit(StreamUpdate{Kind: StreamToolProgress, Phase: "tool output", Iteration: iteration, Tool: call.Name, Delta: chunk})
+			}
+		})
 		cancel()
 		taxonomy := classifyToolErrorTaxonomy(result)
 		if result.Metadata == nil {

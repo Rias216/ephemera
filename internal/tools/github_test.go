@@ -49,7 +49,7 @@ func TestGitHubIssueReadUsesVersionedAPIRequest(t *testing.T) {
 	registry.WebClient = doer
 	registry.GitHubAPIURL = "https://api.github.test"
 
-	result := registry.Execute(context.Background(), Call{Name: "github_issue", Arguments: map[string]any{
+	result := registry.Execute(WithApproval(context.Background()), Call{Name: "github_issue", Arguments: map[string]any{
 		"action": "get", "repository": "owner/repo", "number": 42,
 	}})
 	if !result.OK || !strings.Contains(result.Output, `"number": 42`) {
@@ -71,7 +71,7 @@ func TestGitHubIssueMutationRequiresTokenAndSendsPayload(t *testing.T) {
 	registry.WebClient = doer
 	registry.GitHubAPIURL = "https://api.github.test"
 
-	missing := registry.Execute(context.Background(), Call{Name: "github_issue", Arguments: map[string]any{
+	missing := registry.Execute(WithApproval(context.Background()), Call{Name: "github_issue", Arguments: map[string]any{
 		"action": "create", "repository": "owner/repo", "title": "Fix", "body": "Details",
 	}})
 	if missing.OK || !strings.Contains(missing.Error, "GITHUB_TOKEN") || doer.calls != 0 {
@@ -79,7 +79,7 @@ func TestGitHubIssueMutationRequiresTokenAndSendsPayload(t *testing.T) {
 	}
 
 	registry.GitHubToken = "secret"
-	created := registry.Execute(context.Background(), Call{Name: "github_issue", Arguments: map[string]any{
+	created := registry.Execute(WithApproval(context.Background()), Call{Name: "github_issue", Arguments: map[string]any{
 		"action": "create", "repository": "owner/repo", "title": "Fix", "body": "Details", "labels": "bug, agent,bug",
 	}})
 	if !created.OK || doer.request.Method != http.MethodPost {
@@ -104,7 +104,7 @@ func TestGitHubPullRequestReviewUsesReviewEndpoint(t *testing.T) {
 	registry.WebClient = doer
 	registry.GitHubAPIURL = "https://api.github.test"
 
-	result := registry.Execute(context.Background(), Call{Name: "github_pr", Arguments: map[string]any{
+	result := registry.Execute(WithApproval(context.Background()), Call{Name: "github_pr", Arguments: map[string]any{
 		"action": "review", "repository": "owner/repo", "number": 9, "event": "approve", "body": "Looks good",
 	}})
 	if !result.OK {
@@ -123,14 +123,14 @@ func TestGitHubToolsValidateRepositoryAndRespectDryRun(t *testing.T) {
 	doer := &recordingHTTPDoer{}
 	registry.WebClient = doer
 
-	invalid := registry.Execute(context.Background(), Call{Name: "github_issue", Arguments: map[string]any{
+	invalid := registry.Execute(WithApproval(context.Background()), Call{Name: "github_issue", Arguments: map[string]any{
 		"action": "get", "repository": "../bad", "number": 1,
 	}})
 	if invalid.OK {
 		t.Fatalf("invalid repository accepted: %#v", invalid)
 	}
 
-	preview := registry.Execute(context.Background(), Call{Name: "github_pr", Arguments: map[string]any{
+	preview := registry.Execute(WithApproval(context.Background()), Call{Name: "github_pr", Arguments: map[string]any{
 		"action": "create", "repository": "owner/repo", "title": "Feature", "head": "feature", "base": "main",
 	}})
 	if !preview.OK || preview.Metadata["dry_run"] != true || doer.calls != 0 {

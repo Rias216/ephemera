@@ -91,3 +91,46 @@ func (p *Codex) HealthCheck(context.Context) error {
 	_, err := codexExecutable()
 	return err
 }
+
+func containsAny(text string, markers ...string) bool {
+	text = strings.ToLower(text)
+	for _, marker := range markers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *OpenAI) IsNativeToolCompatibilityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return containsAny(err.Error(),
+		"tool_choice", "tool choice", "tools is not supported", "tools are not supported",
+		"function calling", "function_call", "tool calls are not supported",
+		"invalid tool schema", "unsupported schema", "invalid function schema",
+		"does not support tools", "doesn't support tools", "unknown field \"tools\"",
+	)
+}
+
+func (p *Anthropic) IsNativeToolCompatibilityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return containsAny(err.Error(),
+		"tools: extra inputs are not permitted", "invalid tool schema",
+		"tool_use is not supported", "tools are not supported",
+	)
+}
+
+func (p *Ollama) IsNativeToolCompatibilityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return containsAny(err.Error(),
+		"does not support tools", "does not support tool calling", "tools are not supported",
+	)
+}
+
+func (p *Codex) IsNativeToolCompatibilityError(error) bool { return false }

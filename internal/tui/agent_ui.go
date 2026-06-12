@@ -380,11 +380,14 @@ func eventIsToolish(event history.Event) bool {
 }
 
 func eventShowsBodyByDefault(event history.Event) bool {
-	switch event.Type {
-	case "tool_call", "tool_result", "test_result", "approval_request", "verification", "reasoning_trace", "reasoning_summary", "director_status":
-		return false
-	default:
+	if event.Status == "error" || event.Status == "failed" {
 		return true
+	}
+	switch event.Type {
+	case "final", "recovery":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -532,11 +535,24 @@ func eventMetadataString(event history.Event, key string) string {
 
 func (m Model) agentBodyAlreadyShown(content string) bool {
 	content = strings.TrimSpace(content)
-	answer := strings.TrimSpace(m.lastAssistant)
-	if len(content) < 48 || answer == "" {
+	if content == "" {
 		return false
 	}
-	return content == answer || strings.Contains(answer, content)
+	answers := []string{strings.TrimSpace(m.lastAssistant)}
+	for _, message := range m.session.Messages {
+		if message.Role == "assistant" {
+			answers = append(answers, strings.TrimSpace(message.Content))
+		}
+	}
+	for _, answer := range answers {
+		if answer == "" {
+			continue
+		}
+		if content == answer || (len(content) >= 48 && strings.Contains(answer, content)) {
+			return true
+		}
+	}
+	return false
 }
 
 func agentGlyph(kind string) string {
@@ -711,8 +727,11 @@ func (m *Model) submitShellCommand(command string) tea.Cmd {
 		CreatedAt: time.Now(),
 	}
 	m.session.AppendEvent(callEvent)
-	if registry.RequiresApproval(call.Name) {
+	if registry.RequiresApprovalCall(call) {
 		reason := "Shell command requested from composer."
+		if scope := registry.ApprovalReason(call); scope != "" {
+			reason += "\n\n" + scope
+		}
 		approvalEvent := history.Event{
 			ID:        fmt.Sprintf("evt-%d", time.Now().UnixNano()),
 			Type:      history.EventApprovalRequest,

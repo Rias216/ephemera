@@ -25,14 +25,14 @@ func (m *Model) rotateInspector(delta int) {
 func (m Model) footerTabsLine(width int) string {
 	bg := lipgloss.NewStyle().Background(m.styles.PanelDeep).ColorWhitespace(true)
 	tabs := []string{
-		m.renderFooterTab(inspectorContext, "context", "Alt+1"),
-		m.renderFooterTab(inspectorAgent, "agent", "Alt+2"),
-		m.renderFooterTab(inspectorThinking, "surface", "Alt+3"),
-		m.renderFooterTab(inspectorKeys, "keys", "Alt+4"),
+		m.renderFooterTab(inspectorContext, "context", ""),
+		m.renderFooterTab(inspectorAgent, "agent", ""),
+		m.renderFooterTab(inspectorThinking, "surface", ""),
+		m.renderFooterTab(inspectorKeys, "keys", ""),
 	}
 	left := strings.Join(tabs, " ")
 	_, glyph := m.statusPresentation()
-	statusText := glyph + " live · Ctrl+T timeline · Ctrl+←/→ switch"
+	statusText := glyph + " live · Alt+1..4 tabs · Ctrl+T timeline"
 	if m.timelineFocus {
 		statusText = glyph + " timeline · j/k · Enter · t filter"
 	}
@@ -162,11 +162,15 @@ func (m Model) footerPaneSummary() (string, string) {
 		if stats.DroppedMessages > 0 {
 			trim = fmt.Sprintf("trimmed %d", stats.DroppedMessages)
 		}
-		right := fmt.Sprintf("%s / %s", m.providerName(), m.cfg.Model())
+		right := fmt.Sprintf("output cap %s", formatTokenCount(int(m.cfg.MaxTokens)))
 		if m.liveAgent.Active {
 			right = fmt.Sprintf("round %d · %s", max(1, m.liveAgent.Iteration), firstNonEmpty(m.liveAgent.Phase, "working"))
 		}
-		return fmt.Sprintf("ctx %s/%s · sent %d/%d · out %s · %s", formatTokenCount(stats.EstimatedTokens), formatTokenCount(stats.Budget), stats.SentMessages, stats.TotalMessages, formatTokenCount(int(m.cfg.MaxTokens)), trim), right
+		percent := 0
+		if stats.Budget > 0 {
+			percent = int(float64(stats.EstimatedTokens)/float64(stats.Budget)*100 + 0.5)
+		}
+		return fmt.Sprintf("context %s/%s · %d%% · messages %d/%d · %s", formatTokenCount(stats.EstimatedTokens), formatTokenCount(stats.Budget), percent, stats.SentMessages, stats.TotalMessages, trim), right
 	}
 }
 
@@ -224,8 +228,18 @@ func (m Model) footerPaneDetail() (string, string) {
 				return "thinking · " + lastLineCompact(thought, 110), fmt.Sprintf("reasoning %d chars", m.liveAgent.ReasoningChars)
 			}
 		}
-		return fmt.Sprintf("session %s · mode %s · viewport %3.0f%%", m.session.Name, m.cfg.Mode, m.viewport.ScrollPercent()*100),
-			fmt.Sprintf("messages %d · agent %s", len(m.session.Messages), onOff(m.cfg.AgentEnabled))
+		workspace := m.workspaceRoot()
+		if strings.TrimSpace(workspace) == "" {
+			workspace = "current directory"
+		}
+		state := "idle"
+		if snapshot := m.session.Agent; snapshot.Status != "" {
+			state = snapshot.Status
+			if snapshot.Verified {
+				state += " · verified"
+			}
+		}
+		return fmt.Sprintf("workspace %s · approval %s · sandbox %s", workspace, m.cfg.ApprovalPolicy, m.cfg.SandboxMode), state
 	}
 }
 

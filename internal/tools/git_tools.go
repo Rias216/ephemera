@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 )
 
@@ -18,8 +17,7 @@ func (r Registry) gitLog(ctx context.Context, call Call, emit func(string)) Resu
 		if err != nil {
 			return fail(call.Name, err.Error())
 		}
-		rel, _ := filepath.Rel(r.WorkspaceRoot, resolved)
-		command += " -- " + shellQuote(filepath.ToSlash(rel))
+		command += " -- " + shellQuote(r.displayPath(resolved))
 	}
 	return r.runCommand(ctx, command, emit)
 }
@@ -29,7 +27,7 @@ func (r Registry) gitBlame(ctx context.Context, call Call, emit func(string)) Re
 	if err != nil {
 		return fail(call.Name, err.Error())
 	}
-	rel, _ := filepath.Rel(r.WorkspaceRoot, resolved)
+	display := r.displayPath(resolved)
 	command := "git blame --date=short"
 	start := argIntDefault(call, "start_line", 0)
 	end := argIntDefault(call, "end_line", 0)
@@ -39,7 +37,7 @@ func (r Registry) gitBlame(ctx context.Context, call Call, emit func(string)) Re
 		}
 		command += fmt.Sprintf(" -L %d,%d", start, end)
 	}
-	command += " -- " + shellQuote(filepath.ToSlash(rel))
+	command += " -- " + shellQuote(display)
 	return r.runCommand(ctx, command, emit)
 }
 
@@ -73,8 +71,7 @@ func (r Registry) gitCommit(ctx context.Context, call Call, emit func(string)) R
 			if err != nil {
 				return fail(call.Name, err.Error())
 			}
-			rel, _ := filepath.Rel(r.WorkspaceRoot, resolved)
-			quoted = append(quoted, shellQuote(filepath.ToSlash(rel)))
+			quoted = append(quoted, shellQuote(r.displayPath(resolved)))
 		}
 		if len(quoted) == 0 {
 			return fail(call.Name, "paths did not contain any valid path")

@@ -25,29 +25,7 @@ func ListModels(ctx context.Context, cfg config.Config) (models []string, retErr
 			})
 		}
 	}()
-	switch cfg.Provider {
-	case "ollama":
-		return listOllamaModels(ctx, cfg.OllamaURL)
-	case "openai":
-		key := firstNonEmpty(cfg.OpenAIKey, os.Getenv("OPENAI_API_KEY"))
-		if key == "" {
-			return nil, fmt.Errorf("OPENAI_API_KEY is not set")
-		}
-		return listOpenAICompatibleModels(ctx, "https://api.openai.com/v1", key)
-	case "codex":
-		return ListCodexModels()
-	case "anthropic":
-		key := firstNonEmpty(cfg.AnthropicKey, os.Getenv("ANTHROPIC_API_KEY"))
-		if key == "" {
-			return nil, fmt.Errorf("ANTHROPIC_API_KEY is not set")
-		}
-		return listAnthropicModels(ctx, key)
-	case "compatible":
-		key := compatibleAPIKey(cfg.CompatibleName, cfg.CompatibleKey)
-		return listOpenAICompatibleModels(ctx, cfg.CompatibleURL, key)
-	default:
-		return nil, fmt.Errorf("unsupported provider %q", cfg.Provider)
-	}
+	return defaultProviderRegistry.ListModels(ctx, cfg)
 }
 
 func compatibleAPIKey(name, explicit string) string {

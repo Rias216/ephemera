@@ -859,7 +859,10 @@ Route: **%s** · **%s** · **%s** token context.`,
 	}
 
 	sections := m.buildTranscriptSections()
-	selected := m.clampedSelectedEvent(len(m.visibleAgentEvents()))
+	selected := -1
+	if m.timelineFocus {
+		selected = m.clampedSelectedEvent(len(m.visibleAgentEvents()))
+	}
 	previous := transcriptSectionKind(-1)
 	for _, section := range sections {
 		if sectionNeedsGap(previous, section.kind) {

@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"github.com/ephemera-ai/ephemera/internal/config"
 	"os"
 	"strings"
 
@@ -15,8 +16,23 @@ type Anthropic struct {
 	apiKey string
 }
 
+func init() {
+	RegisterProvider("anthropic", func(cfg config.Config) (Provider, error) { return NewAnthropic(cfg.AnthropicKey), nil })
+}
+
 func NewAnthropic(apiKey string) *Anthropic { return &Anthropic{apiKey: apiKey} }
 func (p *Anthropic) Name() string           { return "anthropic" }
+
+func (p *Anthropic) ListModels(ctx context.Context) ([]string, error) {
+	key := strings.TrimSpace(p.apiKey)
+	if key == "" {
+		key = strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
+	}
+	if key == "" {
+		return nil, fmt.Errorf("ANTHROPIC_API_KEY is not set; run /connect anthropic")
+	}
+	return listAnthropicModels(ctx, key)
+}
 
 func (p *Anthropic) Capabilities() ProviderCapabilities {
 	return ProviderCapabilities{Streaming: true, NativeTools: true, SupportsVision: true, SupportsReasoning: true, MaxParallelTools: 8, ToolCallFormat: "anthropic", StreamingFormat: "sse"}

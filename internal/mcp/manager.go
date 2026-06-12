@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
-	"github.com/ephemera-ai/ephemera/internal/llm"
+	"github.com/ephemera-ai/ephemera/internal/tools"
 )
 
 type Result struct {
@@ -184,52 +184,44 @@ func (m *Manager) connect(parent context.Context, name string, server config.MCP
 	return client, tools, nil
 }
 
-func (m *Manager) ToolSpecs() []llm.ToolSpec {
+func (m *Manager) Definitions() []tools.Tool {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	names := make([]string, 0, len(m.bindings))
-	for name := range m.bindings {
-		names = append(names, name)
+	declarations := make([]binding, 0, len(m.bindings))
+	for _, item := range m.bindings {
+		declarations = append(declarations, item)
 	}
-	sort.Strings(names)
-	out := make([]llm.ToolSpec, 0, len(names))
-	for _, name := range names {
-		item := m.bindings[name]
+	m.mu.RUnlock()
+	sort.Slice(declarations, func(i, j int) bool { return declarations[i].Exposed < declarations[j].Exposed })
+	out := make([]tools.Tool, 0, len(declarations))
+	for _, item := range declarations {
+		item := item
 		description := strings.TrimSpace(item.Tool.Description)
 		if description == "" {
 			description = firstNonEmpty(item.Tool.Title, item.RemoteName)
 		}
-		out = append(out, llm.ToolSpec{Name: name, Description: fmt.Sprintf("[MCP %s] %s", item.ServerName, description), Parameters: providerSchema(item.Tool.InputSchema)})
+		risk := tools.RiskShell
+		if item.Tool.Annotations.ReadOnlyHint && !item.Tool.Annotations.DestructiveHint {
+			risk = tools.RiskRead
+		}
+		out = append(out, tools.Tool{
+			Name:        item.Exposed,
+			Description: fmt.Sprintf("[MCP %s] %s", item.ServerName, description),
+			Risk:        risk,
+			Parameters:  providerSchema(item.Tool.InputSchema),
+			Version:     "1.0.0",
+			ProviderHints: map[string]any{
+				"source": "mcp", "server": item.ServerName, "remote_name": item.RemoteName,
+			},
+			ValidateCall: func(call tools.Call) error {
+				return validateArguments(item.Tool.InputSchema, call.Arguments)
+			},
+			Execute: func(ctx context.Context, _ tools.Registry, call tools.Call, _ func(string)) tools.Result {
+				result := m.Call(ctx, item.Exposed, call.Arguments)
+				return tools.Result{Tool: call.Name, OK: result.OK, Output: result.Output, Error: result.Error, Metadata: result.Metadata}
+			},
+		})
 	}
 	return out
-}
-
-func (m *Manager) HasTool(name string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	_, ok := m.bindings[name]
-	return ok
-}
-func (m *Manager) ReadOnly(name string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	item, ok := m.bindings[name]
-	return ok && item.Tool.Annotations.ReadOnlyHint && !item.Tool.Annotations.DestructiveHint
-}
-func (m *Manager) Destructive(name string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	item, ok := m.bindings[name]
-	return ok && item.Tool.Annotations.DestructiveHint
-}
-func (m *Manager) Validate(name string, arguments map[string]any) error {
-	m.mu.RLock()
-	item, ok := m.bindings[name]
-	m.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("unknown MCP tool %q", name)
-	}
-	return validateArguments(item.Tool.InputSchema, arguments)
 }
 
 func (m *Manager) Call(ctx context.Context, name string, arguments map[string]any) Result {
@@ -238,9 +230,6 @@ func (m *Manager) Call(ctx context.Context, name string, arguments map[string]an
 	m.mu.RUnlock()
 	if !ok {
 		return Result{OK: false, Error: fmt.Sprintf("unknown MCP tool %q", name)}
-	}
-	if err := validateArguments(item.Tool.InputSchema, arguments); err != nil {
-		return Result{OK: false, Error: err.Error()}
 	}
 	result, err := item.Client.CallTool(ctx, item.RemoteName, arguments)
 	reconnected := false
@@ -349,6 +338,11 @@ func (m *Manager) Close() error {
 		clients = append(clients, c)
 	}
 	m.clients = map[string]*client{}
+	m.bindings = map[string]binding{}
+	m.discoveryErrors = nil
+	m.discovered = false
+	m.discovering = false
+	m.discoverDone = nil
 	m.mu.Unlock()
 	var first error
 	for _, c := range clients {

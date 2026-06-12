@@ -14,28 +14,37 @@ import (
 	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
+	"github.com/ephemera-ai/ephemera/internal/tools"
 )
 
-func TestStdioManagerDiscoversValidatesAndCallsTool(t *testing.T) {
+func TestStdioManagerDiscoversRegistersAndCallsTool(t *testing.T) {
+	workspace := t.TempDir()
 	manager := NewManager(map[string]config.MCPServerConfig{
 		"demo": {Transport: "stdio", Command: os.Args[0], Args: []string{"-test.run=TestMCPHelperProcess"}, Env: map[string]string{"GO_WANT_MCP_HELPER": "1"}, TimeoutSec: 10},
-	}, t.TempDir(), 4_000)
+	}, workspace, 4_000)
 	if errs := manager.Discover(t.Context()); len(errs) != 0 {
 		t.Fatalf("discover errors = %v", errs)
 	}
 	defer manager.Close()
 
-	specs := manager.ToolSpecs()
-	if len(specs) != 1 || specs[0].Name != "mcp__demo__echo" {
-		t.Fatalf("specs = %#v", specs)
+	definitions := manager.Definitions()
+	if len(definitions) != 1 || definitions[0].Name != "mcp__demo__echo" {
+		t.Fatalf("definitions = %#v", definitions)
 	}
-	if !manager.ReadOnly(specs[0].Name) {
-		t.Fatal("readOnlyHint was not preserved")
+	if definitions[0].Risk != tools.RiskRead {
+		t.Fatalf("readOnlyHint was not translated into registry risk: %q", definitions[0].Risk)
 	}
-	if err := manager.Validate(specs[0].Name, map[string]any{}); err == nil {
-		t.Fatal("missing required argument was accepted")
+	cfg := config.Default()
+	cfg.WorkspaceRoot = workspace
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	registry := tools.NewRegistry(cfg)
+	if err := registry.Register(definitions[0]); err != nil {
+		t.Fatal(err)
 	}
-	result := manager.Call(t.Context(), specs[0].Name, map[string]any{"message": "frontier"})
+	if result := registry.Execute(t.Context(), tools.Call{Name: definitions[0].Name}); result.OK {
+		t.Fatalf("missing required argument was accepted: %#v", result)
+	}
+	result := registry.Execute(t.Context(), tools.Call{Name: definitions[0].Name, Arguments: map[string]any{"message": "frontier"}})
 	if !result.OK || !strings.Contains(result.Output, "echo: frontier") {
 		t.Fatalf("result = %#v", result)
 	}

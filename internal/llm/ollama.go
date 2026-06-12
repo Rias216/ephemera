@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"github.com/ephemera-ai/ephemera/internal/config"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,10 @@ type Ollama struct {
 	client  *http.Client
 }
 
+func init() {
+	RegisterProvider("ollama", func(cfg config.Config) (Provider, error) { return NewOllama(cfg.OllamaURL), nil })
+}
+
 func NewOllama(baseURL string) *Ollama {
 	if env := strings.TrimSpace(os.Getenv("OLLAMA_HOST")); env != "" {
 		baseURL = env
@@ -29,6 +34,10 @@ func NewOllama(baseURL string) *Ollama {
 }
 
 func (p *Ollama) Name() string { return "ollama" }
+
+func (p *Ollama) ListModels(ctx context.Context) ([]string, error) {
+	return listOllamaModels(ctx, p.baseURL)
+}
 
 func (p *Ollama) Generate(ctx context.Context, req Request) (string, error) {
 	base, err := url.Parse(p.baseURL)

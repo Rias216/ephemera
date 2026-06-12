@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "id": "run-1781302071597345700",
+  "started_at": "2026-06-13T00:07:51.5973457+02:00",
+  "duration": 26693200,
+  "provider": "ollama",
+  "model": "qwen3:8b",
+  "mode": "concise",
+  "verified": false,
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "tool_calls": 0
+  },
+  "events": [
+    {
+      "id": "evt-1781302071602142300",
+      "type": "acceptance_contract",
+      "title": "Definition of done",
+      "content": "Goal: try this\nRequired checks:\n- [ ] Every changed file can be read back after the edit.\n- [ ] The final workspace diff or status is inspected before completion.\nForbidden changes: .git, .env, .env.*, .ephemera/secrets",
+      "status": "active",
+      "metadata": {
+        "contract": {
+          "goal": "try this",
+          "required_behaviors": [
+            "try this"
+          ],
+          "required_checks": [
+            {
+              "id": "changed-files-readable",
+              "description": "Every changed file can be read back after the edit.",
+              "required": true,
+              "status": "pending"
+            },
+            {
+              "id": "diff-reviewed",
+              "description": "The final workspace diff or status is inspected before completion.",
+              "required": true,
+              "status": "pending"
+            }
+          ],
+          "forbidden_changes": [
+            ".git",
+            ".env",
+            ".env.*",
+            ".ephemera/secrets"
+          ],
+          "created_at": "2026-06-13T00:07:51.5978896+02:00",
+          "source": "discovered"
+        },
+        "iteration": 0,
+        "run_id": "run-1781302071597345700",
+        "source": "discovered"
+      },
+      "created_at": "2026-06-13T00:07:51.6021423+02:00"
+    },
+    {
+      "id": "evt-1781302071620273300",
+      "type": "tool_result",
+      "title": "Agent request failed",
+      "content": "ollama provider health check failed: Get \"http://localhost:11434/api/tags\": dial tcp [::1]:11434: connectex: No connection could be made because the target machine actively refused it.",
+      "status": "error",
+      "metadata": {
+        "iteration": 1,
+        "run_id": "run-1781302071597345700"
+      },
+      "created_at": "2026-06-13T00:07:51.6202733+02:00"
+    }
+  ],
+  "final_text": "Agent request failed: ollama provider health check failed: Get \"http://localhost:11434/api/tags\": dial tcp [::1]:11434: connectex: No connection could be made because the target machine actively refused it."
+}

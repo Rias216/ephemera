@@ -173,7 +173,7 @@ func TestTranscriptSectionRendererReusesStableCards(t *testing.T) {
 	if len(m.sectionRenderCache) != firstCacheSize || firstCacheSize == 0 {
 		t.Fatalf("stable sections were not reused: before=%d after=%d", firstCacheSize, len(m.sectionRenderCache))
 	}
-	m.session.AppendEvent(history.Event{ID: "new", Type: history.EventToolResult, Tool: "read_file", Content: "result", Status: "done", CreatedAt: time.Now()})
+	m.session.AppendEvent(history.Event{ID: "new", Type: history.EventToolResult, Tool: "read_file", Content: "result", Status: "error", CreatedAt: time.Now()})
 	_ = m.renderTranscript()
 	if len(m.sectionRenderCache) <= firstCacheSize {
 		t.Fatalf("new event did not add a section cache entry: before=%d after=%d", firstCacheSize, len(m.sectionRenderCache))

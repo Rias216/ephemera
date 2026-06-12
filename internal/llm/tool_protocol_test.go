@@ -144,3 +144,29 @@ func TestMergeStreamFragmentHandlesDeltaCumulativeAndReplay(t *testing.T) {
 		t.Fatalf("merged arguments = %q", arguments)
 	}
 }
+
+type compatibilityTestProvider struct {
+	match bool
+}
+
+func (provider compatibilityTestProvider) Name() string { return "compatibility-test" }
+func (provider compatibilityTestProvider) Generate(context.Context, Request) (string, error) {
+	return "", nil
+}
+func (provider compatibilityTestProvider) IsNativeToolCompatibilityError(error) bool {
+	return provider.match
+}
+
+func TestNativeToolCompatibilityClassificationIsProviderOwned(t *testing.T) {
+	transportError := errors.New("tool_choice is unsupported")
+	if IsNativeToolCompatibilityError(compatibilityTestProvider{match: false}, transportError) {
+		t.Fatal("shared protocol layer applied provider substring matching")
+	}
+	if !IsNativeToolCompatibilityError(compatibilityTestProvider{match: true}, transportError) {
+		t.Fatal("provider compatibility classifier was ignored")
+	}
+	protocolError := newToolProtocolError("test", "read_file", `{`, errors.New("unexpected EOF"))
+	if !IsNativeToolCompatibilityError(compatibilityTestProvider{}, protocolError) {
+		t.Fatal("structural tool protocol error was not recoverable")
+	}
+}
