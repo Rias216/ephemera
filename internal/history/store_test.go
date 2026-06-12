@@ -150,3 +150,65 @@ func TestAgentSnapshotPersistsWithSession(t *testing.T) {
 		t.Fatalf("snapshot was not preserved: %#v", loaded.Agent)
 	}
 }
+
+func TestStoreWritesRecoverableSessionBundle(t *testing.T) {
+	dir := t.TempDir()
+	store := &Store{dir: dir}
+	session := New("recover me", "codex", "gpt-test", reasoning.ModeNormal)
+	session.Append("user", "diagnose tool calling")
+	if err := store.Save(session); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	bundleDir := filepath.Join(dir, "recover-me")
+	for _, name := range []string{"session.json", "debug.jsonl", "context.jsonl"} {
+		info, err := os.Stat(filepath.Join(bundleDir, name))
+		if err != nil {
+			t.Fatalf("missing %s: %v", name, err)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("%s permissions are too broad: %o", name, info.Mode().Perm())
+		}
+	}
+
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Remove(filepath.Join(dir, "history.sqlite"+suffix))
+	}
+	recoveredStore := &Store{dir: dir}
+	defer recoveredStore.Close()
+	recovered, err := recoveredStore.Load("recover-me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Name != "recover-me" || len(recovered.Messages) != 1 || recovered.Messages[0].Content != "diagnose tool calling" {
+		t.Fatalf("unexpected recovered session: %#v", recovered)
+	}
+}
+
+func TestStoreBundleSurvivesSQLiteIndexFailure(t *testing.T) {
+	bundleRoot := t.TempDir()
+	blockedDatabasePath := filepath.Join(t.TempDir(), "history.sqlite")
+	if err := os.Mkdir(blockedDatabasePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{dir: bundleRoot, dbPath: blockedDatabasePath}
+	session := New("index unavailable", "codex", "gpt-test", reasoning.ModeNormal)
+	session.Append("user", "retain this context")
+
+	if err := store.Save(session); err != nil {
+		t.Fatalf("snapshot save should not fail with its optional index: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bundleRoot, "index-unavailable", "session.json")); err != nil {
+		t.Fatalf("snapshot was not persisted: %v", err)
+	}
+	recovered, err := store.Load("index-unavailable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered.Messages) != 1 || recovered.Messages[0].Content != "retain this context" {
+		t.Fatalf("unexpected recovered session: %#v", recovered)
+	}
+}

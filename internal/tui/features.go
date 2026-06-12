@@ -13,6 +13,7 @@ import (
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
+	appmetrics "github.com/ephemera-ai/ephemera/internal/metrics"
 )
 
 func (m *Model) retryLast() tea.Cmd {
@@ -156,6 +157,7 @@ func (m *Model) copySelectedEvent(codeOnly bool) {
 		return
 	}
 	if err := clipboard.WriteAll(content); err != nil {
+		m.recordError("copy selected event failed", err, map[string]any{"event": event.Title})
 		m.status = "Copy failed: " + err.Error()
 		return
 	}
@@ -195,6 +197,7 @@ func (m *Model) copyReasoningSurface() {
 		return
 	}
 	if err := clipboard.WriteAll(content); err != nil {
+		m.recordError("copy reasoning surface failed", err, nil)
 		m.status = "Surface copy failed: " + err.Error()
 		return
 	}
@@ -281,6 +284,8 @@ func exportTargetPath(target, sessionName string) (string, error) {
 
 func (m Model) doctorNotice() string {
 	stats := m.currentContextStats()
+	metricRegistry := appmetrics.Default()
+	metricSnapshot := metricRegistry.Snapshot()
 	return fmt.Sprintf(`### Doctor
 
 - Provider: %s
@@ -290,7 +295,12 @@ func (m Model) doctorNotice() string {
 - Endpoint: %s
 - Credentials: %s
 - Mode/theme: %s / %s
+- Subagent: %t · %s
+- Director: %t · instrument %s · influence %d%%
 - Context: ~%s / %s tokens, %d / %d messages sent
+- Codex bridge: isolated · target %s tokens
+- Metrics: enabled=%t · runs %.0f · tools %.0f · retries %.0f · tokens %.0f/%.0f
+- Debug log: %s
 - Session: %s`,
 		m.providerName(),
 		m.cfg.Model(),
@@ -300,10 +310,23 @@ func (m Model) doctorNotice() string {
 		m.credentialStatus(),
 		m.cfg.Mode,
 		m.cfg.Theme,
+		m.cfg.SubagentEnabled,
+		m.roleModelLabel(m.cfg.SubagentProvider, m.cfg.SubagentModel, "inherit main"),
+		m.cfg.DirectorEnabled,
+		m.roleModelLabel(m.cfg.InstrumentProvider, m.cfg.InstrumentModel, "inherit director"),
+		m.cfg.InstrumentWeight,
 		formatTokenCount(stats.EstimatedTokens),
 		formatTokenCount(stats.Budget),
 		stats.SentMessages,
 		stats.TotalMessages,
+		formatTokenCount(int(m.cfg.CodexBridgeMaxTokens)),
+		metricRegistry.Enabled(),
+		metricSnapshot.Counters["agent_runs_total"],
+		metricSnapshot.Counters["agent_tool_calls_total"],
+		metricSnapshot.Counters["agent_provider_retries_total"],
+		metricSnapshot.Counters["agent_tokens_input_total"],
+		metricSnapshot.Counters["agent_tokens_output_total"],
+		debugLogPath(),
 		m.session.Name,
 	)
 }
@@ -318,6 +341,8 @@ func (m Model) endpointStatus() string {
 		return "https://api.openai.com/v1"
 	case "anthropic":
 		return "https://api.anthropic.com/v1"
+	case "codex":
+		return "Codex CLI · isolated model bridge"
 	default:
 		return "unknown"
 	}

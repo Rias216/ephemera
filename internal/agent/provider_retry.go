@@ -7,20 +7,59 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 	"github.com/ephemera-ai/ephemera/internal/llm"
+	agentmetrics "github.com/ephemera-ai/ephemera/internal/metrics"
 )
 
 var providerPortableToolModes sync.Map
 
-func providerToolModeKey(provider llm.Provider) string {
+var providerHealthCache sync.Map
+
+type providerHealthState struct {
+	checkedAt time.Time
+	errorText string
+}
+
+func providerHealthKey(provider llm.Provider) string {
+	return providerToolModeKey(provider, "")
+}
+
+func checkProviderHealth(ctx context.Context, provider llm.Provider) error {
+	checker, ok := provider.(llm.HealthChecker)
+	if !ok || provider == nil {
+		return nil
+	}
+	key := providerHealthKey(provider)
+	if cached, ok := providerHealthCache.Load(key); ok {
+		state := cached.(providerHealthState)
+		if time.Since(state.checkedAt) < 60*time.Second {
+			if state.errorText != "" {
+				return fmt.Errorf("%s", state.errorText)
+			}
+			return nil
+		}
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err := checker.HealthCheck(probeCtx)
+	state := providerHealthState{checkedAt: time.Now()}
+	if err != nil {
+		state.errorText = err.Error()
+	}
+	providerHealthCache.Store(key, state)
+	return err
+}
+
+func providerToolModeKey(provider llm.Provider, model string) string {
 	if provider == nil {
 		return ""
 	}
-	return fmt.Sprintf("%T:%s", provider, strings.ToLower(strings.TrimSpace(provider.Name())))
+	return fmt.Sprintf("%T:%s:%s", provider, strings.ToLower(strings.TrimSpace(provider.Name())), strings.ToLower(strings.TrimSpace(model)))
 }
 
-func prefersPortableTools(provider llm.Provider) bool {
-	key := providerToolModeKey(provider)
+func prefersPortableTools(provider llm.Provider, model string) bool {
+	key := providerToolModeKey(provider, model)
 	if key == "" {
 		return false
 	}
@@ -28,8 +67,8 @@ func prefersPortableTools(provider llm.Provider) bool {
 	return ok && value == true
 }
 
-func rememberPortableTools(provider llm.Provider) {
-	if key := providerToolModeKey(provider); key != "" {
+func rememberPortableTools(provider llm.Provider, model string) {
+	if key := providerToolModeKey(provider, model); key != "" {
 		providerPortableToolModes.Store(key, true)
 	}
 }
@@ -37,27 +76,31 @@ func rememberPortableTools(provider llm.Provider) {
 type providerErrorClass string
 
 const (
-	providerErrorPermanent    providerErrorClass = "permanent"
-	providerErrorTransient    providerErrorClass = "transient"
-	providerErrorRateLimit    providerErrorClass = "rate_limit"
-	providerErrorContext      providerErrorClass = "context_too_long"
-	providerErrorToolProtocol providerErrorClass = "tool_protocol"
+	providerErrorPermanent     providerErrorClass = "permanent"
+	providerErrorTransient     providerErrorClass = "transient"
+	providerErrorRateLimit     providerErrorClass = "rate_limit"
+	providerErrorContext       providerErrorClass = "context_too_long"
+	providerErrorToolTruncated providerErrorClass = "tool_truncated"
+	providerErrorToolProtocol  providerErrorClass = "tool_protocol"
 )
 
-func classifyProviderError(err error) providerErrorClass {
+func classifyProviderError(provider llm.Provider, err error) providerErrorClass {
 	if err == nil {
 		return providerErrorPermanent
+	}
+	if llm.IsTruncatedToolProtocolError(err) {
+		return providerErrorToolTruncated
 	}
 	if llm.IsNativeToolCompatibilityError(err) {
 		return providerErrorToolProtocol
 	}
-	text := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(text, "context length"), strings.Contains(text, "context_length"), strings.Contains(text, "too many tokens"), strings.Contains(text, "maximum context"):
+	taxonomy := llm.ClassifyError(provider, err)
+	switch taxonomy.Class {
+	case "context_too_long":
 		return providerErrorContext
-	case strings.Contains(text, "429"), strings.Contains(text, "rate limit"), strings.Contains(text, "too many requests"):
+	case "rate_limit":
 		return providerErrorRateLimit
-	case strings.Contains(text, "timeout"), strings.Contains(text, "temporar"), strings.Contains(text, "connection reset"), strings.Contains(text, "503"), strings.Contains(text, "502"):
+	case "transient", "timeout", "overloaded":
 		return providerErrorTransient
 	default:
 		return providerErrorPermanent
@@ -87,6 +130,21 @@ func (r Runner) generateToolDecisionWithRetry(
 	onDelta llm.DeltaFunc,
 	onRetry func(attempt int, class providerErrorClass, err error),
 ) (llm.ToolDecision, error) {
+	if err := checkProviderHealth(ctx, r.Provider); err != nil {
+		req, _ = llm.NormalizeRequestUTF8(req)
+		_ = debuglog.AppendContext(ctx, "provider_request", 1, "health-check", map[string]any{
+			"request": req,
+			"tools":   specs,
+		})
+		_ = debuglog.AppendContext(ctx, "provider_response", 1, "health-check", map[string]any{
+			"error": err.Error(),
+		})
+		debuglog.WarningCtx(ctx, "agent", "provider health check failed", err.Error(), map[string]any{
+			"provider": r.Provider.Name(),
+			"model":    req.Model,
+		})
+		return llm.ToolDecision{}, fmt.Errorf("%s provider health check failed: %w", r.Provider.Name(), err)
+	}
 	maxRetries := r.Config.ProviderMaxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
@@ -98,10 +156,37 @@ func (r Runner) generateToolDecisionWithRetry(
 	current := req
 	portable := preferPortable
 	var nativeFailure error
+	truncationRetries := 0
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		emitted := false
 		var decision llm.ToolDecision
 		var err error
+		var replacements int
+		current, replacements = llm.NormalizeRequestUTF8(current)
+		transport := "native"
+		if portable {
+			transport = "portable"
+		} else if !llm.Capabilities(r.Provider).NativeTools || len(specs) == 0 {
+			transport = "text"
+		}
+		if replacements > 0 {
+			debuglog.WarningCtx(ctx, "agent", "invalid utf-8 normalized", "provider context contained invalid UTF-8 and was normalized before transport", map[string]any{
+				"replacement_fields": replacements,
+				"attempt":            attempt + 1,
+				"transport":          transport,
+			})
+		}
+		_ = debuglog.AppendContext(ctx, "provider_request", attempt+1, transport, map[string]any{
+			"request":       current,
+			"tools":         specs,
+			"portable_mode": portable,
+			"native_failure": func() string {
+				if nativeFailure != nil {
+					return nativeFailure.Error()
+				}
+				return ""
+			}(),
+		})
 		if portable {
 			decision, err = llm.GeneratePortableToolDecision(ctx, r.Provider, current, specs, nativeFailure, func(delta llm.Delta) error {
 				// Portable mode returns a JSON envelope as ordinary text. Keep that
@@ -125,14 +210,51 @@ func (r Runner) generateToolDecisionWithRetry(
 				return onDelta(delta)
 			})
 		}
+		if err == nil && !portable {
+			err = llm.TruncatedToolDecisionError(r.Provider.Name(), decision)
+		}
+		responsePayload := map[string]any{
+			"decision":      decision,
+			"portable_mode": portable,
+			"streamed":      emitted,
+		}
+		if err != nil {
+			responsePayload["error"] = err.Error()
+		}
+		_ = debuglog.AppendContext(ctx, "provider_response", attempt+1, transport, responsePayload)
 		if err == nil {
 			return decision, nil
 		}
-		class := classifyProviderError(err)
-		if !portable && class == providerErrorToolProtocol && len(specs) > 0 && ctx.Err() == nil {
+		class := classifyProviderError(r.Provider, err)
+		if !portable && class == providerErrorToolTruncated && len(specs) > 0 && truncationRetries < 1 && ctx.Err() == nil {
+			truncationRetries++
+			debuglog.WarningCtx(ctx, "agent", "truncated native tool retry", err.Error(), map[string]any{
+				"provider": r.Provider.Name(),
+				"model":    current.Model,
+				"attempt":  truncationRetries,
+			})
+			agentmetrics.Default().Inc("agent_provider_retries_total")
+			if onRetry != nil {
+				onRetry(truncationRetries, class, err)
+			}
+			if onDelta != nil {
+				_ = onDelta(llm.Delta{Kind: llm.DeltaActivity, Text: "Tool arguments were truncated; requesting one fresh native tool call…"})
+			}
+			// A transport truncation occurs before any local tool executes. Retry the
+			// same native request once without consuming ProviderMaxRetries.
+			attempt--
+			continue
+		}
+		if !portable && (class == providerErrorToolProtocol || class == providerErrorToolTruncated) && len(specs) > 0 && ctx.Err() == nil {
 			nativeFailure = err
 			portable = true
-			rememberPortableTools(r.Provider)
+			rememberPortableTools(r.Provider, current.Model)
+			debuglog.WarningCtx(ctx, "agent", "native tool fallback", err.Error(), map[string]any{
+				"provider": r.Provider.Name(),
+				"model":    current.Model,
+				"class":    string(class),
+			})
+			agentmetrics.Default().Inc("agent_provider_retries_total")
 			if onRetry != nil {
 				onRetry(attempt+1, class, err)
 			}
@@ -161,9 +283,16 @@ func (r Runner) generateToolDecisionWithRetry(
 			}
 			current = compacted
 		}
+		agentmetrics.Default().Inc("agent_provider_retries_total")
 		if onRetry != nil {
 			onRetry(attempt+1, class, err)
 		}
+		debuglog.WarningCtx(ctx, "agent", "provider retry", err.Error(), map[string]any{
+			"provider": r.Provider.Name(),
+			"model":    current.Model,
+			"attempt":  attempt + 1,
+			"class":    string(class),
+		})
 		timer := time.NewTimer(backoff * time.Duration(1<<attempt))
 		select {
 		case <-ctx.Done():

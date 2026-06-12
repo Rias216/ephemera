@@ -140,7 +140,7 @@ func (p *OpenAI) generateResponsesStream(ctx context.Context, req Request, specs
 			}
 		case "response.function_call_arguments.delta":
 			call := ensureCall(event.ItemID, event.OutputIndex)
-			call.Arguments += event.Delta
+			call.Arguments = mergeStreamFragment(call.Arguments, event.Delta)
 			if err := emitDelta(onDelta, DeltaActivity, toolActivityText(call.Name, len(call.Arguments))); err != nil {
 				return err
 			}
@@ -177,11 +177,11 @@ func (p *OpenAI) generateResponsesStream(ctx context.Context, req Request, specs
 		if strings.TrimSpace(call.Name) == "" {
 			continue
 		}
-		args, _, decodeErr := decodeToolArgumentsString(call.Arguments)
+		args, _, truncated, decodeErr := decodeToolArgumentsForStream(call.Arguments)
 		if decodeErr != nil {
 			return ToolDecision{}, newToolProtocolError("OpenAI", call.Name, call.Arguments, decodeErr)
 		}
-		toolCalls = append(toolCalls, ToolCall{ID: firstNonEmpty(call.CallID, call.ID), Name: call.Name, Arguments: args})
+		toolCalls = append(toolCalls, ToolCall{ID: firstNonEmpty(call.CallID, call.ID), Name: call.Name, Arguments: args, Truncated: truncated})
 	}
 	visible := strings.TrimSpace(text.String())
 	if visible == "" && len(toolCalls) == 0 {

@@ -9,15 +9,29 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 )
 
 var fallbackCodexModels = []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"}
 
-// Codex uses the local Codex ChatGPT login instead of an OpenAI API key.
-type Codex struct{}
+const defaultCodexBridgeMaxTokens int64 = 2_048
 
-func NewCodex() *Codex {
-	return &Codex{}
+// Codex uses the local Codex ChatGPT login instead of an OpenAI API key.
+// It is intentionally run as an isolated model bridge: Ephemera owns tools,
+// filesystem access, approvals, and workspace mutations.
+type Codex struct {
+	bridgeMaxTokens int64
+}
+
+func NewCodex(bridgeMaxTokens int64) *Codex {
+	if bridgeMaxTokens < 512 {
+		bridgeMaxTokens = defaultCodexBridgeMaxTokens
+	}
+	if bridgeMaxTokens > 8_000 {
+		bridgeMaxTokens = 8_000
+	}
+	return &Codex{bridgeMaxTokens: bridgeMaxTokens}
 }
 
 func (p *Codex) Name() string { return "codex" }
@@ -49,31 +63,166 @@ func (p *Codex) Generate(ctx context.Context, req Request) (string, error) {
 	_ = output.Close()
 	defer os.Remove(outputPath)
 
-	args := []string{
-		"exec",
-		"--model", req.Model,
-		"--sandbox", "read-only",
-		"--ephemeral",
-		"--skip-git-repo-check",
-		"--color", "never",
-		"--output-last-message", outputPath,
-		"-",
+	text, commandOutput, err := p.runCodexCommand(ctx, exe, req, outputPath, false, true)
+	if err != nil && codexBridgeCompatibilityFailure(commandOutput) && ctx.Err() == nil {
+		debuglog.WarningCtx(ctx, "provider", "codex bridge compatibility fallback", trimCommandOutput(commandOutput), providerLogFields(p, req, nil))
+		_ = os.WriteFile(outputPath, nil, 0o600)
+		text, commandOutput, err = p.runCodexCommand(ctx, exe, req, outputPath, false, false)
 	}
-	cmd := exec.CommandContext(ctx, exe, args...)
-	cmd.Stdin = strings.NewReader(codexPrompt(req))
-	data, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("codex exec failed: %w\n\n%s", err, trimCommandOutput(data))
+		return "", fmt.Errorf("codex exec failed: %w\n\n%s", err, trimCommandOutput(commandOutput))
 	}
-	result, err := os.ReadFile(outputPath)
-	if err != nil {
-		return "", fmt.Errorf("codex did not write a final response: %w", err)
-	}
-	text := strings.TrimSpace(string(result))
-	if text == "" {
+	if strings.TrimSpace(text) == "" {
 		return "", fmt.Errorf("codex returned an empty response")
 	}
-	return text, nil
+	return strings.TrimSpace(text), nil
+}
+
+func (p *Codex) runCodexCommand(ctx context.Context, exe string, req Request, outputPath string, stream, optimized bool) (string, []byte, error) {
+	bridgeDir, err := codexBridgeDirectory()
+	if err != nil {
+		return "", nil, err
+	}
+	cmd := exec.CommandContext(ctx, exe, p.execArgs(req, outputPath, stream, optimized)...)
+	cmd.Dir = bridgeDir
+	cmd.Stdin = strings.NewReader(p.prompt(req))
+	data, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", data, err
+	}
+	result, readErr := os.ReadFile(outputPath)
+	if readErr != nil {
+		return "", data, fmt.Errorf("codex did not write a final response: %w", readErr)
+	}
+	return strings.TrimSpace(string(result)), data, nil
+}
+
+func (p *Codex) execArgs(req Request, outputPath string, stream, optimized bool) []string {
+	args := []string{"exec"}
+	if stream {
+		args = append(args, "--json")
+	}
+	args = append(args,
+		"--model", req.Model,
+		"--sandbox", "workspace-write",
+		"--ephemeral",
+		"--skip-git-repo-check",
+	)
+	if optimized {
+		args = append(args, "--ignore-rules", "--ignore-user-config")
+	}
+	args = append(args,
+		"--color", "never",
+		"--output-last-message", outputPath,
+	)
+	if optimized {
+		for _, override := range p.bridgeOverrides(req) {
+			args = append(args, "-c", override)
+		}
+	}
+	return append(args, "-")
+}
+
+func (p *Codex) bridgeOverrides(req Request) []string {
+	summary := "none"
+	hideReasoning := "true"
+	if req.ReasoningSummary {
+		summary = "concise"
+		hideReasoning = "false"
+	}
+	return []string{
+		`approval_policy="never"`,
+		`sandbox_mode="workspace-write"`,
+		`web_search="disabled"`,
+		`history.persistence="none"`,
+		`project_doc_max_bytes=0`,
+		`model_reasoning_effort="` + codexBridgeReasoningEffort(req.ReasoningEffort) + `"`,
+		`model_reasoning_summary="` + summary + `"`,
+		`hide_agent_reasoning=` + hideReasoning,
+		`model_verbosity="low"`,
+		`personality="none"`,
+		`tool_output_token_limit=512`,
+		`features.apps=false`,
+		`features.hooks=false`,
+		`features.memories=false`,
+		`features.multi_agent=false`,
+		`features.shell_snapshot=false`,
+		`features.shell_tool=false`,
+		`features.skill_mcp_dependency_install=false`,
+		`tools.view_image=false`,
+		`developer_instructions="Act only as Ephemera's isolated model backend. Never use Codex tools, inspect the local workspace, or report sandbox limitations. Return only the response requested by the supplied Ephemera instructions."`,
+	}
+}
+
+func codexBridgeReasoningEffort(requested string) string {
+	switch strings.ToLower(strings.TrimSpace(requested)) {
+	case "high", "xhigh":
+		return "high"
+	case "minimal":
+		return "minimal"
+	default:
+		// Ephemera already performs the outer planning/tool loop. Low effort keeps
+		// each stateless bridge turn fast without disabling model reasoning.
+		return "low"
+	}
+}
+
+func (p *Codex) prompt(req Request) string {
+	req, _ = NormalizeRequestUTF8(req)
+	budget := req.MaxTokens
+	if budget <= 0 || budget > p.bridgeMaxTokens {
+		budget = p.bridgeMaxTokens
+	}
+	var b strings.Builder
+	b.WriteString("EPHEMERA MODEL BRIDGE\n")
+	b.WriteString("The surrounding Ephemera process is the only agent. It owns filesystem reads/writes, shell commands, web access, MCP, approvals, retries, and persistence.\n")
+	b.WriteString("Do not inspect the current directory, run commands, call Codex tools, modify files, or mention the Codex sandbox as a limitation. When action is needed, request it only through the Ephemera tool protocol contained in the system instructions.\n")
+	fmt.Fprintf(&b, "Keep the visible response near or below %d tokens; prefer the smallest complete answer or tool request.\n\n", budget)
+	if strings.TrimSpace(req.System) != "" {
+		b.WriteString("EPHEMERA SYSTEM INSTRUCTIONS:\n")
+		b.WriteString(req.System)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("EPHEMERA CONVERSATION:\n")
+	for _, message := range req.Messages {
+		b.WriteString(strings.ToUpper(message.Role))
+		b.WriteString(":\n")
+		b.WriteString(message.Content)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Return only the assistant's next response for Ephemera. Do not perform the work through Codex CLI tools.")
+	return b.String()
+}
+
+func codexBridgeDirectory() (string, error) {
+	path := filepath.Join(os.TempDir(), "ephemera-codex-bridge")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return "", fmt.Errorf("create isolated Codex bridge directory: %w", err)
+	}
+	return path, nil
+}
+
+func codexBridgeCompatibilityFailure(data []byte) bool {
+	text := strings.ToLower(string(data))
+	for _, marker := range []string{
+		"unexpected argument",
+		"unknown argument",
+		"unrecognized option",
+		"unrecognized field",
+		"unknown field",
+		"unknown feature",
+		"unknown config",
+		"unknown variant",
+		"invalid config",
+		"failed to parse config",
+		"could not parse config",
+		"error loading config",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func ListCodexModels() ([]string, error) {
@@ -195,24 +344,6 @@ func codexCLIPathFromConfig() string {
 		return strings.Trim(strings.TrimSpace(value), `"'`)
 	}
 	return ""
-}
-
-func codexPrompt(req Request) string {
-	var b strings.Builder
-	if strings.TrimSpace(req.System) != "" {
-		b.WriteString("System instructions:\n")
-		b.WriteString(req.System)
-		b.WriteString("\n\n")
-	}
-	b.WriteString("Conversation so far:\n")
-	for _, message := range req.Messages {
-		b.WriteString(strings.ToUpper(message.Role))
-		b.WriteString(":\n")
-		b.WriteString(message.Content)
-		b.WriteString("\n\n")
-	}
-	b.WriteString("Reply only with the assistant's next response.")
-	return b.String()
 }
 
 func trimCommandOutput(data []byte) string {

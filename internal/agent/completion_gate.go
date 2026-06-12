@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"github.com/ephemera-ai/ephemera/internal/util"
 	"strings"
 	"time"
 )
@@ -28,7 +29,7 @@ func (r CompletionGateReport) Summary() string {
 	if len(parts) == 0 {
 		return "Completion contract is not satisfied."
 	}
-	return "Completion blocked: " + strings.Join(uniqueSorted(parts), "; ")
+	return "Completion blocked: " + strings.Join(util.UniqueSortedStrings(parts), "; ")
 }
 
 func (s *runState) completionReport() CompletionGateReport {

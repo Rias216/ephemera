@@ -1,0 +1,28 @@
+{
+  "name": "snapshot-rollback",
+  "prompt": "Attempt the requested refactor, but preserve original.txt exactly if verification cannot pass. Write rollback-confirmed to status.txt after restoring.",
+  "setup": [
+    {
+      "path": "eval-fixtures/rollback/original.txt",
+      "content": "stable-original\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "original preserved",
+      "path": "eval-fixtures/rollback/original.txt",
+      "contains": "stable-original",
+      "required": true
+    },
+    {
+      "name": "rollback recorded",
+      "path": "eval-fixtures/rollback/status.txt",
+      "contains": "rollback-confirmed",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "subsystem": "snapshot rollback",
+    "expected_behavior": "restore workspace after failed verification"
+  }
+}

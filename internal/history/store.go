@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 	"github.com/ephemera-ai/ephemera/internal/reasoning"
 	_ "modernc.org/sqlite"
 )
@@ -193,7 +194,7 @@ func NewStore() (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	sessionDir := filepath.Join(dir, "sessions")
+	sessionDir := debuglog.SessionRoot()
 	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -203,7 +204,8 @@ func NewStore() (*Store, error) {
 	}, nil
 }
 
-// Save atomically persists a session.
+// Save persists the crash-recovery snapshot first. SQLite is maintained as a
+// searchable index, but an index outage must never prevent session recovery.
 func (s *Store) Save(session Session) error {
 	session.Name = Sanitize(session.Name)
 	session.UpdatedAt = time.Now()
@@ -211,6 +213,33 @@ func (s *Store) Save(session Session) error {
 		session.CreatedAt = session.UpdatedAt
 	}
 
+	if err := s.writeBundleSnapshot(session); err != nil {
+		return err
+	}
+	if filepath.Clean(debuglog.SessionDirectory(session.Name)) == filepath.Clean(s.bundleDir(session.Name)) {
+		_ = debuglog.WriteSession(session.Name, "info", "history", "session saved", "session snapshot persisted", map[string]any{
+			"messages": len(session.Messages),
+			"events":   len(session.Events),
+			"provider": session.Provider,
+			"model":    session.Model,
+			"run_id":   session.Agent.RunID,
+			"status":   session.Agent.Status,
+		})
+	}
+
+	if err := s.saveSQL(session); err != nil {
+		// The bundle is the recovery source of truth. Keep the session usable and
+		// record that only the optional SQLite search index failed.
+		_ = debuglog.WriteSession(session.Name, "warning", "history", "session index update failed", err.Error(), map[string]any{
+			"snapshot": s.bundleSnapshotPath(session.Name),
+			"database": s.dbPath,
+		})
+		return nil
+	}
+	return nil
+}
+
+func (s *Store) saveSQL(session Session) error {
 	db, err := s.ensureDB()
 	if err != nil {
 		return err
@@ -270,12 +299,15 @@ func (s *Store) Save(session Session) error {
 
 // Load opens a named session.
 func (s *Store) Load(name string) (Session, error) {
-	session, err := s.loadSQL(name)
-	if err == nil {
+	session, sqlErr := s.loadSQL(name)
+	if sqlErr == nil {
 		return session, nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return Session{}, err
+	if bundle, bundleErr := s.loadBundleSnapshot(name); bundleErr == nil {
+		return bundle, nil
+	}
+	if !errors.Is(sqlErr, sql.ErrNoRows) {
+		return Session{}, sqlErr
 	}
 	return s.loadJSON(name)
 }
@@ -288,26 +320,26 @@ func (s *Store) List() ([]string, error) {
 	}
 	items := make([]item, 0, 16)
 	seen := map[string]struct{}{}
+	var sqlErr error
 
-	db, err := s.ensureDB()
-	if err != nil {
-		return nil, err
-	}
-	rows, err := db.Query(`SELECT name, updated_at FROM sessions ORDER BY updated_at DESC, name ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var name, updated string
-		if err := rows.Scan(&name, &updated); err != nil {
-			return nil, err
+	if db, err := s.ensureDB(); err != nil {
+		sqlErr = err
+	} else if rows, err := db.Query(`SELECT name, updated_at FROM sessions ORDER BY updated_at DESC, name ASC`); err != nil {
+		sqlErr = err
+	} else {
+		for rows.Next() {
+			var name, updated string
+			if err := rows.Scan(&name, &updated); err != nil {
+				sqlErr = err
+				break
+			}
+			items = append(items, item{name: name, mod: decodeTime(updated)})
+			seen[name] = struct{}{}
 		}
-		items = append(items, item{name: name, mod: decodeTime(updated)})
-		seen[name] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		if err := rows.Err(); err != nil && sqlErr == nil {
+			sqlErr = err
+		}
+		_ = rows.Close()
 	}
 
 	entries, err := os.ReadDir(s.dir)
@@ -318,18 +350,33 @@ func (s *Store) List() ([]string, error) {
 		return nil, err
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+		name := ""
+		var info os.FileInfo
+		if entry.IsDir() {
+			snapshot := filepath.Join(s.dir, entry.Name(), "session.json")
+			snapshotInfo, statErr := os.Stat(snapshot)
+			if statErr != nil {
+				continue
+			}
+			name = entry.Name()
+			info = snapshotInfo
+		} else if filepath.Ext(entry.Name()) == ".json" {
+			name = strings.TrimSuffix(entry.Name(), ".json")
+			entryInfo, infoErr := entry.Info()
+			if infoErr != nil {
+				continue
+			}
+			info = entryInfo
+		} else {
 			continue
 		}
-		name := strings.TrimSuffix(entry.Name(), ".json")
 		if _, ok := seen[name]; ok {
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
 		items = append(items, item{name: name, mod: info.ModTime()})
+	}
+	if len(items) == 0 && sqlErr != nil {
+		return nil, sqlErr
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].mod.Equal(items[j].mod) {
@@ -368,59 +415,65 @@ func (s *Store) Search(query string, limit int) ([]SearchResult, error) {
 		limit = 20
 	}
 
-	db, err := s.ensureDB()
-	if err != nil {
-		return nil, err
-	}
-	pattern := "%" + strings.ToLower(query) + "%"
-	rows, err := db.Query(`
-		SELECT name
-		FROM sessions
-		WHERE lower(name) LIKE ?
-			OR lower(provider) LIKE ?
-			OR lower(model) LIKE ?
-			OR lower(agent_json) LIKE ?
-			OR EXISTS (
-				SELECT 1 FROM messages
-				WHERE messages.session_name = sessions.name
-					AND (lower(role) LIKE ? OR lower(content) LIKE ?)
-			)
-			OR EXISTS (
-				SELECT 1 FROM events
-				WHERE events.session_name = sessions.name
-					AND (lower(type) LIKE ? OR lower(title) LIKE ? OR lower(content) LIKE ? OR lower(tool) LIKE ? OR lower(status) LIKE ? OR lower(metadata_json) LIKE ?)
-			)
-		ORDER BY updated_at DESC, name ASC
-		LIMIT ?
-	`, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	results := make([]SearchResult, 0, limit)
 	seen := map[string]struct{}{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		session, err := s.loadSQL(name)
+	var sqlErr error
+	if db, err := s.ensureDB(); err != nil {
+		sqlErr = err
+	} else {
+		pattern := "%" + strings.ToLower(query) + "%"
+		rows, err := db.Query(`
+			SELECT name
+			FROM sessions
+			WHERE lower(name) LIKE ?
+				OR lower(provider) LIKE ?
+				OR lower(model) LIKE ?
+				OR lower(agent_json) LIKE ?
+				OR EXISTS (
+					SELECT 1 FROM messages
+					WHERE messages.session_name = sessions.name
+						AND (lower(role) LIKE ? OR lower(content) LIKE ?)
+				)
+				OR EXISTS (
+					SELECT 1 FROM events
+					WHERE events.session_name = sessions.name
+						AND (lower(type) LIKE ? OR lower(title) LIKE ? OR lower(content) LIKE ? OR lower(tool) LIKE ? OR lower(status) LIKE ? OR lower(metadata_json) LIKE ?)
+				)
+			ORDER BY updated_at DESC, name ASC
+			LIMIT ?
+		`, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit)
 		if err != nil {
-			return nil, err
+			sqlErr = err
+		} else {
+			for rows.Next() {
+				var name string
+				if err := rows.Scan(&name); err != nil {
+					sqlErr = err
+					break
+				}
+				session, err := s.loadSQL(name)
+				if err != nil {
+					sqlErr = err
+					break
+				}
+				results = append(results, sessionSearchResult(session, query))
+				seen[name] = struct{}{}
+			}
+			if err := rows.Err(); err != nil && sqlErr == nil {
+				sqlErr = err
+			}
+			_ = rows.Close()
 		}
-		results = append(results, sessionSearchResult(session, query))
-		seen[name] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 
-	legacy, err := s.searchLegacyJSON(query, seen)
+	bundleResults, err := s.searchLegacyJSON(query, seen)
 	if err != nil {
 		return nil, err
 	}
-	results = append(results, legacy...)
+	results = append(results, bundleResults...)
+	if len(results) == 0 && sqlErr != nil {
+		return nil, sqlErr
+	}
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].UpdatedAt.Equal(results[j].UpdatedAt) {
 			return results[i].Name < results[j].Name
@@ -532,6 +585,66 @@ func (s *Store) loadSQL(name string) (Session, error) {
 	return session, nil
 }
 
+func (s *Store) bundleDir(name string) string {
+	return filepath.Join(s.dir, Sanitize(name))
+}
+
+func (s *Store) bundleSnapshotPath(name string) string {
+	return filepath.Join(s.bundleDir(name), "session.json")
+}
+
+func (s *Store) writeBundleSnapshot(session Session) error {
+	dir := s.bundleDir(session.Name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(session, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	path := s.bundleSnapshotPath(session.Name)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	for _, fileName := range []string{"debug.jsonl", "context.jsonl"} {
+		file, err := os.OpenFile(filepath.Join(dir, fileName), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		_ = file.Chmod(0o600)
+		if err := file.Close(); err != nil {
+			return err
+		}
+	}
+	// Keep debuglog's independently resolved path in sync for normal config
+	// stores and portable installs that override EPHEMERA_SESSION_LOG_DIR.
+	if filepath.Clean(debuglog.SessionDirectory(session.Name)) == filepath.Clean(dir) {
+		_ = debuglog.EnsureSession(session.Name)
+	}
+	return nil
+}
+
+func (s *Store) loadBundleSnapshot(name string) (Session, error) {
+	data, err := os.ReadFile(s.bundleSnapshotPath(name))
+	if err != nil {
+		return Session{}, err
+	}
+	var session Session
+	if err := json.Unmarshal(data, &session); err != nil {
+		return Session{}, err
+	}
+	if session.Name == "" {
+		session.Name = Sanitize(name)
+	}
+	return session, nil
+}
+
 func (s *Store) loadJSON(name string) (Session, error) {
 	path := s.path(name)
 	data, err := os.ReadFile(path)
@@ -562,14 +675,20 @@ func (s *Store) searchLegacyJSON(query string, seen map[string]struct{}) ([]Sear
 	}
 	var results []SearchResult
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+		name := ""
+		load := s.loadJSON
+		if entry.IsDir() {
+			name = entry.Name()
+			load = s.loadBundleSnapshot
+		} else if filepath.Ext(entry.Name()) == ".json" {
+			name = strings.TrimSuffix(entry.Name(), ".json")
+		} else {
 			continue
 		}
-		name := strings.TrimSuffix(entry.Name(), ".json")
 		if _, ok := seen[name]; ok {
 			continue
 		}
-		session, err := s.loadJSON(name)
+		session, err := load(name)
 		if err != nil {
 			continue
 		}

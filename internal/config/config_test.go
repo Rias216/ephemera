@@ -26,6 +26,24 @@ func TestDefault(t *testing.T) {
 	if !ValidProvider("codex") {
 		t.Fatal("codex provider should be supported")
 	}
+	if cfg.CodexBridgeMaxTokens != 2_048 {
+		t.Fatalf("Codex bridge budget = %d, want 2048", cfg.CodexBridgeMaxTokens)
+	}
+}
+
+func TestCodexBridgeBudgetBounds(t *testing.T) {
+	cfg := Default()
+	cfg.CodexBridgeMaxTokens = 10
+	cfg.normalize()
+	if cfg.CodexBridgeMaxTokens != 2_048 {
+		t.Fatalf("small Codex bridge budget = %d, want default 2048", cfg.CodexBridgeMaxTokens)
+	}
+
+	cfg.CodexBridgeMaxTokens = 99_000
+	cfg.normalize()
+	if cfg.CodexBridgeMaxTokens != 8_000 {
+		t.Fatalf("large Codex bridge budget = %d, want 8000", cfg.CodexBridgeMaxTokens)
+	}
 }
 
 func TestNormalizeRepairsPartialConfig(t *testing.T) {
@@ -344,5 +362,43 @@ func TestNormalizeMCPServerConfiguration(t *testing.T) {
 	}
 	if !cfg.MCPServers["broken"].Disabled {
 		t.Fatalf("unsupported transport was not disabled: %#v", cfg.MCPServers["broken"])
+	}
+}
+
+func TestSubagentAndDirectorDefaultsAndBounds(t *testing.T) {
+	cfg := Default()
+	if !cfg.SubagentEnabled || cfg.SubagentAutoRoute || cfg.SubagentMaxSteps != 4 || cfg.SubagentMaxTokens != 2000 {
+		t.Fatalf("unexpected subagent defaults: %+v", cfg)
+	}
+	if cfg.DirectorEnabled || cfg.InstrumentWeight != 20 || cfg.DirectorMaxSteps != 12 || cfg.InstrumentMaxSteps != 2 {
+		t.Fatalf("unexpected director defaults: %+v", cfg)
+	}
+
+	cfg.SubagentMaxSteps = 99
+	cfg.SubagentMaxTokens = 10
+	cfg.InstrumentWeight = 150
+	cfg.DirectorMaxSteps = 1
+	cfg.InstrumentMaxSteps = 99
+	cfg.normalize()
+	if cfg.SubagentMaxSteps != 8 || cfg.SubagentMaxTokens != 500 || cfg.InstrumentWeight != 100 || cfg.DirectorMaxSteps != 4 || cfg.InstrumentMaxSteps != 6 {
+		t.Fatalf("role bounds were not normalized: %+v", cfg)
+	}
+}
+
+func TestConfigForRoleUsesRememberedRouteWithoutMutatingMainSelection(t *testing.T) {
+	cfg := Default()
+	mainProvider, mainModel := cfg.Provider, cfg.Model()
+	routeID := cfg.RememberConnection(SavedConnection{Provider: "openai", Name: "work", Model: "gpt-main"}, "secret")
+	cfg.ActivateConnection("ollama")
+
+	role, err := cfg.ConfigForRole(routeID, "gpt-light")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role.Provider != "openai" || role.Model() != "gpt-light" || role.OpenAIKey != "secret" {
+		t.Fatalf("unexpected role config: provider=%q model=%q key=%q", role.Provider, role.Model(), role.OpenAIKey)
+	}
+	if cfg.Provider != mainProvider || cfg.Model() != mainModel {
+		t.Fatalf("main config mutated: provider=%q model=%q", cfg.Provider, cfg.Model())
 	}
 }

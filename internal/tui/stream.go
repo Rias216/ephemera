@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ephemera-ai/ephemera/internal/agent"
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 	"github.com/ephemera-ai/ephemera/internal/history"
 	"github.com/ephemera-ai/ephemera/internal/llm"
 	"github.com/ephemera-ai/ephemera/internal/reasoning"
@@ -49,6 +51,10 @@ type liveAgentState struct {
 	Plan              string
 	Verification      string
 	Verified          bool
+	DirectorMode      bool
+	InstrumentLast    string
+	RunProvider       string
+	RunModel          string
 }
 
 func waitAgentStream(ch <-chan agent.StreamUpdate) tea.Cmd {
@@ -63,9 +69,24 @@ func (m *Model) generateCmd() tea.Cmd {
 		m.agentCancel()
 	}
 	cfg := m.cfg
+	runCfg := cfg
+	var roleErr error
+	if cfg.DirectorEnabled {
+		resolved, err := cfg.ConfigForRole(cfg.DirectorProvider, cfg.DirectorModel)
+		roleErr = err
+		if err == nil {
+			runCfg = resolved
+		}
+	}
 	session := m.session
 	stream := make(chan agent.StreamUpdate, 128)
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx = debuglog.WithScope(ctx, debuglog.Scope{
+		Session:   session.Name,
+		Provider:  runCfg.Provider,
+		Model:     runCfg.Model(),
+		Workspace: runCfg.WorkspaceRoot,
+	})
 	m.agentStream = stream
 	m.agentCancel = cancel
 	now := time.Now()
@@ -77,6 +98,9 @@ func (m *Model) generateCmd() tea.Cmd {
 		UpdatedAt:         now,
 		Activity:          "Starting the model stream…",
 		ActivityUpdatedAt: now,
+		DirectorMode:      cfg.DirectorEnabled,
+		RunProvider:       runCfg.Provider,
+		RunModel:          runCfg.Model(),
 	}
 	m.session.Agent = history.AgentSnapshot{
 		Status:    "running",
@@ -93,27 +117,63 @@ func (m *Model) generateCmd() tea.Cmd {
 			case <-ctx.Done():
 			}
 		}
-		provider, err := llm.New(cfg)
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err := fmt.Errorf("agent worker panic: %v", recovered)
+				debuglog.Failure("tui", "agent worker panic", err.Error(), map[string]any{
+					"session":  session.Name,
+					"provider": runCfg.Provider,
+					"model":    runCfg.Model(),
+					"stack":    string(debug.Stack()),
+				})
+				emit(agent.StreamUpdate{Kind: agent.StreamDone, Phase: "failed", Err: err, Text: "Agent worker failed: " + err.Error()})
+			}
+		}()
+		if roleErr != nil {
+			emit(agent.StreamUpdate{Kind: agent.StreamDone, Phase: "failed", Err: roleErr, Text: "Director model setup failed: " + roleErr.Error()})
+			return
+		}
+		provider, err := llm.New(runCfg)
 		if err != nil {
 			emit(agent.StreamUpdate{Kind: agent.StreamDone, Phase: "failed", Err: err, Text: "Provider setup failed: " + err.Error()})
 			return
 		}
-		if cfg.AgentEnabled {
-			agent.NewRunner(cfg, provider).RunStream(ctx, session, emit)
+		if runCfg.AgentEnabled {
+			runner := agent.NewRunner(runCfg, provider)
+			if runCfg.DirectorEnabled {
+				runner.RunDirector(ctx, session, emit)
+			} else {
+				runner.RunStream(ctx, session, emit)
+			}
 			return
 		}
 
-		system := reasoning.SystemPrompt(cfg.Mode)
-		messages, stats := buildRequestMessages(session.Messages, system, cfg.ContextTokens)
+		system := reasoning.SystemPrompt(runCfg.Mode)
+		messages, stats := buildRequestMessages(session.Messages, system, runCfg.ContextTokens)
 		req := llm.Request{
-			Model:            cfg.Model(),
+			Model:            runCfg.Model(),
 			System:           system,
 			Messages:         messages,
-			MaxTokens:        cfg.MaxTokens,
-			Temperature:      cfg.Mode.Temperature(),
-			ReasoningSummary: cfg.ShowThinking,
-			ReasoningEffort:  cfg.Mode.Effort(),
+			MaxTokens:        runCfg.MaxTokens,
+			Temperature:      runCfg.Mode.Temperature(),
+			ReasoningSummary: runCfg.ShowThinking,
+			ReasoningEffort:  runCfg.Mode.Effort(),
 		}
+		req, replacements := llm.NormalizeRequestUTF8(req)
+		if replacements > 0 {
+			debuglog.WarningCtx(ctx, "tui", "invalid utf-8 normalized", "chat request contained invalid UTF-8 and was normalized before transport", map[string]any{
+				"replacement_fields": replacements,
+			})
+		}
+		_ = debuglog.AppendContext(ctx, "provider_request", 1, "text", map[string]any{
+			"request": req,
+			"selection": map[string]any{
+				"estimated_tokens": stats.EstimatedTokens,
+				"sent_messages":    stats.SentMessages,
+				"total_messages":   stats.TotalMessages,
+				"dropped_messages": stats.DroppedMessages,
+			},
+		})
 		emit(agent.StreamUpdate{
 			Kind:            agent.StreamStatus,
 			Phase:           "requesting model",
@@ -150,6 +210,14 @@ func (m *Model) generateCmd() tea.Cmd {
 			})
 			return nil
 		})
+		responsePayload := map[string]any{
+			"text":          text,
+			"output_tokens": (outputRunes + 3) / 4,
+		}
+		if err != nil {
+			responsePayload["error"] = err.Error()
+		}
+		_ = debuglog.AppendContext(ctx, "provider_response", 1, "text", responsePayload)
 		emit(agent.StreamUpdate{
 			Kind:          agent.StreamDone,
 			Phase:         completionPhase(err),
@@ -291,6 +359,12 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 		m.refreshViewport(atBottom)
 	case agent.StreamEvent:
 		if update.Event != nil {
+			if update.Event.Metadata != nil {
+				if instrument, _ := update.Event.Metadata["instrument"].(bool); instrument {
+					m.liveAgent.DirectorMode = true
+					m.liveAgent.InstrumentLast = strings.TrimSpace(update.Event.Content)
+				}
+			}
 			m.upsertStreamEvent(*update.Event)
 			m.captureAgentEvent(*update.Event)
 			if m.followLive {
@@ -323,9 +397,13 @@ func (m *Model) finishAgentStream(update agent.StreamUpdate) {
 	}
 	m.liveAgent.UpdatedAt = time.Now()
 	if update.Err != nil {
+		m.recordError("agent stream failed", update.Err, map[string]any{
+			"phase": update.Phase,
+			"tool":  update.Tool,
+		})
 		m.liveAgent.Err = update.Err.Error()
 		m.status = "The signal broke · " + compactLiveError(update.Err.Error())
-		m.notice = "**Request failed:** " + escapeMarkdown(update.Err.Error())
+		m.notice = "**Request failed:** " + escapeMarkdown(update.Err.Error()) + "\n\nDebug log: `" + escapeMarkdown(debugLogPath()) + "`"
 	} else {
 		text := strings.TrimSpace(update.Text)
 		if text != "" {
@@ -339,8 +417,8 @@ func (m *Model) finishAgentStream(update agent.StreamUpdate) {
 				m.notice = text
 			}
 		}
-		m.session.Provider = m.cfg.Provider
-		m.session.Model = m.cfg.Model()
+		m.session.Provider = firstNonEmpty(m.liveAgent.RunProvider, m.cfg.Provider)
+		m.session.Model = firstNonEmpty(m.liveAgent.RunModel, m.cfg.Model())
 		m.session.Mode = m.cfg.Mode
 		if m.pendingApproval != nil {
 			m.status = "Approval needed · /approve or /reject"
@@ -371,6 +449,9 @@ func (m *Model) cancelGeneration() {
 func (m Model) liveStatusText() string {
 	phase := firstNonEmpty(m.liveAgent.Phase, "working")
 	parts := []string{fmt.Sprintf("round %d", max(1, m.liveAgent.Iteration)), phase}
+	if m.liveAgent.DirectorMode {
+		parts = append([]string{"director"}, parts...)
+	}
 	if m.liveAgent.Tool != "" {
 		parts = append(parts, m.liveAgent.Tool)
 	}
@@ -429,6 +510,8 @@ func phaseActivity(phase, tool string) string {
 		return "Task token budget reached."
 	case "self critique":
 		return "Reviewing the completed answer…"
+	case "instrument review":
+		return "Instrument model is reviewing the director…"
 	}
 	return ""
 }
@@ -543,6 +626,12 @@ func lastLineCompact(value string, limit int) string {
 }
 
 func (m *Model) captureAgentEvent(event history.Event) {
+	if event.Metadata != nil {
+		if instrument, _ := event.Metadata["instrument"].(bool); instrument {
+			m.liveAgent.DirectorMode = true
+			m.liveAgent.InstrumentLast = strings.TrimSpace(event.Content)
+		}
+	}
 	switch event.Type {
 	case "reasoning_trace", "reasoning_summary":
 		m.liveAgent.Reasoning = event.Content

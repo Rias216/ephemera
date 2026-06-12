@@ -1,0 +1,23 @@
+{
+  "name": "error-recovery",
+  "prompt": "Read the referenced input. If the first path is missing, recover by locating the available fallback and write its value to eval-fixtures/recovery/result.txt.",
+  "setup": [
+    {
+      "path": "eval-fixtures/recovery/fallback.txt",
+      "content": "recovered-value\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "fallback recovered",
+      "path": "eval-fixtures/recovery/result.txt",
+      "contains": "recovered-value",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "subsystem": "error recovery",
+    "fault": "missing primary input",
+    "expected_behavior": "inspect error and use fallback without repeating failed call"
+  }
+}

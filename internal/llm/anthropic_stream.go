@@ -123,7 +123,9 @@ func (p *Anthropic) generateMessageStream(ctx context.Context, req Request, spec
 					block = &anthropicStreamBlock{Index: event.Index, Type: "tool_use"}
 					blocks[event.Index] = block
 				}
-				block.Input.WriteString(event.Delta.PartialJSON)
+				merged := mergeStreamFragment(block.Input.String(), event.Delta.PartialJSON)
+				block.Input.Reset()
+				block.Input.WriteString(merged)
 				return emitDelta(onDelta, DeltaActivity, toolActivityText(block.Name, block.Input.Len()))
 			}
 		case "error":
@@ -149,11 +151,11 @@ func (p *Anthropic) generateMessageStream(ctx context.Context, req Request, spec
 			continue
 		}
 		raw := strings.TrimSpace(block.Input.String())
-		args, _, decodeErr := decodeToolArgumentsString(raw)
+		args, _, truncated, decodeErr := decodeToolArgumentsForStream(raw)
 		if decodeErr != nil {
 			return ToolDecision{}, newToolProtocolError("Anthropic", block.Name, raw, decodeErr)
 		}
-		calls = append(calls, ToolCall{ID: block.ID, Name: block.Name, Arguments: args})
+		calls = append(calls, ToolCall{ID: block.ID, Name: block.Name, Arguments: args, Truncated: truncated})
 	}
 	visible := strings.TrimSpace(text.String())
 	if visible == "" && len(calls) == 0 {

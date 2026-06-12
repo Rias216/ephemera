@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"sort"
@@ -24,6 +25,7 @@ type ContextWindow struct {
 	MaxIterations  int
 	Query          string
 	WorkingMemory  string
+	Embedder       Embedder
 	Messages       []llm.Message
 	NativeTurns    []llm.Message
 	Cache          *ContextFitCache
@@ -72,7 +74,17 @@ func (w ContextWindow) Fit() ([]llm.Message, messageSelection) {
 		prefixCost = 0
 	}
 
-	explicitBudget := available - prefixCost
+	// Reserve provider-native tool call/result turns before filling the ordinary
+	// conversation budget. Providers such as OpenAI and Anthropic reject or
+	// misunderstand a follow-up when the corresponding tool result is silently
+	// compacted away under context pressure. Preserve at least the newest user
+	// turn first, then spend the remaining capacity on complete native groups.
+	conversationFloor := newestUserMessageCost(valid, w.Provider)
+	nativeBudget := maxInt(0, available-prefixCost-conversationFloor)
+	nativeTurns := selectNativeTurnsDeduplicatedForProvider(w.NativeTurns, nativeBudget, w.Provider)
+	nativeCost := messageSliceTokensForProvider(nativeTurns, w.Provider)
+
+	explicitBudget := maxInt(0, available-prefixCost-nativeCost)
 	reserveSummary := minInt(maxInt(0, summaryTokens), explicitBudget/2)
 	recentBudget := explicitBudget - reserveSummary
 	selected := map[int]bool{}
@@ -124,12 +136,18 @@ func (w ContextWindow) Fit() ([]llm.Message, messageSelection) {
 	}
 
 	out := append(prefix, chronological...)
-	remaining := available - messageSliceTokensForProvider(out, w.Provider)
-	if remaining > 0 && len(w.NativeTurns) > 0 {
-		out = append(out, selectNativeTurnsDeduplicatedForProvider(w.NativeTurns, remaining, w.Provider)...)
-	}
+	out = append(out, nativeTurns...)
 	w.storeFit(budget, summaryTokens, out, stats)
 	return out, stats
+}
+
+func newestUserMessageCost(messages []llm.Message, provider string) int {
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Role == "user" {
+			return estimateLLMMessageTokensForProvider(messages[index], provider)
+		}
+	}
+	return 0
 }
 
 func (w ContextWindow) adaptiveSummaryTokens(budget int) int {
@@ -212,7 +230,7 @@ func (w ContextWindow) compactCached(messages []llm.Message, maxTokens int) stri
 type recalledMessage struct {
 	Index int
 	Cost  int
-	Score int
+	Score float64
 }
 
 // Recall selects semantically relevant older messages not already retained.
@@ -221,7 +239,8 @@ func (w ContextWindow) Recall(messages []llm.Message, selected map[int]bool, bud
 		return nil
 	}
 	queryTerms := semanticTerms(w.Query)
-	if len(queryTerms) == 0 {
+	queryVector, embedErr := embedText(context.Background(), w.Embedder, w.Query)
+	if len(queryTerms) == 0 && (embedErr != nil || vectorIsZero(queryVector)) {
 		return nil
 	}
 	candidates := make([]recalledMessage, 0, len(messages))
@@ -229,8 +248,17 @@ func (w ContextWindow) Recall(messages []llm.Message, selected map[int]bool, bud
 		if selected[index] {
 			continue
 		}
-		score := semanticScore(message.Content, queryTerms)
-		if score == 0 {
+		score := 0.0
+		if embedErr == nil && !vectorIsZero(queryVector) {
+			if vector, err := embedText(context.Background(), w.Embedder, message.Content); err == nil {
+				score = cosineSimilarity(queryVector, vector)
+			}
+		}
+		lexical := semanticScore(message.Content, queryTerms)
+		if lexical > 0 {
+			score += float64(lexical) * 0.08
+		}
+		if score <= 0.05 {
 			continue
 		}
 		candidates = append(candidates, recalledMessage{Index: index, Cost: estimateLLMMessageTokensForProvider(message, w.Provider), Score: score})
@@ -309,6 +337,15 @@ func omittedMessages(messages []llm.Message, selected map[int]bool) []llm.Messag
 		}
 	}
 	return out
+}
+
+func vectorIsZero(values []float32) bool {
+	for _, value := range values {
+		if value != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func semanticTerms(text string) map[string]int {

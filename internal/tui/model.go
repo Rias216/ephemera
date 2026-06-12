@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,9 +17,11 @@ import (
 
 	"github.com/ephemera-ai/ephemera/internal/agent"
 	"github.com/ephemera-ai/ephemera/internal/config"
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 	"github.com/ephemera-ai/ephemera/internal/history"
 	"github.com/ephemera-ai/ephemera/internal/reasoning"
 	"github.com/ephemera-ai/ephemera/internal/theme"
+	"github.com/ephemera-ai/ephemera/internal/tools"
 )
 
 const helpText = `### Commands
@@ -34,7 +37,11 @@ const helpText = `### Commands
 - **/model <id>** / **/models** — select any connected model; its route switches automatically
 - **/mode <profile>** — change response character
 - **/usage** / **/budget <tokens>** — inspect or set context
-- **/approval <auto|safe|read-only>** — set agent approval policy
+- **/approval <auto|safe|read-only|workspace-write>** — set agent approval policy
+- **/codex [status|budget <tokens>]** — inspect or tune the isolated Codex bridge
+- **/subagent <on|off|model|status>** — configure lightweight delegation
+- **/director <on|off|model|instrument|status>** — configure dual-model review
+- **/debuglog [tail|clear]** — inspect or clear session debug and provider-context logs
 - **/thinking <on|off>** — show or hide Beneath the Surface traces
 - **/surface** — reopen the latest persisted reasoning and verification trace
 - **/eval** — run deterministic local agent capability checks
@@ -136,10 +143,26 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 		if loaded, err := loadFromStore(store, sessionName); err == nil {
 			session = loaded
 			applyLoadedSessionConfig(&cfg, loaded)
+		} else {
+			debuglog.Error("tui", "startup session load failed", err, map[string]any{
+				"session": sessionName,
+			})
 		}
 	}
 	if session.Name == "" {
 		session = history.New(sessionName, cfg.Provider, cfg.Model(), cfg.Mode)
+	}
+	if err := debuglog.EnsureSession(session.Name); err != nil {
+		debuglog.Error("tui", "session diagnostics initialization failed", err, map[string]any{
+			"session": session.Name,
+		})
+	}
+	if store != nil {
+		if err := store.Save(session); err != nil {
+			debuglog.Error("tui", "startup session save failed", err, map[string]any{
+				"session": session.Name,
+			})
+		}
 	}
 
 	now := time.Now()
@@ -222,6 +245,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.liveAgent.Phase = "cancelled"
 					m.status = "Agent run cancelled."
 				} else {
+					m.recordFailure("agent stream closed unexpectedly", "agent update channel closed before a done event", nil)
 					m.status = "Agent stream closed unexpectedly."
 				}
 				m.agentStream = nil
@@ -236,8 +260,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		summary := contextSummary(msg.stats)
 		if msg.err != nil {
+			m.recordError("request failed", msg.err, nil)
 			m.status = "The signal broke · " + summary
-			m.notice = "**Request failed:** " + escapeMarkdown(msg.err.Error())
+			m.notice = "**Request failed:** " + escapeMarkdown(msg.err.Error()) + "\n\nDebug log: `" + escapeMarkdown(debugLogPath()) + "`"
 			m.refreshViewport(true)
 			return m, nil
 		}
@@ -275,6 +300,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case approvalResultMsg:
 		m.busy = false
 		if msg.err != nil {
+			m.recordError("approved action failed", msg.err, nil)
 			m.status = "Approved action failed: " + msg.err.Error()
 			m.refreshViewport(true)
 			return m, nil
@@ -889,6 +915,41 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		return strings.Join(args, " "), true
 	}
 
+	resolveRoleModel := func(value string) (string, string, error) {
+		value = strings.TrimSpace(value)
+		if strings.EqualFold(value, "inherit") || strings.EqualFold(value, "main") {
+			return "", "", nil
+		}
+		routeID, model, explicit := parseModelSelection(value)
+		if explicit {
+			candidate, ok := m.cfg.ConfigForConnection(routeID)
+			if !ok {
+				return "", "", fmt.Errorf("unknown connected route %q", routeID)
+			}
+			available, err := m.modelAvailableForConfig(candidate, model, false)
+			if err == nil && !available {
+				return "", "", fmt.Errorf("model %q is not advertised by %s", model, candidate.Provider)
+			}
+			return routeID, model, nil
+		}
+		routeID, _, ok := m.findConnectedModel(model)
+		if !ok {
+			return "", "", fmt.Errorf("model %q was not found on a connected route", model)
+		}
+		return routeID, model, nil
+	}
+
+	parseBoundedInt := func(raw, label string, minimum, maximum int) (int, error) {
+		value, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return 0, fmt.Errorf("%s must be a number", label)
+		}
+		if value < minimum || value > maximum {
+			return 0, fmt.Errorf("%s must be between %d and %d", label, minimum, maximum)
+		}
+		return value, nil
+	}
+
 	switch command {
 	case "/help":
 		if len(args) > 0 {
@@ -960,6 +1021,8 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		}
 		_ = m.saveSession()
 		m.applyLoadedSession(loaded)
+		_ = debuglog.EnsureSession(m.session.Name)
+		_ = m.saveSession()
 		m.notice = ""
 		m.status = "Loaded session " + loaded.Name
 		_ = config.Save(m.cfg)
@@ -1153,6 +1216,152 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		}
 		m.notice = m.agentNotice()
 
+	case "/subagent":
+		action := "status"
+		if len(args) > 0 {
+			action = strings.ToLower(args[0])
+		}
+		switch action {
+		case "on":
+			m.cfg.SubagentEnabled = true
+			m.status = "Lightweight subagent enabled."
+		case "off":
+			m.cfg.SubagentEnabled = false
+			m.status = "Lightweight subagent disabled."
+		case "auto":
+			if len(args) < 2 {
+				m.status = fmt.Sprintf("Subagent automatic routing: %t", m.cfg.SubagentAutoRoute)
+				break
+			}
+			switch strings.ToLower(args[1]) {
+			case "on":
+				m.cfg.SubagentAutoRoute = true
+				m.status = "Subagent automatic routing enabled."
+			case "off":
+				m.cfg.SubagentAutoRoute = false
+				m.status = "Subagent automatic routing disabled."
+			default:
+				m.status = "Usage: /subagent auto <on|off>"
+			}
+		case "model":
+			if len(args) < 2 {
+				m.status = "Choose a model from autocomplete or use /subagent model inherit"
+				m.notice = m.subagentNotice()
+				break
+			}
+			route, model, err := resolveRoleModel(strings.Join(args[1:], " "))
+			if err != nil {
+				m.status = "Subagent model unchanged: " + err.Error()
+				break
+			}
+			m.cfg.SubagentProvider, m.cfg.SubagentModel = route, model
+			if model == "" {
+				m.status = "Subagent now inherits the main model."
+			} else {
+				m.status = "Subagent model → " + model
+			}
+		case "steps":
+			if len(args) < 2 {
+				m.status = fmt.Sprintf("Subagent max steps: %d", m.cfg.SubagentMaxSteps)
+				break
+			}
+			value, err := parseBoundedInt(args[1], "subagent steps", 1, 8)
+			if err != nil {
+				m.status = err.Error()
+				break
+			}
+			m.cfg.SubagentMaxSteps = value
+			m.status = fmt.Sprintf("Subagent max steps → %d", value)
+		case "tokens":
+			if len(args) < 2 {
+				m.status = fmt.Sprintf("Subagent token cap: %s", formatTokenCount(int(m.cfg.SubagentMaxTokens)))
+				break
+			}
+			value, err := parseBoundedInt(args[1], "subagent tokens", 500, 8000)
+			if err != nil {
+				m.status = err.Error()
+				break
+			}
+			m.cfg.SubagentMaxTokens = int64(value)
+			m.status = fmt.Sprintf("Subagent token cap → %s", formatTokenCount(value))
+		case "status":
+			m.status = "Subagent status opened."
+		default:
+			m.status = "Usage: /subagent <on|off|status|auto|model|steps|tokens>"
+		}
+		_ = config.Save(m.cfg)
+		m.notice = m.subagentNotice()
+
+	case "/director":
+		action := "status"
+		if len(args) > 0 {
+			action = strings.ToLower(args[0])
+		}
+		switch action {
+		case "on":
+			m.cfg.DirectorEnabled = true
+			m.status = "Director mode enabled."
+		case "off":
+			m.cfg.DirectorEnabled = false
+			m.status = "Director mode disabled."
+		case "model", "instrument":
+			if len(args) < 2 {
+				m.status = "Choose a connected model from autocomplete or use inherit"
+				m.notice = m.directorNotice()
+				break
+			}
+			route, model, err := resolveRoleModel(strings.Join(args[1:], " "))
+			if err != nil {
+				m.status = "Director configuration unchanged: " + err.Error()
+				break
+			}
+			if action == "model" {
+				m.cfg.DirectorProvider, m.cfg.DirectorModel = route, model
+				m.status = "Director model → " + firstNonEmpty(model, "inherit main")
+			} else {
+				m.cfg.InstrumentProvider, m.cfg.InstrumentModel = route, model
+				m.status = "Instrument model → " + firstNonEmpty(model, "inherit director")
+			}
+		case "weight":
+			if len(args) < 2 {
+				m.status = fmt.Sprintf("Instrument influence: %d%%", m.cfg.InstrumentWeight)
+				break
+			}
+			value, err := parseBoundedInt(args[1], "instrument weight", 0, 100)
+			if err != nil {
+				m.status = err.Error()
+				break
+			}
+			m.cfg.InstrumentWeight = value
+			m.status = fmt.Sprintf("Instrument influence → %d%%", value)
+		case "steps":
+			if len(args) < 2 {
+				m.status = fmt.Sprintf("Director/instrument steps: %d/%d", m.cfg.DirectorMaxSteps, m.cfg.InstrumentMaxSteps)
+				break
+			}
+			directorSteps, err := parseBoundedInt(args[1], "director steps", 4, 20)
+			if err != nil {
+				m.status = err.Error()
+				break
+			}
+			instrumentSteps := m.cfg.InstrumentMaxSteps
+			if len(args) > 2 {
+				instrumentSteps, err = parseBoundedInt(args[2], "instrument steps", 1, 6)
+				if err != nil {
+					m.status = err.Error()
+					break
+				}
+			}
+			m.cfg.DirectorMaxSteps, m.cfg.InstrumentMaxSteps = directorSteps, instrumentSteps
+			m.status = fmt.Sprintf("Director/instrument steps → %d/%d", directorSteps, instrumentSteps)
+		case "status":
+			m.status = "Director status opened."
+		default:
+			m.status = "Usage: /director <on|off|status|model|instrument|weight|steps>"
+		}
+		_ = config.Save(m.cfg)
+		m.notice = m.directorNotice()
+
 	case "/approval":
 		value, ok := requireArg("/approval <auto|safe|read-only|workspace-write|chat>")
 		if !ok {
@@ -1206,6 +1415,7 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 			}
 			path, err := m.exportSurface(target)
 			if err != nil {
+				m.recordError("surface export failed", err, map[string]any{"target": target})
 				m.status = "Surface export failed: " + err.Error()
 			} else {
 				m.status = "Surface exported → " + path
@@ -1221,12 +1431,17 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 	case "/eval":
 		report, err := agent.RunDeterministicEval(context.Background())
 		if err != nil {
+			m.recordError("agent capability eval failed", err, nil)
 			m.notice = "### Agent capability eval\n\n`" + escapeMarkdown(err.Error()) + "`"
 			m.status = "Agent eval failed."
 			break
 		}
 		m.notice = agent.FormatEvalReport(report)
 		if report.Failed() > 0 {
+			m.recordFailure("agent capability eval failed", fmt.Sprintf("%d deterministic agent evaluations failed", report.Failed()), map[string]any{
+				"failed": report.Failed(),
+				"passed": report.Passed(),
+			})
 			m.status = fmt.Sprintf("Agent eval failed · %d/%d passed", report.Passed(), len(report.Results))
 		} else {
 			m.status = fmt.Sprintf("Agent eval passed · %d/%d", report.Passed(), len(report.Results))
@@ -1415,9 +1630,82 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		m.notice = m.configNotice()
 		m.status = "Config opened."
 
+	case "/codex":
+		action := "status"
+		if len(args) > 0 {
+			action = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		switch action {
+		case "", "status":
+			m.notice = m.codexNotice()
+			m.status = "Codex bridge status opened."
+		case "budget":
+			if len(args) < 2 {
+				m.notice = m.codexNotice()
+				m.status = fmt.Sprintf("Codex bridge response target: %s tokens", formatTokenCount(int(m.cfg.CodexBridgeMaxTokens)))
+				break
+			}
+			value, err := parseBoundedInt(args[1], "Codex bridge budget", 512, 8000)
+			if err != nil {
+				m.status = err.Error()
+				break
+			}
+			m.cfg.CodexBridgeMaxTokens = int64(value)
+			_ = config.Save(m.cfg)
+			m.notice = m.codexNotice()
+			m.status = fmt.Sprintf("Codex bridge response target → %s tokens", formatTokenCount(value))
+		default:
+			m.status = "Usage: /codex [status|budget <512-8000>]"
+		}
+
+	case "/debuglog", "/logs":
+		action := "tail"
+		if len(args) > 0 {
+			action = strings.ToLower(strings.TrimSpace(args[0]))
+		}
+		switch action {
+		case "", "status", "tail":
+			m.notice = m.debugLogNotice(20)
+			m.status = "Debug log opened · " + debugLogPath()
+		case "clear":
+			if err := clearDebugLog(m.session.Name); err != nil {
+				m.recordError("clear debug log failed", err, nil)
+				m.status = "Debug log clear failed: " + err.Error()
+				break
+			}
+			m.notice = "### Debug log\n\nGlobal and current-session diagnostics were cleared. New events will be recorded automatically at:\n\n`" + escapeMarkdown(debugLogPath()) + "`"
+			m.status = "Debug log cleared."
+		default:
+			m.status = "Usage: /debuglog [status|tail|clear]"
+		}
+
 	case "/memory":
+		if len(args) == 0 {
+			m.notice = m.memoryNotice()
+			m.status = "Memory sources opened."
+			break
+		}
+		scope := "global"
+		start := 0
+		switch strings.ToLower(strings.TrimSpace(args[0])) {
+		case "add", "global":
+			start = 1
+		case "project", "workspace":
+			scope = "project"
+			start = 1
+		}
+		preference := strings.TrimSpace(strings.Join(args[start:], " "))
+		if preference == "" {
+			m.status = "Usage: /memory [add|project] <preference>"
+			break
+		}
+		result := tools.NewRegistry(m.cfg).Execute(context.Background(), tools.Call{Name: "prefer", Arguments: map[string]any{"preference": preference, "scope": scope}})
+		if !result.OK {
+			m.status = "Memory update failed: " + firstNonEmpty(result.Error, result.Output, "unknown error")
+			break
+		}
 		m.notice = m.memoryNotice()
-		m.status = "Memory sources opened."
+		m.status = "Recorded " + scope + " preference."
 
 	case "/budget":
 		value, ok := requireArg("/budget <tokens>")
@@ -1449,6 +1737,7 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		}
 		path, err := m.exportTranscript(target)
 		if err != nil {
+			m.recordError("transcript export failed", err, map[string]any{"target": target})
 			m.status = "Export failed: " + err.Error()
 			break
 		}
@@ -1565,25 +1854,41 @@ func (m *Model) saveSession() error {
 	if m.store == nil {
 		return nil
 	}
-	return m.store.Save(m.session)
+	err := m.store.Save(m.session)
+	if err != nil {
+		m.recordError("session save failed", err, nil)
+	}
+	return err
 }
 
 func (m *Model) loadSession(name string) (history.Session, error) {
-	return loadFromStore(m.store, name)
+	loaded, err := loadFromStore(m.store, name)
+	if err != nil {
+		m.recordError("session load failed", err, map[string]any{"requested_session": name})
+	}
+	return loaded, err
 }
 
 func (m *Model) listSessions() ([]string, error) {
 	if m.store == nil {
 		return nil, fmt.Errorf("session store unavailable")
 	}
-	return m.store.List()
+	names, err := m.store.List()
+	if err != nil {
+		m.recordError("session list failed", err, nil)
+	}
+	return names, err
 }
 
 func (m *Model) searchSessions(query string) ([]history.SearchResult, error) {
 	if m.store == nil {
 		return nil, fmt.Errorf("session store unavailable")
 	}
-	return m.store.Search(query, 20)
+	results, err := m.store.Search(query, 20)
+	if err != nil {
+		m.recordError("session search failed", err, map[string]any{"query": query})
+	}
+	return results, err
 }
 
 func loadFromStore(store *history.Store, name string) (history.Session, error) {
@@ -1599,6 +1904,7 @@ func (m *Model) copyLast() {
 		return
 	}
 	if err := clipboard.WriteAll(m.lastAssistant); err != nil {
+		m.recordError("clipboard write failed", err, nil)
 		m.status = "Clipboard unavailable: " + err.Error()
 		return
 	}

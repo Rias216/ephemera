@@ -12,7 +12,9 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/ephemera-ai/ephemera/internal/agent"
+	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
+	"github.com/ephemera-ai/ephemera/internal/reasoning"
 	"github.com/ephemera-ai/ephemera/internal/tools"
 )
 
@@ -38,6 +40,9 @@ func (m Model) renderAgentTimeline() string {
 
 func (m Model) agentTimelineLabel() string {
 	label := "agent"
+	if m.cfg.DirectorEnabled || m.liveAgent.DirectorMode {
+		label += " · director"
+	}
 	if m.timelineFocus {
 		label += " · timeline"
 	}
@@ -72,7 +77,7 @@ func eventTimelineKind(event history.Event) string {
 	switch event.Type {
 	case "tool_call", "tool_result", "approval_request", "verification", "test_result":
 		return "tools"
-	case "reasoning_summary", "reasoning_trace", "plan_update":
+	case "reasoning_summary", "reasoning_trace", "plan_update", "instrument_review", "director_status":
 		return "reasoning"
 	default:
 		return event.Type
@@ -189,7 +194,11 @@ func (m Model) snapshotReasoningAlreadyRendered() bool {
 
 func (m Model) renderLiveAgent(renderer cliRenderer) []string {
 	phase := firstNonEmpty(m.liveAgent.Phase, "working")
-	label := fmt.Sprintf("  ◆ live · round %d · %s", max(1, m.liveAgent.Iteration), phase)
+	mode := "live"
+	if m.liveAgent.DirectorMode {
+		mode = "director"
+	}
+	label := fmt.Sprintf("  ◆ %s · round %d · %s", mode, max(1, m.liveAgent.Iteration), phase)
 	if m.liveAgent.Tool != "" {
 		label += " · " + m.liveAgent.Tool
 	}
@@ -237,6 +246,12 @@ func (m Model) renderLiveAgent(renderer cliRenderer) []string {
 				{text: lastLineCompact(thought, max(12, renderer.width-13)), style: cliStyle{foreground: m.styles.Muted}},
 			}))
 		}
+	}
+	if review := strings.TrimSpace(m.liveAgent.InstrumentLast); review != "" {
+		rows = append(rows, renderer.paintRow(cliLine{
+			{text: "  instrument · ", style: cliStyle{foreground: m.styles.AccentSoft, bold: true}},
+			{text: firstLineCompact(review, max(12, renderer.width-16)), style: cliStyle{foreground: m.styles.Muted}},
+		}))
 	}
 	return rows
 }
@@ -311,8 +326,16 @@ func (m Model) eventTitleColor(event history.Event) color.Color {
 		return m.styles.Success
 	case "plan_update":
 		return m.styles.Primary
-	case "reasoning_summary", "reasoning_trace":
+	case "reasoning_summary", "reasoning_trace", "director_status":
 		return m.styles.AccentSoft
+	case "instrument_review":
+		if event.Status == "error" || event.Status == "action-required" {
+			return m.styles.Warning
+		}
+		if event.Status == "clean" {
+			return m.styles.Success
+		}
+		return m.styles.Primary
 	case "final":
 		return m.styles.Text
 	default:
@@ -323,6 +346,16 @@ func (m Model) eventTitleColor(event history.Event) color.Color {
 func (m Model) eventDisplayTitle(event history.Event) string {
 	if event.Type == "reasoning_summary" || event.Type == "reasoning_trace" {
 		return "thinking surface"
+	}
+	if event.Type == "instrument_review" {
+		stage := eventMetadataString(event, "stage")
+		if stage != "" {
+			return "instrument review · " + stage
+		}
+		return "instrument review"
+	}
+	if event.Type == "director_status" {
+		return "director council"
 	}
 	if event.Type == "tool_call" && event.Tool != "" {
 		return "tool " + event.Tool
@@ -348,7 +381,7 @@ func eventIsToolish(event history.Event) bool {
 
 func eventShowsBodyByDefault(event history.Event) bool {
 	switch event.Type {
-	case "tool_call", "tool_result", "test_result", "approval_request", "verification", "reasoning_trace", "reasoning_summary":
+	case "tool_call", "tool_result", "test_result", "approval_request", "verification", "reasoning_trace", "reasoning_summary", "director_status":
 		return false
 	default:
 		return true
@@ -370,6 +403,17 @@ func (m Model) eventCompactDetail(event history.Event, width int) string {
 		return "goal: " + firstLineCompact(goal, max(12, width-6))
 	case "plan_update":
 		return firstLineCompact(strings.ReplaceAll(event.Content, "- [ ]", "□"), width)
+	case "instrument_review":
+		severity := firstNonEmpty(eventMetadataString(event, "severity"), event.Status)
+		provider := eventMetadataString(event, "provider")
+		model := eventMetadataString(event, "model")
+		prefix := severity
+		if provider != "" || model != "" {
+			prefix += " · " + strings.Trim(strings.TrimSpace(provider+"/"+model), "/")
+		}
+		return firstLineCompact(prefix+" · "+event.Content, width)
+	case "director_status":
+		return firstLineCompact(event.Content, width)
 	case "tool_call", "tool_result", "test_result", "approval_request", "verification":
 		prefix := ""
 		if ms := eventMetadataInt(event, "duration_ms"); ms > 0 {
@@ -501,6 +545,10 @@ func agentGlyph(kind string) string {
 		return "◇"
 	case "reasoning_summary", "reasoning_trace":
 		return "◌"
+	case "instrument_review":
+		return "◈"
+	case "director_status":
+		return "♢"
 	case "tool_call":
 		return "›"
 	case "tool_result", "test_result":
@@ -703,6 +751,63 @@ func callFingerprint(call tools.Call) string {
 	return tools.Fingerprint(call)
 }
 
+func (m *Model) roleModelLabel(route, model, inheritLabel string) string {
+	if strings.TrimSpace(route) == "" && strings.TrimSpace(model) == "" {
+		return inheritLabel
+	}
+	cfg, err := m.cfg.ConfigForRole(route, model)
+	if err != nil {
+		return "unavailable: " + err.Error()
+	}
+	label := cfg.Provider + " / " + cfg.Model()
+	if route != "" {
+		if connection, ok := m.cfg.Connections[strings.ToLower(strings.TrimSpace(route))]; ok {
+			label = connection.DisplayName() + " / " + cfg.Model()
+		}
+	}
+	return label
+}
+
+func (m *Model) subagentNotice() string {
+	return fmt.Sprintf(`### Lightweight subagent
+
+- Enabled: %t
+- Automatic routing: %t
+- Model: %s
+- Max steps: %d
+- Token cap: %s
+- Permissions: read-only
+
+Use /subagent auto on only when you want eligible reads moved away from the main agent. Explicit delegate calls remain available whenever the subagent is enabled. Use /subagent model inherit to reuse the main model.`,
+		m.cfg.SubagentEnabled,
+		m.cfg.SubagentAutoRoute,
+		m.roleModelLabel(m.cfg.SubagentProvider, m.cfg.SubagentModel, "inherit main model"),
+		m.cfg.SubagentMaxSteps,
+		formatTokenCount(int(m.cfg.SubagentMaxTokens)),
+	)
+}
+
+func (m *Model) directorNotice() string {
+	return fmt.Sprintf(`### Director mode
+
+- Enabled: %t
+- Director: %s
+- Instrument: %s
+- Instrument influence: %d%%
+- Director max steps: %d
+- Instrument review budget: %d
+- Instrument permissions: advisory only; no tools
+
+The director owns planning, tools, and final decisions. The instrument reviews major actions and final output. Reviews appear as distinct timeline events with their severity and whether they were incorporated.`,
+		m.cfg.DirectorEnabled,
+		m.roleModelLabel(m.cfg.DirectorProvider, m.cfg.DirectorModel, "inherit main model"),
+		m.roleModelLabel(m.cfg.InstrumentProvider, m.cfg.InstrumentModel, "inherit director model"),
+		m.cfg.InstrumentWeight,
+		m.cfg.DirectorMaxSteps,
+		m.cfg.InstrumentMaxSteps,
+	)
+}
+
 func (m *Model) agentNotice() string {
 	return fmt.Sprintf(`### Agent
 
@@ -715,6 +820,8 @@ func (m *Model) agentNotice() string {
 - Repeated-call guard: %d
 - Automatic verification: %t
 - Automatic review specialist: %t
+- Lightweight subagent: %t · %s
+- Director mode: %t · instrument %s · influence %d%%
 - Inspect before edit: %t
 - Sandbox mode: %s
 - Dry run: %t
@@ -724,7 +831,7 @@ func (m *Model) agentNotice() string {
 - Episodic learning: %t
 - Beneath the Surface: %t
 
-Use /agent auto or /approval auto for automatic execution. Use /agent safe to restore confirmations. Safety controls: /sandbox, /dry-run, and /rollback. Intelligence controls: /index, /tdd, and /learn. Use /surface after a run to reopen the persisted goal, evidence, plan, and verification trace.`,
+Use /agent auto or /approval auto for automatic execution. Use /agent safe to restore confirmations. Configure model routing with /subagent and /director. Safety controls: /sandbox, /dry-run, and /rollback. Intelligence controls: /index, /tdd, and /learn. Use /surface after a run to reopen the persisted goal, evidence, plan, and verification trace.`,
 		m.cfg.AgentEnabled,
 		m.cfg.ApprovalPolicy,
 		agent.NewRunner(m.cfg, nil).Tools.WorkspaceRoot,
@@ -734,6 +841,11 @@ Use /agent auto or /approval auto for automatic execution. Use /agent safe to re
 		m.cfg.AgentLoopLimit,
 		m.cfg.AgentAutoVerify,
 		m.cfg.AgentAutoReview,
+		m.cfg.SubagentEnabled,
+		m.roleModelLabel(m.cfg.SubagentProvider, m.cfg.SubagentModel, "inherit main"),
+		m.cfg.DirectorEnabled,
+		m.roleModelLabel(m.cfg.InstrumentProvider, m.cfg.InstrumentModel, "inherit director"),
+		m.cfg.InstrumentWeight,
 		m.cfg.RequireReadBeforeEdit,
 		m.cfg.SandboxMode,
 		m.cfg.AgentDryRun,
@@ -892,6 +1004,9 @@ func (m Model) configNotice() string {
 - Repeated-call guard: %d
 - Automatic verification: %t
 - Automatic review specialist: %t
+- Lightweight subagent: %t · %s
+- Director mode: %t · director %s
+- Instrument: %s · influence %d%%
 - Inspect before edit: %t
 - Sandbox mode: %s
 - Dry run: %t
@@ -902,6 +1017,8 @@ func (m Model) configNotice() string {
 - TDD mode: %t
 - Episodic learning: %t
 - Beneath the Surface: %t
+- Codex bridge response target: %s tokens
+- Debug log: %s
 - Theme density: %s`,
 		m.providerName(),
 		m.cfg.Model(),
@@ -920,6 +1037,12 @@ func (m Model) configNotice() string {
 		m.cfg.AgentLoopLimit,
 		m.cfg.AgentAutoVerify,
 		m.cfg.AgentAutoReview,
+		m.cfg.SubagentEnabled,
+		m.roleModelLabel(m.cfg.SubagentProvider, m.cfg.SubagentModel, "inherit main"),
+		m.cfg.DirectorEnabled,
+		m.roleModelLabel(m.cfg.DirectorProvider, m.cfg.DirectorModel, "inherit main"),
+		m.roleModelLabel(m.cfg.InstrumentProvider, m.cfg.InstrumentModel, "inherit director"),
+		m.cfg.InstrumentWeight,
 		m.cfg.RequireReadBeforeEdit,
 		m.cfg.SandboxMode,
 		m.cfg.AgentDryRun,
@@ -930,7 +1053,40 @@ func (m Model) configNotice() string {
 		m.cfg.AgentTDDMode,
 		m.cfg.AgentLearnMemory,
 		m.cfg.ShowThinking,
+		formatTokenCount(int(m.cfg.CodexBridgeMaxTokens)),
+		debugLogPath(),
 		m.cfg.ThemeDensity,
+	)
+}
+
+func (m Model) codexNotice() string {
+	workspaceAuthority := "Ephemera tools may read; writes follow " + string(m.cfg.ApprovalPolicy)
+	if m.cfg.ApprovalPolicy == config.ApprovalReadOnly || m.cfg.ApprovalPolicy == config.ApprovalChat {
+		workspaceAuthority = "Ephemera is currently read-only; use `/approval safe` to approve writes or `/approval workspace-write` for automatic workspace writes"
+	}
+	effort := "low"
+	if m.cfg.Mode == reasoning.ModeDeep {
+		effort = "high"
+	} else if m.cfg.Mode == reasoning.ModeConcise {
+		effort = "minimal/low"
+	}
+	return fmt.Sprintf(`### Codex model bridge
+
+- Route: Codex CLI using the existing ChatGPT login
+- Execution: isolated model-only bridge
+- Bridge scratch sandbox: workspace-write in a disposable temp directory; project workspace is not mounted
+- Codex-native shell, file edits, web, MCP, hooks, and subagents: disabled
+- Workspace authority: %s
+- Requested response target: %s tokens
+- Bridge reasoning effort: %s
+- Reasoning summaries: %s
+- Compatibility fallback: enabled for older Codex CLI builds
+
+The inner Codex process receives only a disposable isolated bridge directory, not the project workspace. It returns Ephemera tool requests; Ephemera then reads, writes, runs commands, records approvals, snapshots changes, and logs failures through its own tool layer. This removes the previous nested-agent read-only errors and reduces duplicated context/tool usage.`,
+		workspaceAuthority,
+		formatTokenCount(int(m.cfg.CodexBridgeMaxTokens)),
+		effort,
+		map[bool]string{true: "concise", false: "disabled"}[m.cfg.ShowThinking],
 	)
 }
 

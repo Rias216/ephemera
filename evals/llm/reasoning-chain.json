@@ -1,0 +1,26 @@
+{
+  "name": "llm-reasoning-chain",
+  "prompt": "Inspect the inputs, infer the transformation rule from the examples, apply it to target.txt, and verify the output before finishing.",
+  "setup": [
+    {
+      "path": "eval-fixtures/llm/reasoning/examples.txt",
+      "content": "abc -> cba\nagent -> tnega\n"
+    },
+    {
+      "path": "eval-fixtures/llm/reasoning/target.txt",
+      "content": "frontier\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "rule applied",
+      "path": "eval-fixtures/llm/reasoning/answer.txt",
+      "contains": "reitnorf",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "benchmark": "structured reasoning",
+    "expected_behavior": "produce decision summaries, evidence, and verification"
+  }
+}

@@ -119,3 +119,25 @@ func TestProviderAwareEstimateProtectsCodeHeavyRequests(t *testing.T) {
 		t.Fatalf("provider estimate %d undercut conservative rune estimate %d", providerEstimate, runeEstimate)
 	}
 }
+
+func TestContextWindowReservesLatestNativeToolGroupUnderPressure(t *testing.T) {
+	turns := []llm.Message{
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read_file", Arguments: map[string]any{"path": "main.go"}}}},
+		{Role: "tool", ToolResult: &llm.ToolResult{ID: "call-1", Name: "read_file", OK: true, Output: "package main"}},
+	}
+	messages := []llm.Message{
+		{Role: "user", Content: strings.Repeat("older context ", 120)},
+		{Role: "assistant", Content: strings.Repeat("older response ", 120)},
+		{Role: "user", Content: "Continue editing main.go using the tool result."},
+	}
+	selected, _ := (ContextWindow{System: "system", Provider: "openai", Budget: 260, Messages: messages, NativeTurns: turns}).Fit()
+	var sawCall, sawResult, sawLatestUser bool
+	for _, message := range selected {
+		sawCall = sawCall || len(message.ToolCalls) == 1
+		sawResult = sawResult || message.ToolResult != nil
+		sawLatestUser = sawLatestUser || strings.Contains(message.Content, "Continue editing main.go")
+	}
+	if !sawCall || !sawResult || !sawLatestUser {
+		t.Fatalf("fit omitted required native history: call=%t result=%t user=%t messages=%#v", sawCall, sawResult, sawLatestUser, selected)
+	}
+}

@@ -1,0 +1,22 @@
+{
+  "name": "llm-cost-awareness",
+  "prompt": "Copy the exact short value from source.txt to answer.txt. Choose the smallest sufficient tool sequence and do not inspect unrelated paths.",
+  "setup": [
+    {
+      "path": "eval-fixtures/llm/cost/source.txt",
+      "content": "minimal-path\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "minimal task completed",
+      "path": "eval-fixtures/llm/cost/answer.txt",
+      "contains": "minimal-path",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "benchmark": "cost awareness",
+    "expected_behavior": "one targeted read and one write"
+  }
+}

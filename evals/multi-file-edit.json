@@ -1,0 +1,36 @@
+{
+  "name": "multi-file-edit",
+  "prompt": "Rename the greeting contract from hello to welcome across api.go, service.go, and service_test.go. Keep the project internally consistent and run the tests.",
+  "setup": [
+    {
+      "path": "eval-fixtures/multifile/api.go",
+      "content": "package multifile\n\nconst Greeting = \"hello\"\n"
+    },
+    {
+      "path": "eval-fixtures/multifile/service.go",
+      "content": "package multifile\n\nfunc Message() string { return Greeting }\n"
+    },
+    {
+      "path": "eval-fixtures/multifile/service_test.go",
+      "content": "package multifile\n\nimport \"testing\"\nfunc TestMessage(t *testing.T) { if Message() != \"hello\" { t.Fatal(Message()) } }\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "api renamed",
+      "path": "eval-fixtures/multifile/api.go",
+      "contains": "welcome",
+      "required": true
+    },
+    {
+      "name": "service test updated",
+      "path": "eval-fixtures/multifile/service_test.go",
+      "contains": "welcome",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "subsystem": "multi-step editing",
+    "expected_behavior": "inspect dependencies, edit all references, verify"
+  }
+}

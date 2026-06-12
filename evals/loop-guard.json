@@ -1,0 +1,22 @@
+{
+  "name": "loop-guard",
+  "prompt": "Find the value in eval-fixtures/loop/source.txt and write it once to result.txt. Do not repeatedly issue identical reads or writes.",
+  "setup": [
+    {
+      "path": "eval-fixtures/loop/source.txt",
+      "content": "single-pass\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "completed once",
+      "path": "eval-fixtures/loop/result.txt",
+      "contains": "single-pass",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "subsystem": "semantic loop guard",
+    "expected_behavior": "complete without duplicate tool-call stall"
+  }
+}

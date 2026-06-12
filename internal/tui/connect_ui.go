@@ -36,7 +36,7 @@ func connectProfileFor(value string) connectProfile {
 		}
 	case "codex", "chatgpt":
 		return connectProfile{
-			Name: "codex", Badge: "CHATGPT", Summary: "Codex ChatGPT login · no API billing key", Protocol: "OpenAI Responses", Endpoint: "~/.codex/auth.json", Auth: "Codex login",
+			Name: "codex", Badge: "CHATGPT", Summary: "Codex ChatGPT login · isolated Ephemera model bridge", Protocol: "Codex CLI / Responses", Endpoint: "~/.codex/auth.json", Auth: "Codex login",
 		}
 	case "anthropic":
 		return connectProfile{

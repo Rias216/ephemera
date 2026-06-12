@@ -92,3 +92,55 @@ func TestGeneratePortableToolDecisionUsesTextOnlyHistoryAndFullCatalog(t *testin
 		}
 	}
 }
+
+func TestRepairTruncatedToolCallClosesOnlyStructures(t *testing.T) {
+	repaired, ok := RepairTruncatedToolCall(`{"path":"go.mod","options":{"line":4`)
+	if !ok {
+		t.Fatal("expected safe structural repair")
+	}
+	args, err := DecodeToolArgumentsLenient(repaired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args["path"] != "go.mod" {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestRepairTruncatedToolCallRejectsUnterminatedString(t *testing.T) {
+	if repaired, ok := RepairTruncatedToolCall(`{"path":"go.mod`); ok || repaired != "" {
+		t.Fatalf("unsafe repair accepted: %q", repaired)
+	}
+}
+
+func TestStreamDecoderMarksStructuralRepairAsTruncated(t *testing.T) {
+	args, repaired, truncated, err := decodeToolArgumentsForStream(`{"path":"go.mod"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repaired || !truncated || args["path"] != "go.mod" {
+		t.Fatalf("args=%#v repaired=%t truncated=%t", args, repaired, truncated)
+	}
+	decision := ToolDecision{ToolCalls: []ToolCall{{Name: "read_file", Arguments: args, Truncated: true}}}
+	if err := TruncatedToolDecisionError("test", decision); !IsTruncatedToolProtocolError(err) {
+		t.Fatalf("error was not classified as truncation: %v", err)
+	}
+}
+
+func TestMergeStreamFragmentHandlesDeltaCumulativeAndReplay(t *testing.T) {
+	value := ""
+	for _, fragment := range []string{"read_", "file", "read_file", "read_file"} {
+		value = mergeStreamFragment(value, fragment)
+	}
+	if value != "read_file" {
+		t.Fatalf("merged function name = %q, want read_file", value)
+	}
+
+	arguments := ""
+	for _, fragment := range []string{`{"path":`, `{"path":"go.mod"`, `}`} {
+		arguments = mergeStreamFragment(arguments, fragment)
+	}
+	if arguments != `{"path":"go.mod"}` {
+		t.Fatalf("merged arguments = %q", arguments)
+	}
+}

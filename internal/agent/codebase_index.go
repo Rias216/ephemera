@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -16,7 +17,7 @@ import (
 	"time"
 )
 
-const codebaseIndexVersion = 1
+const codebaseIndexVersion = 2
 
 type codebaseIndex struct {
 	Version     int                      `json:"version"`
@@ -25,14 +26,15 @@ type codebaseIndex struct {
 }
 
 type codebaseEntry struct {
-	Path        string   `json:"path"`
-	Language    string   `json:"language,omitempty"`
-	Package     string   `json:"package,omitempty"`
-	Definitions []string `json:"definitions,omitempty"`
-	Imports     []string `json:"imports,omitempty"`
-	Summary     string   `json:"summary,omitempty"`
-	Size        int64    `json:"size"`
-	ModUnixNano int64    `json:"mod_unix_nano"`
+	Path        string    `json:"path"`
+	Language    string    `json:"language,omitempty"`
+	Package     string    `json:"package,omitempty"`
+	Definitions []string  `json:"definitions,omitempty"`
+	Imports     []string  `json:"imports,omitempty"`
+	Summary     string    `json:"summary,omitempty"`
+	Embedding   []float32 `json:"embedding,omitempty"`
+	Size        int64     `json:"size"`
+	ModUnixNano int64     `json:"mod_unix_nano"`
 }
 
 type codebaseIndexManager struct {
@@ -63,18 +65,22 @@ func (m *codebaseIndexManager) Relevant(query string, maxEntries int) string {
 		maxEntries = 24
 	}
 	terms := semanticTerms(query)
+	queryVector, _ := embedText(context.Background(), defaultEmbedder(), query)
 	type scored struct {
 		entry codebaseEntry
-		score int
+		score float64
 	}
 	items := make([]scored, 0, len(m.index.Entries))
 	for _, entry := range m.index.Entries {
 		haystack := strings.Join([]string{entry.Path, entry.Package, strings.Join(entry.Definitions, " "), strings.Join(entry.Imports, " "), entry.Summary}, " ")
-		score := semanticScore(haystack, terms)
-		if len(terms) == 0 {
+		score := cosineSimilarity(queryVector, entry.Embedding)
+		if lexical := semanticScore(haystack, terms); lexical > 0 {
+			score += float64(lexical) * 0.08
+		}
+		if len(terms) == 0 && vectorIsZero(queryVector) {
 			score = 1
 		}
-		if score > 0 {
+		if score > 0.05 {
 			items = append(items, scored{entry: entry, score: score})
 		}
 	}
@@ -240,6 +246,8 @@ func buildCodebaseEntry(rel, path string, data []byte, info fs.FileInfo) codebas
 	sort.Strings(entry.Definitions)
 	sort.Strings(entry.Imports)
 	entry.Summary = fmt.Sprintf("%s source, %d lines", entry.Language, strings.Count(string(data), "\n")+1)
+	embeddingText := strings.Join([]string{entry.Path, entry.Package, strings.Join(entry.Definitions, " "), strings.Join(entry.Imports, " "), entry.Summary}, " ")
+	entry.Embedding, _ = embedText(context.Background(), defaultEmbedder(), embeddingText)
 	return entry
 }
 

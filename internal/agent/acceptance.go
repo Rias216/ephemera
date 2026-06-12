@@ -9,6 +9,7 @@ import (
 
 	workruntime "github.com/ephemera-ai/ephemera/internal/runtime"
 	"github.com/ephemera-ai/ephemera/internal/tools"
+	"github.com/ephemera-ai/ephemera/internal/util"
 )
 
 type AcceptanceStatus string
@@ -171,9 +172,9 @@ func (c *AcceptanceContract) Evaluate(changedPaths map[string]bool) CompletionGa
 			report.Evidence = append(report.Evidence, requirement.Evidence...)
 		}
 	}
-	report.Blockers = uniqueSorted(report.Blockers)
-	report.PendingChecks = uniqueSorted(report.PendingChecks)
-	report.Evidence = uniqueSorted(report.Evidence)
+	report.Blockers = util.UniqueSortedStrings(report.Blockers)
+	report.PendingChecks = util.UniqueSortedStrings(report.PendingChecks)
+	report.Evidence = util.UniqueSortedStrings(report.Evidence)
 	return report
 }
 
@@ -251,19 +252,4 @@ func appendUnique(values []string, value string) []string {
 		}
 	}
 	return append(values, value)
-}
-
-func uniqueSorted(values []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			continue
-		}
-		seen[value] = true
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
 }

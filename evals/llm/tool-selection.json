@@ -1,0 +1,30 @@
+{
+  "name": "llm-tool-selection",
+  "prompt": "Locate TOKEN-739 among the fixture files and write only its containing filename to answer.txt. Avoid broad shell commands when search tools suffice.",
+  "setup": [
+    {
+      "path": "eval-fixtures/llm/tools/a.txt",
+      "content": "nothing\n"
+    },
+    {
+      "path": "eval-fixtures/llm/tools/b.txt",
+      "content": "TOKEN-739\n"
+    },
+    {
+      "path": "eval-fixtures/llm/tools/c.txt",
+      "content": "nothing\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "correct file selected",
+      "path": "eval-fixtures/llm/tools/answer.txt",
+      "contains": "b.txt",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "benchmark": "tool selection",
+    "expected_behavior": "use targeted search then one write"
+  }
+}

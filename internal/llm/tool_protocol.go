@@ -53,6 +53,39 @@ func IsToolProtocolError(err error) bool {
 	return errors.As(err, &target)
 }
 
+// IsTruncatedToolProtocolError reports a malformed native tool call whose JSON
+// ended before the provider completed it. This class receives one fresh native
+// retry before Ephemera falls back to the universal text gateway.
+func IsTruncatedToolProtocolError(err error) bool {
+	var target *ToolProtocolError
+	if !errors.As(err, &target) {
+		return false
+	}
+	return isUnexpectedJSONEnd(target.Cause)
+}
+
+func isUnexpectedJSONEnd(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "unexpected eof") || strings.Contains(text, "unexpected end of json")
+}
+
+// TruncatedToolDecisionError converts stream-level truncation metadata into a
+// retryable protocol error before any local tool can execute.
+func TruncatedToolDecisionError(provider string, decision ToolDecision) error {
+	for _, call := range decision.ToolCalls {
+		if call.Truncated {
+			return newToolProtocolError(provider, call.Name, "", io.ErrUnexpectedEOF)
+		}
+	}
+	return nil
+}
+
 // IsNativeToolCompatibilityError recognizes endpoints that advertise an
 // OpenAI/Anthropic-compatible API but reject or mishandle the tool fields.
 func IsNativeToolCompatibilityError(err error) bool {
@@ -89,18 +122,51 @@ func boundedProtocolRaw(raw string) string {
 	return string(runes[:1024]) + "…" + string(runes[len(runes)-1024:])
 }
 
-// decodeToolArgumentsString decodes a provider-emitted JSON object and applies
-// only lossless repairs: stripping fences/double encoding, trailing commas, and
-// missing closing braces or brackets. It never invents bytes inside an
-// unterminated string, which would risk executing a truncated patch.
-func decodeToolArgumentsString(raw string) (map[string]any, bool, error) {
-	text := stripJSONFence(strings.TrimSpace(raw))
+// RepairTruncatedToolCall attempts a structural-only repair of a JSON tool
+// argument object. It can close missing braces/brackets and remove trailing
+// commas, but refuses unterminated strings or mismatched delimiters.
+func RepairTruncatedToolCall(raw string) (string, bool) {
+	text := normalizedToolArgumentText(raw)
 	if text == "" || text == "null" {
-		return map[string]any{}, false, nil
+		return "", false
 	}
-	var encoded string
-	if json.Unmarshal([]byte(text), &encoded) == nil {
-		text = strings.TrimSpace(encoded)
+	candidate := firstJSONObject(text)
+	if candidate == "" {
+		candidate = text
+	}
+	candidate = removeTrailingJSONCommas(candidate)
+	closed, ok := closeJSONStructures(candidate)
+	if !ok || strings.TrimSpace(closed) == strings.TrimSpace(candidate) {
+		return "", false
+	}
+	if _, err := decodeJSONObject(closed); err != nil {
+		return "", false
+	}
+	return closed, true
+}
+
+// DecodeToolArgumentsLenient first performs normal decoding and then permits a
+// structural-only truncation repair. It never completes an unterminated string.
+func DecodeToolArgumentsLenient(raw string) (map[string]any, error) {
+	object, _, _, err := decodeToolArgumentsForStream(raw)
+	return object, err
+}
+
+// decodeToolArgumentsString is the compatibility decoder used by portable
+// envelopes. The boolean reports whether any harmless normalization or repair
+// was required.
+func decodeToolArgumentsString(raw string) (map[string]any, bool, error) {
+	object, repaired, _, err := decodeToolArgumentsForStream(raw)
+	return object, repaired, err
+}
+
+// decodeToolArgumentsForStream additionally reports whether a missing
+// structural closer was repaired. Stream adapters copy that bit to ToolCall so
+// the local validator and timeline can retain transport provenance.
+func decodeToolArgumentsForStream(raw string) (map[string]any, bool, bool, error) {
+	text := normalizedToolArgumentText(raw)
+	if text == "" || text == "null" {
+		return map[string]any{}, false, false, nil
 	}
 	candidates := []string{text}
 	if object := firstJSONObject(text); object != "" && object != text {
@@ -108,24 +174,34 @@ func decodeToolArgumentsString(raw string) (map[string]any, bool, error) {
 	}
 	for _, candidate := range candidates {
 		if object, err := decodeJSONObject(candidate); err == nil {
-			return object, candidate != text, nil
+			return object, candidate != text, false, nil
 		}
 	}
 	for _, candidate := range candidates {
 		repaired := removeTrailingJSONCommas(candidate)
 		if object, err := decodeJSONObject(repaired); err == nil {
-			return object, true, nil
+			return object, true, false, nil
 		}
-		closed, ok := closeJSONStructures(repaired)
-		if !ok || closed == repaired {
+		closed, ok := RepairTruncatedToolCall(repaired)
+		if !ok {
 			continue
 		}
-		if object, err := decodeJSONObject(closed); err == nil {
-			return object, true, nil
+		object, err := decodeJSONObject(closed)
+		if err == nil {
+			return object, true, true, nil
 		}
 	}
 	_, err := decodeJSONObject(text)
-	return nil, false, err
+	return nil, false, false, err
+}
+
+func normalizedToolArgumentText(raw string) string {
+	text := stripJSONFence(strings.TrimSpace(raw))
+	var encoded string
+	if json.Unmarshal([]byte(text), &encoded) == nil {
+		text = strings.TrimSpace(encoded)
+	}
+	return text
 }
 
 func decodeJSONObject(text string) (map[string]any, error) {
@@ -338,7 +414,7 @@ func portableToolInstructions(specs []ToolSpec, failure error) string {
 	b.WriteString("UNIVERSAL TOOL GATEWAY — this section overrides native-tool instructions for this response.\n")
 	b.WriteString("Every listed capability is available even when this provider's native tool API is not. Return exactly one JSON object and no Markdown:\n")
 	b.WriteString(`{"text":"optional user-visible text","tool_calls":[{"id":"call_1","name":"tool_name","arguments":{}}]}`)
-	b.WriteString("\nUse an empty tool_calls array only for a direct final answer. Arguments must be one complete JSON object matching the selected schema. Never describe a tool call in prose.\n")
+	b.WriteString("\nUse an empty tool_calls array only for a direct final answer. For workspace mutation, git, or verification requests, prose-only completion is invalid until the required tool calls have succeeded. Arguments must be one complete JSON object matching the selected schema. Never describe a tool call in prose.\n")
 	b.WriteString("For large edits, prefer replace_in_file or one apply_patch call per file. apply_multi_patch remains available, but do not repeat a payload that was truncated.\n")
 	if failure != nil {
 		b.WriteString("The previous native transport failed before any tool executed: ")
@@ -348,6 +424,36 @@ func portableToolInstructions(specs []ToolSpec, failure error) string {
 	b.WriteString("TOOL CATALOG JSON:\n")
 	b.Write(encoded)
 	return b.String()
+}
+
+// mergeStreamFragment accepts both true deltas and cumulative/replayed chunks.
+// Several OpenAI-compatible servers resend the complete function name or JSON
+// prefix on each event. Blind concatenation turns valid calls into names such
+// as read_fileread_file or duplicated JSON. The longest suffix/prefix overlap
+// preserves genuine deltas without duplicating retransmitted content.
+func mergeStreamFragment(current, incoming string) string {
+	if incoming == "" {
+		return current
+	}
+	if current == "" {
+		return incoming
+	}
+	if incoming == current || strings.HasPrefix(current, incoming) {
+		return current
+	}
+	if strings.HasPrefix(incoming, current) {
+		return incoming
+	}
+	maxOverlap := len(current)
+	if len(incoming) < maxOverlap {
+		maxOverlap = len(incoming)
+	}
+	for overlap := maxOverlap; overlap > 0; overlap-- {
+		if strings.HasSuffix(current, incoming[:overlap]) {
+			return current + incoming[overlap:]
+		}
+	}
+	return current + incoming
 }
 
 func compactProtocolText(text string, max int) string {

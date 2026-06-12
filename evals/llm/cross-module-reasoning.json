@@ -1,0 +1,30 @@
+{
+  "name": "llm-cross-module-reasoning",
+  "prompt": "Trace the value across config, transform, and output modules, then fix the inconsistent prefix in all required locations.",
+  "setup": [
+    {
+      "path": "eval-fixtures/llm/modules/config.txt",
+      "content": "prefix=EPH\n"
+    },
+    {
+      "path": "eval-fixtures/llm/modules/transform.txt",
+      "content": "uses prefix: OLD\n"
+    },
+    {
+      "path": "eval-fixtures/llm/modules/output.txt",
+      "content": "expected: EPH-001\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "cross-module consistency",
+      "path": "eval-fixtures/llm/modules/transform.txt",
+      "contains": "EPH",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "benchmark": "cross-module reasoning",
+    "expected_behavior": "inspect at least three related artifacts"
+  }
+}

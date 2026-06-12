@@ -12,10 +12,19 @@ import (
 	"strings"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 )
 
 // ListModels asks the active provider for its currently available model IDs.
-func ListModels(ctx context.Context, cfg config.Config) ([]string, error) {
+func ListModels(ctx context.Context, cfg config.Config) (models []string, retErr error) {
+	defer func() {
+		if retErr != nil {
+			debuglog.Error("provider", "model catalog failed", retErr, map[string]any{
+				"provider": cfg.Provider,
+				"model":    cfg.Model(),
+			})
+		}
+	}()
 	switch cfg.Provider {
 	case "ollama":
 		return listOllamaModels(ctx, cfg.OllamaURL)

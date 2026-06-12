@@ -1,0 +1,22 @@
+{
+  "name": "llm-self-correction",
+  "prompt": "The note claims 2+2=5. Validate the claim, correct it, and record verification evidence in result.txt.",
+  "setup": [
+    {
+      "path": "eval-fixtures/llm/correction/note.txt",
+      "content": "Assumption: 2+2=5\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "assumption corrected",
+      "path": "eval-fixtures/llm/correction/result.txt",
+      "contains": "2+2=4",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "benchmark": "self correction",
+    "expected_behavior": "detect and revise a supplied false assumption"
+  }
+}

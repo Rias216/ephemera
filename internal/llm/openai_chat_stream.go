@@ -128,9 +128,9 @@ func (p *OpenAI) generateChatCompletionsStream(ctx context.Context, req Request,
 				}
 				call.ID = firstNonEmpty(incoming.ID, call.ID)
 				if incoming.Function.Name != "" {
-					call.Name += incoming.Function.Name
+					call.Name = mergeStreamFragment(call.Name, incoming.Function.Name)
 				}
-				call.Arguments += incoming.Function.Arguments
+				call.Arguments = mergeStreamFragment(call.Arguments, incoming.Function.Arguments)
 				if err := emitDelta(onDelta, DeltaActivity, toolActivityText(call.Name, len(call.Arguments))); err != nil {
 					return err
 				}
@@ -153,11 +153,11 @@ func (p *OpenAI) generateChatCompletionsStream(ctx context.Context, req Request,
 		if strings.TrimSpace(call.Name) == "" {
 			continue
 		}
-		args, _, decodeErr := decodeToolArgumentsString(call.Arguments)
+		args, _, truncated, decodeErr := decodeToolArgumentsForStream(call.Arguments)
 		if decodeErr != nil {
 			return ToolDecision{}, newToolProtocolError(p.Name(), call.Name, call.Arguments, decodeErr)
 		}
-		toolCalls = append(toolCalls, ToolCall{ID: call.ID, Name: call.Name, Arguments: args})
+		toolCalls = append(toolCalls, ToolCall{ID: call.ID, Name: call.Name, Arguments: args, Truncated: truncated})
 	}
 	visible := strings.TrimSpace(text.String())
 	if visible == "" && len(toolCalls) == 0 {

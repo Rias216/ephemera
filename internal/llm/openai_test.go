@@ -56,3 +56,28 @@ func TestOpenAICompatibleGenerateWithToolsParsesToolCalls(t *testing.T) {
 		t.Fatalf("tool call = %#v", decision.ToolCalls[0])
 	}
 }
+
+func TestOpenAICompatibleGenerateWithToolsHandlesCumulativeToolFragments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"go.mod\\\"}\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := NewOpenAICompatible("local", server.URL, "")
+	decision, err := provider.GenerateWithTools(context.Background(), Request{
+		Model: "test-model", System: "system", Messages: []Message{{Role: "user", Content: "inspect"}}, MaxTokens: 128,
+	}, []ToolSpec{{Name: "read_file", Parameters: ToolSchema{Type: "object"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decision.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v", decision.ToolCalls)
+	}
+	call := decision.ToolCalls[0]
+	if call.Name != "read_file" || call.Arguments["path"] != "go.mod" {
+		t.Fatalf("cumulative tool call = %#v", call)
+	}
+}

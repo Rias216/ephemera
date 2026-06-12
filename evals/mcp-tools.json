@@ -1,0 +1,22 @@
+{
+  "name": "mcp-tools",
+  "prompt": "Treat mock-mcp-response.json as the response from an MCP lookup and write the returned ticket status to result.txt.",
+  "setup": [
+    {
+      "path": "eval-fixtures/mcp/mock-mcp-response.json",
+      "content": "{\"ticket\":\"EPH-42\",\"status\":\"resolved\"}\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "MCP result consumed",
+      "path": "eval-fixtures/mcp/result.txt",
+      "contains": "resolved",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "subsystem": "MCP execution",
+    "expected_behavior": "consume structured external-tool result"
+  }
+}

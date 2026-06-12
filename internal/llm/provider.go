@@ -4,8 +4,11 @@ package llm
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 )
 
 // Message is a provider-neutral conversation item. Besides normal text turns,
@@ -35,6 +38,58 @@ type Request struct {
 type Provider interface {
 	Name() string
 	Generate(context.Context, Request) (string, error)
+}
+
+// ErrorTaxonomy is a provider-owned classification used by recovery policy.
+type ErrorTaxonomy struct {
+	Code      string
+	Class     string
+	Provider  string
+	Retryable bool
+	Backoff   time.Duration
+}
+
+// ErrorClassifier lets an adapter classify its native errors without brittle
+// cross-provider substring rules in the agent loop.
+type ErrorClassifier interface {
+	ClassifyError(error) ErrorTaxonomy
+}
+
+// HealthChecker is an optional lightweight provider readiness probe.
+type HealthChecker interface {
+	HealthCheck(context.Context) error
+}
+
+// ClassifyError delegates to a provider classifier and falls back to a
+// conservative common taxonomy.
+func ClassifyError(provider Provider, err error) ErrorTaxonomy {
+	name := ""
+	if provider != nil {
+		name = provider.Name()
+		if classifier, ok := provider.(ErrorClassifier); ok {
+			classified := classifier.ClassifyError(err)
+			if classified.Provider == "" {
+				classified.Provider = name
+			}
+			return classified
+		}
+	}
+	if err == nil {
+		return ErrorTaxonomy{Code: "unknown", Class: "permanent", Provider: name}
+	}
+	text := strings.ToLower(err.Error())
+	result := ErrorTaxonomy{Code: "provider_error", Class: "permanent", Provider: name}
+	switch {
+	case strings.Contains(text, "context length"), strings.Contains(text, "context_length"), strings.Contains(text, "too many tokens"), strings.Contains(text, "maximum context"):
+		result.Code, result.Class = "context_length", "context_too_long"
+	case strings.Contains(text, "429"), strings.Contains(text, "rate limit"), strings.Contains(text, "too many requests"):
+		result.Code, result.Class, result.Retryable, result.Backoff = "rate_limit", "rate_limit", true, 2*time.Second
+	case strings.Contains(text, "timeout"), strings.Contains(text, "temporar"), strings.Contains(text, "connection reset"), strings.Contains(text, "empty streaming response"), strings.Contains(text, "empty response"), strings.Contains(text, "503"), strings.Contains(text, "502"):
+		result.Code, result.Class, result.Retryable, result.Backoff = "transient", "transient", true, 500*time.Millisecond
+	case strings.Contains(text, "401"), strings.Contains(text, "unauthorized"), strings.Contains(text, "api key"), strings.Contains(text, "authentication"):
+		result.Code, result.Class = "auth", "permanent"
+	}
+	return result
 }
 
 // ProviderCapabilities describe optional transports a provider can expose.
@@ -91,6 +146,10 @@ type ToolCall struct {
 	ID        string         `json:"id,omitempty"`
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments,omitempty"`
+	// Truncated is true only when a stream ended with structurally incomplete
+	// JSON that was repaired without inventing string content. Local schema
+	// validation still runs before the call can execute.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // ToolResult is a provider-neutral tool execution result.
@@ -190,8 +249,23 @@ func Capabilities(provider Provider) ProviderCapabilities {
 // GenerateToolDecision uses native provider tools when available, and otherwise
 // falls back to the existing visible-text streaming path.
 func GenerateToolDecision(ctx context.Context, provider Provider, req Request, specs []ToolSpec, onDelta DeltaFunc) (ToolDecision, error) {
+	var replacements int
+	req, replacements = NormalizeRequestUTF8(req)
+	if replacements > 0 {
+		debuglog.WarningCtx(ctx, "provider", "invalid utf-8 normalized", "provider tool request contained invalid UTF-8 and was normalized before transport", providerLogFields(provider, req, map[string]any{
+			"replacement_fields": replacements,
+			"tool_count":         len(specs),
+		}))
+	}
 	if toolProvider, ok := provider.(ToolCallingProvider); ok && len(specs) > 0 {
-		return toolProvider.GenerateWithTools(ctx, req, specs, onDelta)
+		decision, err := toolProvider.GenerateWithTools(ctx, req, specs, onDelta)
+		if err != nil {
+			debuglog.ErrorCtx(ctx, "provider", "native tool generation failed", err, providerLogFields(provider, req, map[string]any{
+				"tool_count": len(specs),
+				"transport":  "native",
+			}))
+		}
+		return decision, err
 	}
 	text, err := GenerateStreaming(ctx, provider, req, onDelta)
 	if err != nil {
@@ -207,7 +281,7 @@ func New(cfg config.Config) (Provider, error) {
 	case "openai":
 		return NewOpenAI(cfg.OpenAIKey), nil
 	case "codex":
-		return NewCodex(), nil
+		return NewCodex(cfg.CodexBridgeMaxTokens), nil
 	case "anthropic":
 		return NewAnthropic(cfg.AnthropicKey), nil
 	case "ollama":
@@ -217,4 +291,35 @@ func New(cfg config.Config) (Provider, error) {
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", cfg.Provider)
 	}
+}
+
+// NewSubagentProvider creates the separately configured lightweight specialist.
+// A nil provider means the subagent should inherit the parent provider.
+func NewSubagentProvider(cfg config.Config) (Provider, error) {
+	return newRoleProvider(cfg, cfg.SubagentProvider, cfg.SubagentModel)
+}
+
+// NewDirectorProvider creates an optional explicit primary provider for director
+// mode. A nil provider means the active main-agent route remains the director.
+func NewDirectorProvider(cfg config.Config) (Provider, error) {
+	return newRoleProvider(cfg, cfg.DirectorProvider, cfg.DirectorModel)
+}
+
+// NewInstrumentProvider creates the read-only reviewer used by director mode.
+// A nil provider means the instrument inherits the director provider.
+func NewInstrumentProvider(cfg config.Config) (Provider, error) {
+	return newRoleProvider(cfg, cfg.InstrumentProvider, cfg.InstrumentModel)
+}
+
+func newRoleProvider(cfg config.Config, routeOrProvider, model string) (Provider, error) {
+	routeOrProvider = strings.ToLower(strings.TrimSpace(routeOrProvider))
+	model = strings.TrimSpace(model)
+	if routeOrProvider == "" && model == "" {
+		return nil, nil
+	}
+	temp, err := cfg.ConfigForRole(routeOrProvider, model)
+	if err != nil {
+		return nil, err
+	}
+	return New(temp)
 }

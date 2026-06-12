@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ephemera-ai/ephemera/internal/util"
 )
 
 const ProjectManifestVersion = 1
@@ -86,7 +88,7 @@ func DiscoverProjectManifest(root, configuredTest string) ProjectManifest {
 	}
 	addTest := func(command string) {
 		command = strings.TrimSpace(command)
-		if command != "" && !contains(manifest.Tests, command) {
+		if command != "" && !util.Contains(manifest.Tests, command) {
 			manifest.Tests = append(manifest.Tests, command)
 		}
 	}
@@ -172,11 +174,11 @@ func (m ProjectManifest) normalized() ProjectManifest {
 	if m.Version == 0 {
 		m.Version = ProjectManifestVersion
 	}
-	m.Bootstrap = uniqueNonEmpty(m.Bootstrap)
-	m.Build = uniqueNonEmpty(m.Build)
-	m.Tests = uniqueNonEmpty(m.Tests)
-	m.Lint = uniqueNonEmpty(m.Lint)
-	m.ProtectedPaths = uniqueNonEmpty(m.ProtectedPaths)
+	m.Bootstrap = util.DedupStrings(m.Bootstrap)
+	m.Build = util.DedupStrings(m.Build)
+	m.Tests = util.DedupStrings(m.Tests)
+	m.Lint = util.DedupStrings(m.Lint)
+	m.ProtectedPaths = util.DedupStrings(m.ProtectedPaths)
 	if len(m.ProtectedPaths) == 0 {
 		m.ProtectedPaths = []string{".git", ".env", ".env.*", ".ephemera/secrets"}
 	}
@@ -258,29 +260,6 @@ func (m ProjectManifest) Summary() string {
 		lines = append(lines, "Protected paths: "+strings.Join(m.ProtectedPaths, ", "))
 	}
 	return strings.Join(lines, "\n")
-}
-
-func uniqueNonEmpty(values []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			continue
-		}
-		seen[value] = true
-		out = append(out, value)
-	}
-	return out
-}
-
-func contains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func fileExists(path string) bool {

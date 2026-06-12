@@ -103,6 +103,14 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/agent auto", "run every requested tool immediately"}, {"/agent safe", "require approval for writes and shell"}, {"/agent status", "show agent settings"}},
 	},
 	{
+		Name: "/subagent", Usage: "<on|off|status|auto|model|steps|tokens>", Description: "route simple delegated work to a lightweight model", Category: "AGENT", Introduced: "v0.9.0", Permission: "local", Choices: []string{"on", "off", "status", "auto", "model", "steps", "tokens"},
+		Examples: []commandExample{{"/subagent on", "enable lightweight delegation"}, {"/subagent auto on", "auto-route eligible reads"}, {"/subagent model", "browse connected models"}, {"/subagent model inherit", "use the main model"}, {"/subagent steps 4", "limit delegated tool rounds"}},
+	},
+	{
+		Name: "/director", Usage: "<on|off|status|model|instrument|weight|steps>", Description: "configure a primary director with a read-only reviewer", Category: "AGENT", Introduced: "v0.9.0", Permission: "local", Choices: []string{"on", "off", "status", "model", "instrument", "weight", "steps"},
+		Examples: []commandExample{{"/director on", "enable dual-model review"}, {"/director model", "browse primary models"}, {"/director instrument", "browse reviewer models"}, {"/director weight 20", "set review influence"}},
+	},
+	{
 		Name: "/approval", Usage: "<auto|safe|read-only|workspace-write|chat>", Description: "set the agent approval policy", Category: "AGENT", Introduced: "v0.4.1", Permission: "workspace", Choices: config.ApprovalPolicyChoices(),
 		Examples: []commandExample{{"/approval auto", "approve and run every agent tool"}, {"/approval safe", "prompt before writes and shell"}},
 	},
@@ -187,8 +195,16 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/config", "inspect agent and token settings"}},
 	},
 	{
-		Name: "/memory", Description: "show project memory sources", Category: "AGENT", Introduced: "v0.4.0", Permission: "filesystem",
-		Examples: []commandExample{{"/memory", "inspect project memory guidance"}},
+		Name: "/codex", Usage: "[status|budget <tokens>]", Description: "inspect or tune the isolated Codex model bridge", Category: "PROVIDER", Introduced: "v0.9.1", Permission: "local", Choices: []string{"status", "budget"},
+		Examples: []commandExample{{"/codex", "show Codex bridge isolation and workspace authority"}, {"/codex budget 2048", "cap the requested Codex response size"}},
+	},
+	{
+		Name: "/debuglog", Usage: "[status|tail|clear]", Description: "inspect or clear per-session debug and provider-context logs", Category: "SYSTEM", Aliases: []string{"/logs"}, Introduced: "v0.9.1", Permission: "filesystem", Choices: []string{"status", "tail", "clear"},
+		Examples: []commandExample{{"/debuglog", "show this session bundle and recent events"}, {"/debuglog clear", "clear current session and global diagnostic logs"}},
+	},
+	{
+		Name: "/memory", Usage: "[add|project <preference>]", Description: "view or record durable memory", Category: "AGENT", Introduced: "v0.4.0", Permission: "filesystem", Choices: []string{"add", "project"},
+		Examples: []commandExample{{"/memory", "inspect memory sources"}, {"/memory add prefer conventional commits", "record a global preference"}, {"/memory project use pnpm", "record a workspace preference"}},
 	},
 	{
 		Name: "/budget", Usage: "<tokens>", Description: "set the context token budget", Category: "CONTEXT", Introduced: "v0.3.0", Permission: "local",
@@ -282,6 +298,10 @@ func (m *Model) commandSuggestions(raw string) []suggestion {
 		return append(prefixMatches, containsMatches...)
 	}
 
+	if nested := m.roleModelSuggestions(command, argPrefix); len(nested) > 0 {
+		return nested
+	}
+
 	spec, ok := findCommandSpec(command)
 	if !ok {
 		return nil
@@ -311,6 +331,33 @@ func (m *Model) commandSuggestions(raw string) []suggestion {
 		}
 		return out[i].Label < out[j].Label
 	})
+	return out
+}
+
+func (m *Model) roleModelSuggestions(command, argPrefix string) []suggestion {
+	fields := strings.Fields(argPrefix)
+	if len(fields) == 0 {
+		return nil
+	}
+	action := strings.ToLower(fields[0])
+	valid := command == "/subagent" && action == "model" ||
+		command == "/director" && (action == "model" || action == "instrument")
+	if !valid {
+		return nil
+	}
+	query := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(argPrefix, fields[0])))
+	out := []suggestion{{
+		Value:       command + " " + action + " inherit",
+		Label:       "inherit main model",
+		Description: "clear the dedicated route and use the active main model",
+	}}
+	for _, choice := range m.connectedModelSuggestions() {
+		if query != "" && !strings.Contains(strings.ToLower(choice.Value+" "+choice.Label+" "+choice.Description), query) {
+			continue
+		}
+		choice.Value = command + " " + action + " " + choice.Value
+		out = append(out, choice)
+	}
 	return out
 }
 
@@ -610,6 +657,48 @@ func argumentDescription(command, choice string) string {
 		return "connect to " + choice
 	case "/mode":
 		return "reasoning profile"
+	case "/subagent":
+		switch choice {
+		case "on", "off":
+			return "toggle lightweight read-only routing"
+		case "model":
+			return "select a remembered specialist model"
+		case "steps":
+			return "set delegated agent rounds (1-8)"
+		case "tokens":
+			return "set delegated output cap (500-8000)"
+		default:
+			return "show lightweight routing status"
+		}
+	case "/director":
+		switch choice {
+		case "on", "off":
+			return "toggle dual-model review"
+		case "model":
+			return "select the primary director model"
+		case "instrument":
+			return "select the read-only reviewer model"
+		case "weight":
+			return "set deterministic review influence (0-100)"
+		case "steps":
+			return "set director and instrument budgets"
+		default:
+			return "show director council status"
+		}
+	case "/debuglog":
+		switch choice {
+		case "clear":
+			return "remove current and rotated diagnostic logs"
+		default:
+			return "show the diagnostic log path and recent failures"
+		}
+	case "/codex":
+		switch choice {
+		case "budget":
+			return "set the Codex bridge response target"
+		default:
+			return "show Codex bridge isolation, token, and workspace settings"
+		}
 	case "/sandbox":
 		return "execution isolation mode"
 	case "/dry-run", "/tdd", "/learn":

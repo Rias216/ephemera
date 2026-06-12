@@ -15,7 +15,9 @@ import (
 	"strings"
 )
 
-func (r Registry) grepRegex(call Call) Result {
+func (r Registry) grepRegex(call Call) Result { return r.grepRegexStream(call, nil) }
+
+func (r Registry) grepRegexStream(call Call, emit func(string)) Result {
 	pattern := strings.TrimSpace(argString(call, "pattern"))
 	if pattern == "" {
 		return fail(call.Name, "pattern is required")
@@ -27,7 +29,7 @@ func (r Registry) grepRegex(call Call) Result {
 	if err != nil {
 		return fail(call.Name, "invalid regular expression: "+err.Error())
 	}
-	return r.regexSearch(call, expression)
+	return r.regexSearchStream(call, expression, emit)
 }
 
 func (r Registry) findSymbol(call Call) Result {
@@ -69,6 +71,10 @@ func (r Registry) findRefs(call Call) Result {
 }
 
 func (r Registry) regexSearch(call Call, expression *regexp.Regexp) Result {
+	return r.regexSearchStream(call, expression, nil)
+}
+
+func (r Registry) regexSearchStream(call Call, expression *regexp.Regexp, emit func(string)) Result {
 	root, err := r.safePath(argStringDefault(call, "path", "."))
 	if err != nil {
 		return fail(call.Name, err.Error())
@@ -98,7 +104,11 @@ func (r Registry) regexSearch(call Call, expression *regexp.Regexp) Result {
 			lineNo++
 			line := scanner.Text()
 			if expression.MatchString(line) {
-				matches = append(matches, fmt.Sprintf("%s:%d:%s", filepath.ToSlash(rel), lineNo, strings.TrimSpace(line)))
+				match := fmt.Sprintf("%s:%d:%s", filepath.ToSlash(rel), lineNo, strings.TrimSpace(line))
+				matches = append(matches, match)
+				if emit != nil {
+					emit(match + "\n")
+				}
 				if len(matches) >= maxItems {
 					_ = file.Close()
 					return filepath.SkipAll

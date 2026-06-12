@@ -76,6 +76,7 @@ func (m *Model) rollbackLatestSnapshot() {
 	}
 	report, err := agent.RollbackWorkspaceSnapshot(path)
 	if err != nil {
+		m.recordError("workspace rollback failed", err, map[string]any{"snapshot_path": path})
 		m.status = "Rollback failed: " + err.Error()
 		return
 	}
@@ -106,6 +107,7 @@ func (m *Model) rebuildSemanticIndex() {
 	m.cfg.AgentSemanticIndex = true
 	path := filepath.Join(m.workspaceRoot(), ".ephemera", "codebase-index.json")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		m.recordError("semantic index rebuild failed", err, map[string]any{"path": path})
 		m.status = "Index rebuild failed: " + err.Error()
 		return
 	}

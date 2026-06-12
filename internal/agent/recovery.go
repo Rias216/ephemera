@@ -19,23 +19,36 @@ const (
 	errorPermanent errorClass = "permanent"
 )
 
-func classifyToolError(result tools.Result) errorClass {
+// ErrorTaxonomy is the structured recovery decision attached to failures.
+type ErrorTaxonomy struct {
+	Code      string        `json:"code"`
+	Class     errorClass    `json:"class"`
+	Provider  string        `json:"provider,omitempty"`
+	Retryable bool          `json:"retryable"`
+	Backoff   time.Duration `json:"backoff"`
+}
+
+func classifyToolErrorTaxonomy(result tools.Result) ErrorTaxonomy {
 	if result.OK {
-		return errorNone
+		return ErrorTaxonomy{Code: "ok", Class: errorNone}
 	}
 	text := strings.ToLower(result.Error + " " + result.Output)
+	taxonomy := ErrorTaxonomy{Code: "tool_failure", Class: errorPermanent}
 	switch {
-	case strings.Contains(text, "deadline") || strings.Contains(text, "timed out") || strings.Contains(text, "timeout"):
-		return errorTimeout
-	case strings.Contains(text, "permission") || strings.Contains(text, "denied") || strings.Contains(text, "approval"):
-		return errorDenied
-	case strings.Contains(text, "requires") || strings.Contains(text, "does not accept") || strings.Contains(text, "must be") || strings.Contains(text, "unknown tool"):
-		return errorInvalid
-	case strings.Contains(text, "temporar") || strings.Contains(text, "connection reset") || strings.Contains(text, "eof") || strings.Contains(text, "503") || strings.Contains(text, "429"):
-		return errorTransient
-	default:
-		return errorPermanent
+	case strings.Contains(text, "deadline"), strings.Contains(text, "timed out"), strings.Contains(text, "timeout"):
+		taxonomy.Code, taxonomy.Class, taxonomy.Retryable, taxonomy.Backoff = "timeout", errorTimeout, true, 150*time.Millisecond
+	case strings.Contains(text, "permission"), strings.Contains(text, "denied"), strings.Contains(text, "approval"):
+		taxonomy.Code, taxonomy.Class = "permission_denied", errorDenied
+	case strings.Contains(text, "requires"), strings.Contains(text, "does not accept"), strings.Contains(text, "must be"), strings.Contains(text, "unknown tool"):
+		taxonomy.Code, taxonomy.Class = "invalid_request", errorInvalid
+	case strings.Contains(text, "temporar"), strings.Contains(text, "connection reset"), strings.Contains(text, "eof"), strings.Contains(text, "503"), strings.Contains(text, "429"):
+		taxonomy.Code, taxonomy.Class, taxonomy.Retryable, taxonomy.Backoff = "transient_io", errorTransient, true, 100*time.Millisecond
 	}
+	return taxonomy
+}
+
+func classifyToolError(result tools.Result) errorClass {
+	return classifyToolErrorTaxonomy(result).Class
 }
 
 func (r Runner) executeWithRecovery(ctx context.Context, call tools.Call, iteration int, emit func(StreamUpdate)) tools.Result {
@@ -60,21 +73,27 @@ func (r Runner) executeWithRecovery(ctx context.Context, call tools.Call, iterat
 			})
 		}
 		cancel()
-		class := classifyToolError(result)
+		taxonomy := classifyToolErrorTaxonomy(result)
 		if result.Metadata == nil {
 			result.Metadata = map[string]any{}
 		}
 		result.Metadata["attempt"] = attempt
 		result.Metadata["attempts_allowed"] = attempts
-		result.Metadata["error_class"] = string(class)
+		result.Metadata["error_class"] = string(taxonomy.Class)
+		result.Metadata["error_code"] = taxonomy.Code
+		result.Metadata["retryable"] = taxonomy.Retryable
 		if result.OK {
 			result.Metadata["recovered_after_retry"] = attempt > 1
 			return result
 		}
-		if attempt >= attempts || (class != errorTransient && class != errorTimeout) || ctx.Err() != nil {
+		if attempt >= attempts || !taxonomy.Retryable || ctx.Err() != nil {
 			return result
 		}
-		timer := time.NewTimer(time.Duration(attempt*75) * time.Millisecond)
+		backoff := taxonomy.Backoff
+		if backoff <= 0 {
+			backoff = 75 * time.Millisecond
+		}
+		timer := time.NewTimer(backoff * time.Duration(attempt))
 		select {
 		case <-ctx.Done():
 			timer.Stop()

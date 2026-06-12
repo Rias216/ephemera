@@ -27,9 +27,11 @@ func (r Runner) canParallelActions(actions []modelToolAction) bool {
 	if len(actions) < 2 {
 		return false
 	}
-	caps := llm.Capabilities(r.Provider)
-	if caps.MaxParallelTools == 1 {
-		return false
+	if capable, ok := r.Provider.(llm.CapableProvider); ok {
+		caps := capable.Capabilities()
+		if caps.MaxParallelTools == 1 {
+			return false
+		}
 	}
 	seenCalls := map[string]bool{}
 	seenPaths := []string{}
@@ -106,8 +108,10 @@ func (r Runner) executeParallelActions(ctx context.Context, state *runState, act
 	if limit < 1 {
 		limit = 4
 	}
-	if providerLimit := llm.Capabilities(r.Provider).MaxParallelTools; providerLimit > 0 && limit > providerLimit {
-		limit = providerLimit
+	if capable, ok := r.Provider.(llm.CapableProvider); ok {
+		if providerLimit := capable.Capabilities().MaxParallelTools; providerLimit > 0 && limit > providerLimit {
+			limit = providerLimit
+		}
 	}
 	if limit > 8 {
 		limit = 8

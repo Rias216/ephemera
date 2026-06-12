@@ -1027,3 +1027,39 @@ func TestReconnectUsesRememberedCredentialWithoutReentry(t *testing.T) {
 		t.Fatalf("model catalog config key = %q, want remembered credential", got)
 	}
 }
+
+func TestCodexCommandUpdatesBridgeBudgetAndExplainsWorkspaceAuthority(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+
+	m := Model{cfg: config.Default(), styles: theme.New("rose")}
+	_, _ = m.handleCommand("/codex budget 1024")
+
+	if m.cfg.CodexBridgeMaxTokens != 1024 {
+		t.Fatalf("Codex bridge budget = %d, want 1024", m.cfg.CodexBridgeMaxTokens)
+	}
+	for _, want := range []string{"isolated model-only bridge", "Codex-native shell", "Ephemera then reads, writes", "1.0k tokens"} {
+		if !strings.Contains(m.notice, want) {
+			t.Fatalf("Codex notice missing %q: %s", want, m.notice)
+		}
+	}
+}
+
+func TestCodexNoticeGuidesReadOnlyPolicyRecovery(t *testing.T) {
+	cfg := config.Default()
+	cfg.ApprovalPolicy = config.ApprovalReadOnly
+	m := Model{cfg: cfg}
+
+	notice := m.codexNotice()
+	if !strings.Contains(notice, "/approval safe") || !strings.Contains(notice, "/approval workspace-write") {
+		t.Fatalf("read-only Codex notice lacks recovery commands: %s", notice)
+	}
+}
+
+func TestCommandSpecsExposeCodexAndDebugLogControls(t *testing.T) {
+	for _, name := range []string{"/codex", "/debuglog"} {
+		if _, ok := findCommandSpec(name); !ok {
+			t.Fatalf("missing command spec %s", name)
+		}
+	}
+}

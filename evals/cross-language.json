@@ -1,0 +1,26 @@
+{
+  "name": "cross-language",
+  "prompt": "Fix the Python slugify function and its test. Detect and use the Python test workflow rather than Go tooling.",
+  "setup": [
+    {
+      "path": "eval-fixtures/python/slug.py",
+      "content": "def slugify(value):\n    return value\n"
+    },
+    {
+      "path": "eval-fixtures/python/test_slug.py",
+      "content": "from slug import slugify\n\ndef test_slugify():\n    assert slugify(\"Hello World\") == \"hello-world\"\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "slug implementation",
+      "path": "eval-fixtures/python/slug.py",
+      "contains": "lower",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "subsystem": "cross-language project detection",
+    "expected_behavior": "select Python-aware edits and verification"
+  }
+}

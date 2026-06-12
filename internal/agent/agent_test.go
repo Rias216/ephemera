@@ -761,7 +761,7 @@ func TestNativeToolResultIsFedBackAsARealToolTurn(t *testing.T) {
 		{Text: "The pong game directory is empty, so the next step is to create the requested project files."},
 	}}
 	session := history.New("native-result-turn", "compatible", cfg.Model(), reasoning.ModeNormal)
-	session.Append("user", "Create a pong game in the pong game folder")
+	session.Append("user", "Inspect the pong game folder and report whether it is empty")
 
 	result := NewRunner(cfg, provider).Run(context.Background(), session)
 	if result.Pending != nil {
@@ -924,5 +924,66 @@ func TestRunStreamPublishesLiveShellOutput(t *testing.T) {
 	})
 	if result.Text != "done" || !strings.Contains(live.String(), "live-output") {
 		t.Fatalf("result=%q live=%q", result.Text, live.String())
+	}
+}
+
+type proseThenPortableWriteProvider struct {
+	nativeCalls   int
+	portableCalls int
+}
+
+func (p *proseThenPortableWriteProvider) Name() string { return "prose-then-portable" }
+
+func (p *proseThenPortableWriteProvider) Generate(_ context.Context, _ llm.Request) (string, error) {
+	p.portableCalls++
+	if p.portableCalls == 1 {
+		return `{"text":"creating file","tool_calls":[{"id":"write-1","name":"apply_patch","arguments":{"path":"hello.txt","content":"hello\n"}}]}`, nil
+	}
+	return `{"text":"Created hello.txt.","tool_calls":[]}`, nil
+}
+
+func (p *proseThenPortableWriteProvider) GenerateWithTools(_ context.Context, _ llm.Request, _ []llm.ToolSpec, _ llm.DeltaFunc) (llm.ToolDecision, error) {
+	p.nativeCalls++
+	return llm.ToolDecision{Text: "Done. The file was created."}, nil
+}
+
+func TestWorkspaceExecutionGuardRejectsPrematureProseAndUsesPortableTools(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.ApprovalPolicy = config.ApprovalAutoApprove
+	cfg.AgentAutoVerify = false
+	cfg.AgentAutoReview = false
+	cfg.AgentSelfCritique = false
+	provider := &proseThenPortableWriteProvider{}
+	session := history.New("execution-guard", provider.Name(), cfg.Model(), reasoning.ModeNormal)
+	session.Append("user", "Create the file hello.txt in this project")
+
+	result := NewRunner(cfg, provider).Run(context.Background(), session)
+	if result.Pending != nil {
+		t.Fatalf("unexpected approval: %#v", result.Pending)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "hello.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "hello\n" {
+		t.Fatalf("hello.txt = %q", content)
+	}
+	if provider.nativeCalls != 1 || provider.portableCalls < 2 {
+		t.Fatalf("native=%d portable=%d", provider.nativeCalls, provider.portableCalls)
+	}
+	if !strings.Contains(result.Text, "Created hello.txt") {
+		t.Fatalf("result = %q", result.Text)
+	}
+	var blocked bool
+	for _, event := range result.Events {
+		if event.Title == "Required tool action missing" {
+			blocked = true
+			break
+		}
+	}
+	if !blocked {
+		t.Fatalf("premature completion was not recorded: %#v", result.Events)
 	}
 }

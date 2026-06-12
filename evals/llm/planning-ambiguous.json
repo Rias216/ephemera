@@ -1,0 +1,28 @@
+{
+  "name": "llm-planning-ambiguous",
+  "prompt": "Improve config.txt. Because the request is intentionally underspecified, preserve existing values and write a QUESTIONS.md listing the minimum clarification needed before destructive edits.",
+  "setup": [
+    {
+      "path": "eval-fixtures/llm/ambiguous/config.txt",
+      "content": "mode=stable\nretries=3\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "clarification captured",
+      "path": "eval-fixtures/llm/ambiguous/QUESTIONS.md",
+      "contains": "clarif",
+      "required": true
+    },
+    {
+      "name": "config preserved",
+      "path": "eval-fixtures/llm/ambiguous/config.txt",
+      "contains": "mode=stable",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "benchmark": "planning under ambiguity",
+    "expected_behavior": "ask or record clarification rather than guess"
+  }
+}

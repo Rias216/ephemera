@@ -4,11 +4,13 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/ephemera-ai/ephemera/internal/debuglog"
 	"github.com/ephemera-ai/ephemera/internal/reasoning"
 )
 
@@ -66,6 +68,32 @@ type Config struct {
 	ShowThinking           bool                       `json:"show_thinking"`
 	ToolDetails            bool                       `json:"tool_details"`
 	MCPServers             map[string]MCPServerConfig `json:"mcp_servers,omitempty"`
+
+	// Codex runs as an isolated model bridge inside Ephemera. Ephemera owns
+	// filesystem, shell, web, and approval handling; the nested Codex process is
+	// intentionally prevented from acting as a second autonomous agent.
+	CodexBridgeMaxTokens int64 `json:"codex_bridge_max_tokens"`
+
+	// Subagent routes isolated exploration, debugging, and review through a
+	// separately selectable lightweight model. Empty route/model values inherit
+	// the active main-agent provider.
+	SubagentEnabled   bool   `json:"subagent_enabled"`
+	SubagentAutoRoute bool   `json:"subagent_auto_route"`
+	SubagentProvider  string `json:"subagent_provider,omitempty"`
+	SubagentModel     string `json:"subagent_model,omitempty"`
+	SubagentMaxSteps  int    `json:"subagent_max_steps"`
+	SubagentMaxTokens int64  `json:"subagent_max_tokens"`
+
+	// Director mode keeps the active provider in control while a second,
+	// read-only instrument model reviews major actions and proposed completion.
+	DirectorEnabled    bool   `json:"director_enabled"`
+	DirectorProvider   string `json:"director_provider,omitempty"`
+	DirectorModel      string `json:"director_model,omitempty"`
+	InstrumentProvider string `json:"instrument_provider,omitempty"`
+	InstrumentModel    string `json:"instrument_model,omitempty"`
+	InstrumentWeight   int    `json:"instrument_weight"`
+	DirectorMaxSteps   int    `json:"director_max_steps"`
+	InstrumentMaxSteps int    `json:"instrument_max_steps"`
 
 	CompatibleName string `json:"compatible_name,omitempty"`
 	CompatibleURL  string `json:"compatible_url,omitempty"`
@@ -172,7 +200,7 @@ func Default() Config {
 		MaxTokens:              4096,
 		ContextTokens:          16_000,
 		OllamaURL:              "http://localhost:11434",
-		AgentConfigVersion:     4,
+		AgentConfigVersion:     6,
 		AgentEnabled:           true,
 		ApprovalPolicy:         ApprovalApproveWrites,
 		AutoTestCommand:        "go test ./...",
@@ -202,7 +230,16 @@ func Default() Config {
 		ThemeDensity:           "comfortable",
 		ShowThinking:           true,
 		ToolDetails:            true,
+		CodexBridgeMaxTokens:   2_048,
 		MCPServers:             map[string]MCPServerConfig{},
+		SubagentEnabled:        true,
+		SubagentAutoRoute:      false,
+		SubagentMaxSteps:       4,
+		SubagentMaxTokens:      2_000,
+		DirectorEnabled:        false,
+		InstrumentWeight:       20,
+		DirectorMaxSteps:       12,
+		InstrumentMaxSteps:     2,
 		CompatibleName:         "compatible",
 		CompatibleURL:          "http://localhost:1234/v1",
 		Connections:            map[string]SavedConnection{},
@@ -352,7 +389,12 @@ func Load() (Config, error) {
 
 // Save atomically writes config.json and the separate local credential file.
 // API keys carry json:"-" tags and are never embedded in config.json.
-func Save(cfg Config) error {
+func Save(cfg Config) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			debuglog.Error("config", "save failed", retErr, nil)
+		}
+	}()
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -487,6 +529,37 @@ func (c Config) ConfigForConnection(id string) (Config, bool) {
 	c.ActiveConnection = id
 	c.applyConnection(id)
 	return c, true
+}
+
+// ConfigForRole resolves a remembered route (preferred) or provider name and
+// applies a role-specific model without mutating the active user selection.
+// Empty values inherit the current route/model.
+func (c Config) ConfigForRole(routeOrProvider, model string) (Config, error) {
+	routeOrProvider = strings.ToLower(strings.TrimSpace(routeOrProvider))
+	model = strings.TrimSpace(model)
+	if routeOrProvider != "" {
+		if routeID, ok := c.FindConnection(routeOrProvider); ok {
+			resolved, found := c.ConfigForConnection(routeID)
+			if !found {
+				return Config{}, fmt.Errorf("configured route %q is no longer available", routeOrProvider)
+			}
+			c = resolved
+		} else if ValidProvider(routeOrProvider) {
+			models := make(map[string]string, len(c.Models))
+			for provider, selected := range c.Models {
+				models[provider] = selected
+			}
+			c.Models = models
+			c.Provider = routeOrProvider
+			c.ActiveConnection = ""
+		} else {
+			return Config{}, fmt.Errorf("unknown or disconnected route %q", routeOrProvider)
+		}
+	}
+	if model != "" {
+		c.SetModel(model)
+	}
+	return c, nil
 }
 
 // ConnectedConnections returns saved routes in deterministic display order.
@@ -742,6 +815,48 @@ func (c *Config) normalize() {
 	if c.AgentTaskTokenBudget > 2_000_000 {
 		c.AgentTaskTokenBudget = 2_000_000
 	}
+	if c.CodexBridgeMaxTokens < 512 {
+		c.CodexBridgeMaxTokens = defaults.CodexBridgeMaxTokens
+	}
+	if c.CodexBridgeMaxTokens > 8_000 {
+		c.CodexBridgeMaxTokens = 8_000
+	}
+	c.SubagentProvider = strings.ToLower(strings.TrimSpace(c.SubagentProvider))
+	c.SubagentModel = strings.TrimSpace(c.SubagentModel)
+	if c.SubagentMaxSteps < 1 {
+		c.SubagentMaxSteps = 1
+	}
+	if c.SubagentMaxSteps > 8 {
+		c.SubagentMaxSteps = 8
+	}
+	if c.SubagentMaxTokens < 500 {
+		c.SubagentMaxTokens = 500
+	}
+	if c.SubagentMaxTokens > 8_000 {
+		c.SubagentMaxTokens = 8_000
+	}
+	c.DirectorProvider = strings.ToLower(strings.TrimSpace(c.DirectorProvider))
+	c.DirectorModel = strings.TrimSpace(c.DirectorModel)
+	c.InstrumentProvider = strings.ToLower(strings.TrimSpace(c.InstrumentProvider))
+	c.InstrumentModel = strings.TrimSpace(c.InstrumentModel)
+	if c.InstrumentWeight < 0 {
+		c.InstrumentWeight = 0
+	}
+	if c.InstrumentWeight > 100 {
+		c.InstrumentWeight = 100
+	}
+	if c.DirectorMaxSteps < 4 {
+		c.DirectorMaxSteps = 4
+	}
+	if c.DirectorMaxSteps > 20 {
+		c.DirectorMaxSteps = 20
+	}
+	if c.InstrumentMaxSteps < 1 {
+		c.InstrumentMaxSteps = 1
+	}
+	if c.InstrumentMaxSteps > 6 {
+		c.InstrumentMaxSteps = 6
+	}
 	// Configs written before the advanced agent settings existed have version 0.
 	// Apply the new safe defaults once, then preserve explicit false values.
 	if c.AgentConfigVersion <= 0 {
@@ -769,6 +884,19 @@ func (c *Config) normalize() {
 		c.AgentSnapshotMaxMB = defaults.AgentSnapshotMaxMB
 		c.AgentContextRecall = defaults.AgentContextRecall
 		c.SandboxMode = defaults.SandboxMode
+	}
+	if c.AgentConfigVersion < 5 {
+		c.SubagentEnabled = defaults.SubagentEnabled
+		c.SubagentMaxSteps = defaults.SubagentMaxSteps
+		c.SubagentMaxTokens = defaults.SubagentMaxTokens
+		c.InstrumentWeight = defaults.InstrumentWeight
+		c.DirectorMaxSteps = defaults.DirectorMaxSteps
+		c.InstrumentMaxSteps = defaults.InstrumentMaxSteps
+	}
+	if c.AgentConfigVersion < 6 {
+		// Automatic delegation used to be implicit. Keep it opt-in so the main
+		// agent always receives exact file/tool evidence unless the user enables it.
+		c.SubagentAutoRoute = defaults.SubagentAutoRoute
 		c.AgentConfigVersion = defaults.AgentConfigVersion
 	}
 	if c.ThemeDensity != "compact" && c.ThemeDensity != "comfortable" {

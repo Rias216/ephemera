@@ -52,3 +52,9 @@ The command exits non-zero when a required check fails, making it suitable for C
 ## Completion behavior
 
 When automatic verification is enabled, a workspace-changing run cannot complete unless its acceptance contract passes. Plain-text answers cannot bypass this gate. A blocked run retains its snapshot for continuation or rollback.
+
+## Failure diagnostics
+
+Every session is created with a crash-safe `session.json`, a correlated `debug.jsonl`, and a redacted provider-boundary `context.jsonl`. SQLite is only a searchable index, so an index outage cannot block recovery. Open paths and recent records with `/debuglog`; see [`DEBUG_LOGGING.md`](DEBUG_LOGGING.md) for format, retention, and privacy behavior.
+
+Codex routes use an isolated model-only bridge so Ephemera remains the sole workspace/tool authority. See [`CODEX_BRIDGE.md`](CODEX_BRIDGE.md) for permission and token behavior.

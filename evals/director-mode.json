@@ -1,0 +1,27 @@
+{
+  "name": "director-mode",
+  "prompt": "Review and fix the divide function so division by zero returns an error rather than panicking. Add a concise test.",
+  "setup": [
+    {
+      "path": "eval-fixtures/director/divide.go",
+      "content": "package director\n\nfunc Divide(a, b int) int { return a / b }\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "zero handling added",
+      "path": "eval-fixtures/director/divide.go",
+      "contains": "error",
+      "required": true
+    },
+    {
+      "name": "test added",
+      "path": "eval-fixtures/director/divide_test.go",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "subsystem": "director mode",
+    "expected_behavior": "instrument identifies missing zero handling and director incorporates it"
+  }
+}

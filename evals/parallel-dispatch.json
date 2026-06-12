@@ -1,0 +1,30 @@
+{
+  "name": "parallel-dispatch",
+  "prompt": "Read a.txt, b.txt, and c.txt independently, then write their values in order to summary.txt. Use parallel reads when available.",
+  "setup": [
+    {
+      "path": "eval-fixtures/parallel/a.txt",
+      "content": "alpha\n"
+    },
+    {
+      "path": "eval-fixtures/parallel/b.txt",
+      "content": "beta\n"
+    },
+    {
+      "path": "eval-fixtures/parallel/c.txt",
+      "content": "gamma\n"
+    }
+  ],
+  "checks": [
+    {
+      "name": "all reads incorporated",
+      "path": "eval-fixtures/parallel/summary.txt",
+      "contains": "alpha beta gamma",
+      "required": true
+    }
+  ],
+  "metadata": {
+    "subsystem": "parallel dispatch",
+    "expected_behavior": "dispatch independent reads concurrently"
+  }
+}

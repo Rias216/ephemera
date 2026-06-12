@@ -82,8 +82,14 @@ func (m Model) renderMetaRail() string {
 	}
 	candidates := []string{
 		m.renderChip("model", clip(m.cfg.Model(), 26)),
-		m.renderChip("session", clip(m.session.Name, 22)),
 	}
+	if m.cfg.SubagentEnabled {
+		candidates = append(candidates, m.renderChip("sub", clip(firstNonEmpty(m.cfg.SubagentModel, "inherit"), 18)))
+	}
+	if m.cfg.DirectorEnabled {
+		candidates = append(candidates, m.renderChip("council", clip(firstNonEmpty(m.cfg.InstrumentModel, "inherit"), 18)))
+	}
+	candidates = append(candidates, m.renderChip("session", clip(m.session.Name, 22)))
 	if m.connect != nil {
 		step, total := m.connectProgress()
 		candidates = append(candidates, m.renderChip("setup", fmt.Sprintf("%d/%d %s", step, total, strings.ToLower(m.connectStepTitle()))))
