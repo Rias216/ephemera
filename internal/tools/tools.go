@@ -252,6 +252,9 @@ func (r Registry) Execute(ctx context.Context, call Call) Result {
 	finish := func(result Result, risk Risk) Result {
 		result.Tool = call.Name
 		result.Duration = time.Since(started)
+		if result.OK && strings.TrimSpace(result.Output) == "" {
+			result.Output = emptySuccessOutput(call.Name)
+		}
 		result.Output = truncateApproxTokens(result.Output, r.MaxOutputTokens)
 		result.Error = truncateApproxTokens(result.Error, r.MaxOutputTokens)
 		if result.Metadata == nil {
@@ -338,7 +341,10 @@ func (r Registry) listFiles(call Call) Result {
 		return fail(call.Name, err.Error())
 	}
 	sort.Strings(files)
-	return ok(call.Name, strings.Join(files, "\n"))
+	result := ok(call.Name, strings.Join(files, "\n"))
+	requested := filepath.ToSlash(filepath.Clean(argStringDefault(call, "path", ".")))
+	result.Metadata = map[string]any{"path": requested, "count": len(files), "max": maxItems}
+	return result
 }
 
 func (r Registry) tree(call Call) Result {
@@ -379,7 +385,10 @@ func (r Registry) tree(call Call) Result {
 	if err != nil {
 		return fail(call.Name, err.Error())
 	}
-	return ok(call.Name, strings.Join(lines, "\n"))
+	result := ok(call.Name, strings.Join(lines, "\n"))
+	requested := filepath.ToSlash(filepath.Clean(argStringDefault(call, "path", ".")))
+	result.Metadata = map[string]any{"path": requested, "entries": len(lines), "depth": depth}
+	return result
 }
 
 func (r Registry) readFile(call Call) Result {
@@ -449,7 +458,10 @@ func (r Registry) search(call Call) Result {
 		}
 		return nil
 	})
-	return ok(call.Name, strings.Join(matches, "\n"))
+	result := ok(call.Name, strings.Join(matches, "\n"))
+	requested := filepath.ToSlash(filepath.Clean(argStringDefault(call, "path", ".")))
+	result.Metadata = map[string]any{"path": requested, "query": query, "matches": len(matches), "max": maxItems}
+	return result
 }
 
 func (r Registry) applyPatch(call Call) Result {
@@ -747,6 +759,29 @@ func truncateApproxTokens(value string, maxTokens int) string {
 		return strings.TrimRight(value, "\r\n")
 	}
 	return strings.TrimRight(value[:maxChars], "\r\n") + "\n... truncated ..."
+}
+
+func emptySuccessOutput(tool string) string {
+	switch tool {
+	case "list_files":
+		return "No files found in the requested path. The directory exists and is empty or contains only ignored directories."
+	case "tree":
+		return "The requested path contains no visible entries."
+	case "search":
+		return "No matches found for the requested query."
+	case "read_file":
+		return "The requested file or line range is empty."
+	case "git_status":
+		return "Working tree clean; git status returned no changes."
+	case "git_diff":
+		return "No unstaged diff; git diff returned no changes."
+	case "go_test":
+		return "Verification command completed successfully with no output."
+	case "shell":
+		return "Command completed successfully with no output."
+	default:
+		return "Tool completed successfully with no output."
+	}
 }
 
 func ok(tool, output string) Result {

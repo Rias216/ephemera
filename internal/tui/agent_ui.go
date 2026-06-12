@@ -230,7 +230,7 @@ func (m Model) renderLiveAgent(renderer cliRenderer) []string {
 		}))
 	}
 	if m.cfg.ShowThinking {
-		thought := firstNonEmpty(strings.TrimSpace(m.liveAgent.Thought), latestReasoningPreview(m.liveAgent.Reasoning))
+		thought := m.liveThoughtPreview()
 		if thought != "" {
 			rows = append(rows, renderer.paintRow(cliLine{
 				{text: "  thinking · ", style: cliStyle{foreground: m.styles.AccentBright, bold: true}},
@@ -788,6 +788,8 @@ func (m Model) configNotice() string {
 	return fmt.Sprintf(`### Config
 
 - Provider/model: %s / %s
+- Active route: %s
+- Remembered routes: %d
 - Mode/theme: %s / %s
 - Agent enabled: %t
 - Approval policy: %s
@@ -805,6 +807,8 @@ func (m Model) configNotice() string {
 - Theme density: %s`,
 		m.providerName(),
 		m.cfg.Model(),
+		m.cfg.ActiveConnection,
+		len(m.cfg.ConnectedConnections()),
 		m.cfg.Mode,
 		m.cfg.Theme,
 		m.cfg.AgentEnabled,

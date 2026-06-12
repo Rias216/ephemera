@@ -21,31 +21,34 @@ type agentStreamMsg struct {
 }
 
 type liveAgentState struct {
-	Active          bool
-	RunID           string
-	Phase           string
-	Iteration       int
-	Tool            string
-	Partial         string
-	ReceivedChars   int
-	ContextTokens   int
-	OutputTokens    int
-	SentMessages    int
-	TotalMessages   int
-	DroppedMessages int
-	StartedAt       time.Time
-	UpdatedAt       time.Time
-	LastPaint       time.Time
-	Err             string
-	Goal            string
-	Summary         string
-	Thought         string
-	Reasoning       string
-	ReasoningChars  int
-	Trace           history.AgentTrace
-	Plan            string
-	Verification    string
-	Verified        bool
+	Active            bool
+	RunID             string
+	Phase             string
+	Iteration         int
+	Tool              string
+	Partial           string
+	ReceivedChars     int
+	ContextTokens     int
+	OutputTokens      int
+	SentMessages      int
+	TotalMessages     int
+	DroppedMessages   int
+	StartedAt         time.Time
+	UpdatedAt         time.Time
+	LastPaint         time.Time
+	Err               string
+	Goal              string
+	Summary           string
+	Thought           string
+	Activity          string
+	ThoughtUpdatedAt  time.Time
+	ActivityUpdatedAt time.Time
+	Reasoning         string
+	ReasoningChars    int
+	Trace             history.AgentTrace
+	Plan              string
+	Verification      string
+	Verified          bool
 }
 
 func waitAgentStream(ch <-chan agent.StreamUpdate) tea.Cmd {
@@ -67,11 +70,13 @@ func (m *Model) generateCmd() tea.Cmd {
 	m.agentCancel = cancel
 	now := time.Now()
 	m.liveAgent = liveAgentState{
-		Active:    true,
-		Phase:     "starting",
-		Iteration: 1,
-		StartedAt: now,
-		UpdatedAt: now,
+		Active:            true,
+		Phase:             "starting",
+		Iteration:         1,
+		StartedAt:         now,
+		UpdatedAt:         now,
+		Activity:          "Starting the model stream…",
+		ActivityUpdatedAt: now,
 	}
 	m.session.Agent = history.AgentSnapshot{
 		Status:    "running",
@@ -125,10 +130,14 @@ func (m *Model) generateCmd() tea.Cmd {
 			}
 			kind := agent.StreamDelta
 			phase := "receiving model"
-			if delta.Kind == llm.DeltaReasoning {
+			switch delta.Kind {
+			case llm.DeltaReasoning:
 				kind = agent.StreamReasoning
 				phase = "reasoning"
-			} else {
+			case llm.DeltaActivity:
+				kind = agent.StreamActivity
+				phase = "preparing response"
+			default:
 				outputRunes += len([]rune(delta.Text))
 			}
 			emit(agent.StreamUpdate{
@@ -176,6 +185,9 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 		m.liveAgent.Goal = ""
 		m.liveAgent.Summary = ""
 		m.liveAgent.Thought = ""
+		m.liveAgent.Activity = "Analyzing the request…"
+		m.liveAgent.ThoughtUpdatedAt = time.Time{}
+		m.liveAgent.ActivityUpdatedAt = now
 		m.liveAgent.Reasoning = ""
 		m.liveAgent.ReasoningChars = 0
 		m.liveAgent.Trace = history.AgentTrace{}
@@ -192,6 +204,12 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 	m.liveAgent.UpdatedAt = now
 	if update.Phase != "" {
 		m.liveAgent.Phase = update.Phase
+		if activity := phaseActivity(update.Phase, update.Tool); activity != "" {
+			if activity != m.liveAgent.Activity {
+				m.liveAgent.Activity = activity
+				m.liveAgent.ActivityUpdatedAt = now
+			}
+		}
 	}
 	if update.Iteration > 0 {
 		m.liveAgent.Iteration = update.Iteration
@@ -219,7 +237,14 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 		if len(m.liveAgent.Partial) > maxPartial {
 			m.liveAgent.Partial = m.liveAgent.Partial[len(m.liveAgent.Partial)-maxPartial:]
 		}
+		previousThought := m.liveAgent.Thought
 		m.updateDecisionPreview()
+		if m.liveAgent.Thought != previousThought {
+			m.liveAgent.ThoughtUpdatedAt = now
+		} else if strings.TrimSpace(m.liveAgent.Thought) == "" {
+			m.liveAgent.Activity = fmt.Sprintf("Receiving the model response · %d chars", m.liveAgent.ReceivedChars)
+			m.liveAgent.ActivityUpdatedAt = now
+		}
 	}
 	if update.Delta != "" && update.Kind == agent.StreamReasoning {
 		m.liveAgent.ReasoningChars += len([]rune(update.Delta))
@@ -229,6 +254,11 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 			m.liveAgent.Reasoning = m.liveAgent.Reasoning[len(m.liveAgent.Reasoning)-maxReasoning:]
 		}
 		m.liveAgent.Thought = latestReasoningPreview(m.liveAgent.Reasoning)
+		m.liveAgent.ThoughtUpdatedAt = now
+	}
+	if update.Delta != "" && update.Kind == agent.StreamActivity {
+		m.liveAgent.Activity = lastLineCompact(update.Delta, 180)
+		m.liveAgent.ActivityUpdatedAt = now
 	}
 
 	atBottom := m.viewport.AtBottom()
@@ -236,7 +266,7 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 	case agent.StreamStatus:
 		m.status = m.liveStatusText()
 		m.refreshViewport(atBottom)
-	case agent.StreamDelta, agent.StreamReasoning:
+	case agent.StreamDelta, agent.StreamReasoning, agent.StreamActivity:
 		m.status = m.liveStatusText()
 		// Rebuilding the full transcript for every token is expensive. Repaint at
 		// a terminal-friendly cadence while the footer still updates every event.
@@ -345,6 +375,49 @@ func (m *Model) upsertStreamEvent(event history.Event) {
 		}
 	}
 	m.session.AppendEvent(event)
+}
+
+func phaseActivity(phase, tool string) string {
+	tool = strings.TrimSpace(tool)
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "starting":
+		return "Starting the model stream…"
+	case "deliberating", "requesting model":
+		return "Analyzing the request…"
+	case "reasoning":
+		return "Receiving a reasoning summary…"
+	case "receiving decision", "receiving model":
+		return "Receiving the model response…"
+	case "preparing action":
+		if tool != "" {
+			return "Preparing " + tool + "…"
+		}
+		return "Preparing the next action…"
+	case "parsing decision":
+		return "Parsing the next action…"
+	case "reviewing results":
+		return "Reviewing the latest tool result…"
+	case "answering directly":
+		return "Responding without starting the agent loop…"
+	case "verifying":
+		return "Verifying the result…"
+	}
+	return ""
+}
+
+func (m Model) liveThoughtPreview() string {
+	thought := strings.TrimSpace(m.liveAgent.Thought)
+	activity := strings.TrimSpace(m.liveAgent.Activity)
+	if activity != "" && (thought == "" || m.liveAgent.ActivityUpdatedAt.After(m.liveAgent.ThoughtUpdatedAt)) {
+		return activity
+	}
+	if thought != "" {
+		return thought
+	}
+	if activity != "" {
+		return activity
+	}
+	return phaseActivity(m.liveAgent.Phase, m.liveAgent.Tool)
 }
 
 func compactLiveError(value string) string {

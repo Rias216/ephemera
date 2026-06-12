@@ -96,7 +96,11 @@ func (p *OpenAI) GenerateWithTools(ctx context.Context, req Request, specs []Too
 		text, err := p.GenerateStream(ctx, req, onDelta)
 		return ToolDecision{Text: text}, err
 	}
-	if p.baseURL == "" {
+	if p.baseURL == "" && !hasNativeToolHistory(req.Messages) {
+		// Responses provides the best first-round reasoning-summary stream. After
+		// a tool call, use Chat Completions so the complete assistant tool_call →
+		// tool result sequence can be replayed without provider-private reasoning
+		// items or a server-side previous_response_id.
 		return p.generateResponsesStream(ctx, req, specs, onDelta)
 	}
 	return p.generateChatCompletionsStream(ctx, req, specs, onDelta)
@@ -122,12 +126,45 @@ func (p *OpenAI) resolvedAPIKey() (string, error) {
 	return key, nil
 }
 
-func openAIWireMessages(req Request) []map[string]string {
-	messages := make([]map[string]string, 0, len(req.Messages)+1)
-	messages = append(messages, map[string]string{"role": "system", "content": req.System})
+func openAIWireMessages(req Request) []map[string]any {
+	messages := make([]map[string]any, 0, len(req.Messages)+1)
+	messages = append(messages, map[string]any{"role": "system", "content": req.System})
 	for _, message := range req.Messages {
-		if message.Role == "user" || message.Role == "assistant" {
-			messages = append(messages, map[string]string{"role": message.Role, "content": message.Content})
+		switch message.Role {
+		case "user":
+			messages = append(messages, map[string]any{"role": "user", "content": message.Content})
+		case "assistant":
+			wire := map[string]any{"role": "assistant"}
+			if strings.TrimSpace(message.Content) != "" {
+				wire["content"] = message.Content
+			} else {
+				wire["content"] = nil
+			}
+			if len(message.ToolCalls) > 0 {
+				calls := make([]map[string]any, 0, len(message.ToolCalls))
+				for index, call := range message.ToolCalls {
+					calls = append(calls, map[string]any{
+						"id":   stableToolCallID(call, index),
+						"type": "function",
+						"function": map[string]any{
+							"name":      call.Name,
+							"arguments": toolArgumentsJSON(call.Arguments),
+						},
+					})
+				}
+				wire["tool_calls"] = calls
+			}
+			messages = append(messages, wire)
+		case "tool":
+			if message.ToolResult == nil {
+				continue
+			}
+			result := *message.ToolResult
+			messages = append(messages, map[string]any{
+				"role":         "tool",
+				"tool_call_id": result.ID,
+				"content":      toolResultContent(result),
+			})
 		}
 	}
 	return messages

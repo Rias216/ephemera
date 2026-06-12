@@ -35,6 +35,7 @@ type nativeToolProvider struct {
 	decisions []llm.ToolDecision
 	calls     int
 	specs     []llm.ToolSpec
+	requests  []llm.Request
 }
 
 func (p *nativeToolProvider) Name() string { return "native-fake" }
@@ -43,8 +44,9 @@ func (p *nativeToolProvider) Generate(context.Context, llm.Request) (string, err
 	return `{"final":"fallback"}`, nil
 }
 
-func (p *nativeToolProvider) GenerateWithTools(_ context.Context, _ llm.Request, specs []llm.ToolSpec, emit llm.DeltaFunc) (llm.ToolDecision, error) {
+func (p *nativeToolProvider) GenerateWithTools(_ context.Context, req llm.Request, specs []llm.ToolSpec, emit llm.DeltaFunc) (llm.ToolDecision, error) {
 	p.specs = specs
+	p.requests = append(p.requests, req)
 	if p.calls >= len(p.decisions) {
 		return llm.ToolDecision{Text: `{"final":"done"}`}, nil
 	}
@@ -354,17 +356,17 @@ func TestDoomLoopGuardStopsIdenticalCalls(t *testing.T) {
 	session.Append("user", "inspect x")
 
 	result := NewRunner(cfg, provider).Run(context.Background(), session)
-	if result.Text != "stopped repeating" {
-		t.Fatalf("result = %q", result.Text)
+	if !strings.Contains(strings.ToLower(result.Text), "stopped") {
+		t.Fatalf("result = %q, want an early convergence stop", result.Text)
 	}
 	var guarded bool
 	for _, event := range result.Events {
-		if event.Type == "tool_result" && strings.Contains(event.Content, "doom-loop guard") {
+		if event.Type == "tool_result" && strings.Contains(event.Content, "duplicate read suppressed") {
 			guarded = true
 		}
 	}
 	if !guarded {
-		t.Fatal("expected doom-loop guard event")
+		t.Fatal("expected duplicate-read guard event")
 	}
 }
 
@@ -644,5 +646,216 @@ func TestConversationMessagesDropsLegacyApprovalControlText(t *testing.T) {
 		if strings.Contains(message.Content, "Approval required") {
 			t.Fatalf("legacy approval control text leaked into model context: %#v", got)
 		}
+	}
+}
+
+func TestPlainTextDirectAnswerCompletesInOneModelRound(t *testing.T) {
+	cfg := config.Default()
+	cfg.AgentEnabled = true
+	provider := &fakeProvider{responses: []string{"A goroutine is a lightweight concurrently executing function in Go."}}
+	session := history.New("direct-answer", "ollama", cfg.Model(), reasoning.ModeNormal)
+	session.Append("user", "What is a goroutine?")
+
+	var updates []StreamUpdate
+	result := NewRunner(cfg, provider).RunStream(context.Background(), session, func(update StreamUpdate) {
+		updates = append(updates, update)
+	})
+
+	if provider.calls != 1 {
+		t.Fatalf("provider calls = %d, want exactly one", provider.calls)
+	}
+	if !strings.Contains(result.Text, "lightweight") {
+		t.Fatalf("result = %q", result.Text)
+	}
+	for _, event := range result.Events {
+		if event.Type == history.EventDecision && event.Status == "error" {
+			t.Fatalf("direct answer entered structured decision retry: %#v", result.Events)
+		}
+	}
+	if len(updates) == 0 {
+		t.Fatal("expected live stream updates")
+	}
+}
+
+func TestUnfinishedActionNarrationStillRequestsStructuredRetry(t *testing.T) {
+	for _, text := range []string{
+		"I'll inspect the repository and then answer.",
+		"Let me run the tests first.",
+		"I need to read main.go before I can fix it.",
+	} {
+		if !looksLikeUnfinishedActionNarration(text) {
+			t.Fatalf("%q should be treated as unfinished action narration", text)
+		}
+	}
+	for _, text := range []string{
+		"Hello! How can I help?",
+		"A goroutine is a lightweight function.",
+		"I will explain the concept directly.",
+	} {
+		if looksLikeUnfinishedActionNarration(text) {
+			t.Fatalf("%q should be accepted as a direct answer", text)
+		}
+	}
+}
+
+func TestNativeProviderDirectAnswerCompletesWithoutJSONRetry(t *testing.T) {
+	cfg := config.Default()
+	cfg.AgentEnabled = true
+	provider := &nativeToolProvider{decisions: []llm.ToolDecision{{Text: "Hello there."}}}
+	session := history.New("native-direct", "openai", cfg.Model(), reasoning.ModeNormal)
+	session.Append("user", "hello")
+
+	result := NewRunner(cfg, provider).Run(context.Background(), session)
+	if provider.calls != 1 {
+		t.Fatalf("provider calls = %d, want one", provider.calls)
+	}
+	if result.Text != "Hello there." {
+		t.Fatalf("result = %q", result.Text)
+	}
+}
+
+func TestRepeatedFailedDecisionStopsBeforeStepLimit(t *testing.T) {
+	cfg := config.Default()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.AgentEnabled = true
+	cfg.AgentLoopLimit = 1
+	cfg.AgentMaxSteps = 10
+	cfg.AgentAutoVerify = false
+	cfg.AgentAutoReview = false
+	provider := &fakeProvider{responses: []string{
+		`{"summary":"inspect","actions":[{"tool":"read_file","arguments":{}}]}`,
+		`{"summary":"inspect","actions":[{"tool":"read_file","arguments":{}}]}`,
+		`{"summary":"inspect","actions":[{"tool":"read_file","arguments":{}}]}`,
+		`{"summary":"inspect","actions":[{"tool":"read_file","arguments":{}}]}`,
+	}}
+	session := history.New("stalled", "ollama", cfg.Model(), reasoning.ModeNormal)
+	session.Append("user", "inspect it")
+
+	result := NewRunner(cfg, provider).Run(context.Background(), session)
+	if provider.calls >= cfg.AgentMaxSteps {
+		t.Fatalf("provider calls = %d, loop reached the full step limit", provider.calls)
+	}
+	if !strings.Contains(strings.ToLower(result.Text), "stopped") {
+		t.Fatalf("result = %q, want a clear convergence stop", result.Text)
+	}
+}
+
+func TestNativeToolResultIsFedBackAsARealToolTurn(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pong game"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.AgentEnabled = true
+	cfg.AgentAutoVerify = false
+	cfg.AgentAutoReview = false
+	provider := &nativeToolProvider{decisions: []llm.ToolDecision{
+		{ToolCalls: []llm.ToolCall{{
+			ID:        "call-list",
+			Name:      "list_files",
+			Arguments: map[string]any{"path": "pong game"},
+		}}},
+		{Text: "The pong game directory is empty, so the next step is to create the requested project files."},
+	}}
+	session := history.New("native-result-turn", "compatible", cfg.Model(), reasoning.ModeNormal)
+	session.Append("user", "Create a pong game in the pong game folder")
+
+	result := NewRunner(cfg, provider).Run(context.Background(), session)
+	if result.Pending != nil {
+		t.Fatalf("unexpected approval: %#v", result.Pending)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(provider.requests))
+	}
+	second := provider.requests[1]
+	var sawCall, sawResult bool
+	for _, message := range second.Messages {
+		if message.Role == "assistant" && len(message.ToolCalls) == 1 && message.ToolCalls[0].ID == "call-list" {
+			sawCall = true
+		}
+		if message.Role == "tool" && message.ToolResult != nil && message.ToolResult.ID == "call-list" {
+			sawResult = true
+			if !message.ToolResult.OK {
+				t.Fatalf("tool result was not successful: %#v", message.ToolResult)
+			}
+			if !strings.Contains(message.ToolResult.Output, "No files found") {
+				t.Fatalf("tool result output = %q", message.ToolResult.Output)
+			}
+		}
+	}
+	if !sawCall || !sawResult {
+		t.Fatalf("second request did not contain native call/result history: %#v", second.Messages)
+	}
+	if !strings.Contains(result.Text, "directory is empty") {
+		t.Fatalf("result = %q", result.Text)
+	}
+}
+
+func TestRepeatedReadUsesCachedEvidenceBeforeLoopGuard(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.WorkspaceRoot = root
+	cfg.AgentEnabled = true
+	cfg.AgentLoopLimit = 2
+	cfg.AgentAutoVerify = false
+	cfg.AgentAutoReview = false
+	provider := &nativeToolProvider{decisions: []llm.ToolDecision{
+		{ToolCalls: []llm.ToolCall{{ID: "list-1", Name: "list_files", Arguments: map[string]any{"path": "."}}}},
+		{ToolCalls: []llm.ToolCall{{ID: "list-2", Name: "list_files", Arguments: map[string]any{"path": "."}}}},
+		{Text: "The workspace contains main.go."},
+	}}
+	session := history.New("cached-read", "compatible", cfg.Model(), reasoning.ModeNormal)
+	session.Append("user", "What files are here?")
+
+	result := NewRunner(cfg, provider).Run(context.Background(), session)
+	if !strings.Contains(result.Text, "main.go") {
+		t.Fatalf("result = %q", result.Text)
+	}
+	var cacheHit bool
+	for _, event := range result.Events {
+		if event.Type == history.EventToolResult && metadataBool(event.Metadata, "cache_hit") {
+			cacheHit = true
+			if event.Status != "done" || !strings.Contains(event.Content, "main.go") {
+				t.Fatalf("cached event = %#v", event)
+			}
+		}
+	}
+	if !cacheHit {
+		t.Fatalf("events = %#v, want cached duplicate read result", result.Events)
+	}
+	for _, spec := range provider.specs {
+		if spec.Name == "list_files" {
+			t.Fatal("list_files remained available after an exact duplicate discovery call")
+		}
+	}
+}
+
+func TestReconstructNativeTurnsSkipsPendingApprovalCalls(t *testing.T) {
+	callID := "call-pending"
+	events := []history.Event{
+		{
+			Type:   history.EventToolCall,
+			Tool:   "apply_patch",
+			Status: "pending",
+			Metadata: map[string]any{
+				"provider_call_id": callID,
+				"tool_arguments":   map[string]any{"path": "main.go", "content": "package main\n"},
+			},
+		},
+		{
+			Type:   history.EventApprovalRequest,
+			Tool:   "apply_patch",
+			Status: "pending",
+			Metadata: map[string]any{
+				"provider_call_id": callID,
+			},
+		},
+	}
+	if turns := reconstructNativeToolTurns(events); len(turns) != 0 {
+		t.Fatalf("pending native call leaked into provider history: %#v", turns)
 	}
 }

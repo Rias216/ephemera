@@ -223,3 +223,24 @@ func TestFingerprintIsStableCompactAndArgumentSensitive(t *testing.T) {
 		t.Fatalf("fingerprint is not compact/redacted: %q", first)
 	}
 }
+
+func TestListFilesReturnsExplicitEmptyDirectoryEvidence(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pong game"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(config.Config{WorkspaceRoot: root, ApprovalPolicy: config.ApprovalAutoApprove})
+	result := registry.Execute(context.Background(), Call{
+		Name:      "list_files",
+		Arguments: map[string]any{"path": "pong game"},
+	})
+	if !result.OK {
+		t.Fatalf("result = %#v", result)
+	}
+	if !strings.Contains(result.Output, "No files found") {
+		t.Fatalf("output = %q", result.Output)
+	}
+	if result.Metadata["count"] != 0 {
+		t.Fatalf("metadata = %#v", result.Metadata)
+	}
+}

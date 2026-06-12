@@ -138,7 +138,7 @@ func (m Model) footerPaneSummary() (string, string) {
 			fmt.Sprintf("events %d · msgs %d", len(m.session.Events), len(m.session.Messages))
 	case inspectorThinking:
 		if m.liveAgent.Active {
-			preview := firstNonEmpty(m.liveAgent.Thought, m.liveGoalPreview())
+			preview := firstNonEmpty(m.liveThoughtPreview(), m.liveGoalPreview())
 			return "beneath the surface · " + lastLineCompact(preview, 96), fmt.Sprintf("round %d · %s", max(1, m.liveAgent.Iteration), firstNonEmpty(m.liveAgent.Phase, "working"))
 		}
 		if snapshot := m.session.Agent; strings.TrimSpace(snapshot.Reasoning) != "" || strings.TrimSpace(snapshot.Goal) != "" || !snapshot.Trace.Empty() {
@@ -203,7 +203,7 @@ func (m Model) footerPaneDetail() (string, string) {
 			}
 		}
 		if m.liveAgent.Active {
-			goal = firstNonEmpty(m.liveAgent.Thought, m.liveGoalPreview())
+			goal = firstNonEmpty(m.liveThoughtPreview(), m.liveGoalPreview())
 			phase = fmt.Sprintf("%s · ~%s generated", firstNonEmpty(m.liveAgent.Phase, "working"), formatTokenCount(m.liveAgent.OutputTokens))
 			if strings.TrimSpace(m.liveAgent.Plan) != "" {
 				plan = "plan · " + firstLineCompact(m.liveAgent.Plan, 96)
@@ -219,7 +219,7 @@ func (m Model) footerPaneDetail() (string, string) {
 		return "Ctrl+Y copy · Ctrl+L clear · Ctrl+X stop · Ctrl+C quit · /agent auto enables full auto-approve", "timeline focus keeps composer safe"
 	default:
 		if m.liveAgent.Active && m.cfg.ShowThinking {
-			thought := firstNonEmpty(m.liveAgent.Thought, latestReasoningPreview(m.liveAgent.Reasoning))
+			thought := m.liveThoughtPreview()
 			if strings.TrimSpace(thought) != "" {
 				return "thinking · " + lastLineCompact(thought, 110), fmt.Sprintf("reasoning %d chars", m.liveAgent.ReasoningChars)
 			}

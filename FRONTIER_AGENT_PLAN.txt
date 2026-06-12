@@ -1,0 +1,759 @@
+================================================================================
+  EPHEMERA — FRONTIER AGENTIC & TOOL-CALLING CAPABILITIES ROADMAP
+================================================================================
+  Date: June 12, 2026
+  Goal: Elevate Ephemera from capable local agent to frontier-class autonomous
+        coding agent rivaling Claude Code, Cursor Agent, Devin, and OpenAI Codex.
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+  1.  Current State Assessment
+  2.  Architecture Gaps vs. Frontier Systems
+  3.  Phase 1 — Foundational Upgrades (Weeks 1-3)
+  4.  Phase 2 — Advanced Tool Ecosystem (Weeks 4-6)
+  5.  Phase 3 — Memory & Reasoning (Weeks 7-9)
+  6.  Phase 4 — Autonomy & Self-Improvement (Weeks 10-12)
+  7.  Phase 5 — Distributed & Multi-Agent (Weeks 13-16)
+  8.  Phase 6 — Production Hardening (Weeks 17-20)
+  9.  Key Metrics & Benchmarks
+  10. Risk Mitigation
+  11. Implementation Priority Matrix
+
+
+================================================================================
+1. CURRENT STATE ASSESSMENT
+================================================================================
+
+WHAT EPHEMERA HAS TODAY:
+  - Observe-Plan-Act-Verify agent loop (internal/agent/agent.go)
+  - 11 built-in tools: list_files, tree, read_file, search, git_status,
+    git_diff, apply_patch, replace_in_file, shell, go_test, delegate
+  - 5 LLM providers: OpenAI, Anthropic, Ollama, Codex, OpenAI-compatible
+  - SQLite session persistence
+  - Delegate sub-agent for independent review
+  - Doom-loop detection and approval gating
+  - Project memory via .ephemera/ files
+  - Built-in deterministic eval (7 test cases)
+  - Approval policies: chat, read-only, approve-writes, workspace-write, auto
+
+WHAT EPHEMERA LACKS vs. FRONTIER:
+  - No MCP (Model Context Protocol) support
+  - No web browsing / URL fetching tools
+  - No vector-based semantic memory
+  - No containerized/sandboxed execution
+  - No parallel tool dispatch
+  - No plugin/extension architecture
+  - No tree-of-thought or advanced planning
+  - No self-reflection / learning from errors
+  - No multi-modal support (images, PDFs)
+  - No streaming tool results
+  - No tool caching / memoization
+  - No distributed agent coordination
+  - No observability / metrics layer
+  - No graceful degradation under token pressure
+  - No structured output validation (JSON schema enforcement)
+
+
+================================================================================
+2. ARCHITECTURE GAPS vs. FRONTIER SYSTEMS
+================================================================================
+
+CAPABILITY               | EPHEMERA   | CLAUDE CODE  | CURSOR AGENT | TARGET
+-------------------------|------------|--------------|--------------|--------
+MCP Protocol             | None       | Full         | Partial      | Full
+Tool Count               | 11         | 20+          | 15+          | 30+
+Parallel Tool Execution  | Sequential | Parallel     | Parallel     | Parallel
+Semantic Memory          | File-based | File-based   | File-based   | Vector+File
+Web Access               | None       | None         | Web fetch    | Full
+Container Sandbox        | None       | Docker       | N/A          | Docker
+Self-Reflection          | None       | Basic        | Basic        | Advanced
+Planning Depth           | Single     | Multi-step   | Multi-step   | Tree-of-Thought
+Multi-Modal              | None       | Images       | Images       | Full
+Streaming Tools          | None       | Partial      | Full         | Full
+Plugin System            | None       | None         | None         | Full
+Observability            | Minimal    | Logs         | Analytics    | Full Telemetry
+Token Optimization       | Basic      | Advanced     | Advanced     | Advanced
+Error Recovery           | Basic      | Advanced     | Advanced     | Adaptive
+
+
+================================================================================
+3. PHASE 1 — FOUNDATIONAL UPGRADES (Weeks 1-3)
+================================================================================
+
+3.1  MCP (Model Context Protocol) Integration
+----------------------------------------------------------------------
+  File: internal/mcp/ (new package)
+  Files to modify: internal/agent/agent.go, internal/tools/tools.go, 
+                   internal/llm/provider.go
+
+  Tasks:
+  [ ] Implement MCP client (internal/mcp/client.go)
+      - WebSocket and stdio transport layers
+      - JSON-RPC 2.0 message framing
+      - Tool discovery and capability negotiation
+      - Resource and prompt templates
+  [ ] Create MCP tool bridge (internal/mcp/bridge.go)
+      - Auto-wrap MCP tools into Ephemera ToolSpec format
+      - Dynamic tool registration on MCP server connect
+      - Tool schema caching for startup speed
+  [ ] Add MCP server configuration (internal/config/config.go)
+      - mcp_servers config block with transport, args, env
+      - Auto-discovery of local MCP servers
+      - Server health monitoring and auto-reconnect
+  [ ] Wire MCP tools into agent tool dispatch (internal/agent/agent.go)
+      - Merge MCP tools with built-in tools at dispatch time
+      - Conflict resolution (built-in takes precedence)
+      - MCP tool timeout handling
+  [ ] Unit tests for MCP client and bridge
+
+  Estimated impact: Opens Ephemera to hundreds of community MCP tools
+                    (filesystem, databases, APIs, cloud services, etc.)
+
+3.2  Parallel Tool Execution
+----------------------------------------------------------------------
+  File: internal/agent/agent.go
+
+  Tasks:
+  [ ] Modify agent loop to detect independent tool calls
+      - Dependency graph analysis of tool call arguments
+      - Tools with no inter-dependencies execute concurrently
+  [ ] Implement tool dispatch pool (internal/agent/dispatch.go)
+      - Goroutine pool with configurable concurrency (default: 4)
+      - Result collection and ordering
+      - Partial failure handling (continue if non-critical tools fail)
+  [ ] Add per-tool timeout configuration
+  [ ] Update streaming UI to show parallel tool execution
+  [ ] Tests for concurrent dispatch and race conditions
+
+  Estimated impact: 2-4x speedup on multi-file operations
+
+3.3  Streaming Tool Results
+----------------------------------------------------------------------
+  Files: internal/agent/agent.go, internal/tui/stream.go
+
+  Tasks:
+  [ ] Stream shell command output in real-time (not buffered)
+  [ ] Stream file read progress for large files
+  [ ] Stream search results incrementally
+  [ ] Add tool progress indicators in TUI
+  [ ] Token budget mid-stream adjustment
+
+  Estimated impact: Better UX for long-running operations
+
+3.4  Structured Output Validation
+----------------------------------------------------------------------
+  Files: internal/agent/agent.go, internal/llm/provider.go
+
+  Tasks:
+  [ ] JSON schema enforcement for tool call arguments
+      - Validate tool arguments against ToolSpec before execution
+      - Auto-retry with error message if schema mismatch
+  [ ] Response format validation for structured outputs
+  [ ] Add response_format support for providers that offer it
+  [ ] Implement constrained decoding where provider supports it
+
+  Estimated impact: 30-50% reduction in tool call parse failures
+
+
+================================================================================
+4. PHASE 2 — ADVANCED TOOL ECOSYSTEM (Weeks 4-6)
+================================================================================
+
+4.1  Web Browsing & URL Fetching
+----------------------------------------------------------------------
+  File: internal/tools/web.go (new)
+
+  Tasks:
+  [ ] Implement web_fetch tool
+      - HTTP/HTTPS URL fetching with configurable timeout
+      - HTML-to-markdown conversion (use html-to-markdown library)
+      - Respect robots.txt
+      - Content size limits and truncation
+  [ ] Implement web_search tool
+      - Integration with search APIs (DuckDuckGo, SearXNG, Tavily)
+      - Result ranking and snippet extraction
+      - Multi-result aggregation
+  [ ] Implement web_scrape tool
+      - CSS selector extraction
+      - Link following with depth limits
+      - Rate limiting
+  [ ] Add web_fetch to agent tool registry
+  [ ] Tests with mock HTTP servers
+
+  Estimated impact: Agent can research APIs, read documentation, find solutions
+
+4.2  Database Query Tool
+----------------------------------------------------------------------
+  File: internal/tools/database.go (new)
+
+  Tasks:
+  [ ] Implement database_query tool
+      - SQLite read-only queries (safe for project DBs)
+      - PostgreSQL/MySQL via connection strings (with approval gating)
+      - Query result formatting and truncation
+      - Schema introspection tool
+  [ ] Add to tool registry with shell-level approval
+
+  Estimated impact: Agent can understand data models, debug data issues
+
+4.3  Image & Multi-Modal Tools
+----------------------------------------------------------------------
+  Files: internal/tools/media.go (new), internal/llm/provider.go
+
+  Tasks:
+  [ ] Implement image_read tool
+      - Read image files (PNG, JPG, SVG, GIF)
+      - Base64 encoding for vision-capable models
+      - Image metadata extraction
+  [ ] Implement screenshot tool
+      - Platform-specific screen capture
+      - OCR integration for text extraction
+  [ ] Add multi-modal message support to LLM providers
+      - Vision message format for OpenAI, Anthropic, Ollama
+      - Automatic provider capability detection
+  [ ] Tests for image encoding and provider formatting
+
+  Estimated impact: Agent can work with UI mockups, diagrams, screenshots
+
+4.4  Advanced File Operations
+----------------------------------------------------------------------
+  Files: internal/tools/tools.go
+
+  Tasks:
+  [ ] Implement glob_search tool (fast file pattern matching)
+  [ ] Implement file_hash tool (SHA-256, MD5)
+  [ ] Implement file_compare tool (diff two files)
+  [ ] Implement directory_stats tool (size, file counts, types)
+  [ ] Implement symlink_safe_read tool (follow symlinks safely)
+  [ ] Improve apply_patch with fuzzy matching for minor diffs
+  [ ] Add binary file detection and handling
+
+  Estimated impact: More robust file manipulation capabilities
+
+4.5  Git Advanced Tools
+----------------------------------------------------------------------
+  Files: internal/tools/git.go (new)
+
+  Tasks:
+  [ ] Implement git_log tool (commit history with search)
+  [ ] Implement git_blame tool (line-by-line authorship)
+  [ ] Implement git_stash tool (stash management)
+  [ ] Implement git_branch tool (list, create, switch)
+  [ ] Implement git_merge tool (merge with conflict detection)
+  [ ] Implement git_rebase tool (interactive rebase support)
+  [ ] Implement git_bisect tool (binary search for bugs)
+
+  Estimated impact: Agent can do advanced version control operations
+
+4.6  Plugin Architecture
+----------------------------------------------------------------------
+  Files: internal/plugins/ (new package)
+
+  Tasks:
+  [ ] Define plugin interface (internal/plugins/plugin.go)
+      - ToolProvider interface
+      - Middleware interface (pre/post tool execution)
+      - EventListener interface
+  [ ] Implement plugin loader
+      - Go plugin loading (.so files)
+      - Plugin manifest with capabilities and dependencies
+      - Plugin versioning and compatibility checks
+  [ ] Create plugin registry and marketplace concept
+  [ ] Add plugin configuration to config.json
+  [ ] Ship 3 reference plugins:
+      - Docker plugin (container operations)
+      - Cloud plugin (AWS/GCP/Azure basics)
+      - Database plugin (multi-DB support)
+
+  Estimated impact: Community extensibility without forking
+
+
+================================================================================
+5. PHASE 3 — MEMORY & REASONING (Weeks 7-9)
+================================================================================
+
+5.1  Vector-Based Semantic Memory
+----------------------------------------------------------------------
+  Files: internal/memory/ (new package)
+
+  Tasks:
+  [ ] Implement vector store interface (internal/memory/store.go)
+      - In-memory vector store with optional persistence
+      - Cosine similarity search
+      - Hybrid search (keyword + semantic)
+  [ ] Implement embedding provider (internal/memory/embedding.go)
+      - OpenAI text-embedding-3-small
+      - Local embedding via Ollama
+      - Caching layer for repeated embeddings
+  [ ] Implement memory manager (internal/memory/manager.go)
+      - Auto-index files as agent reads them
+      - Code chunk extraction with AST awareness
+      - Importance scoring for memory retention
+      - Memory consolidation (merge similar entries)
+  [ ] Add memory_search tool to agent
+      - Search codebase by semantic meaning
+      - Find related code across files
+      - Recall past decisions and patterns
+  [ ] Integrate with existing .ephemera/ memory files
+  [ ] Tests with embedding mocks
+
+  Estimated impact: Agent remembers context across sessions, finds related code
+
+5.2  Advanced Planning Engine
+----------------------------------------------------------------------
+  Files: internal/planning/ (new package)
+
+  Tasks:
+  [ ] Implement tree-of-thought planner (internal/planning/tot.go)
+      - Generate multiple solution branches
+      - Score each branch on feasibility, risk, complexity
+      - Prune low-scoring branches
+      - Select best path with justification
+  [ ] Implement goal decomposition (internal/planning/decompose.go)
+      - Break complex tasks into subtasks
+      - Dependency graph between subtasks
+      - Parallel subtask identification
+      - Progress tracking and resumption
+  [ ] Implement plan persistence
+      - Save plans to .ephemera/plans/
+      - Resume interrupted plans
+      - Plan versioning as approach evolves
+  [ ] Add plan_review tool for agent self-assessment
+  [ ] Tests for planning decisions
+
+  Estimated impact: Agent handles multi-hour, multi-file refactors
+
+5.3  Self-Reflection & Learning
+----------------------------------------------------------------------
+  Files: internal/agent/agent.go, internal/agent/reflection.go (new)
+
+  Tasks:
+  [ ] Implement reflection step after each action
+      - Did the action achieve the intended result?
+      - What was unexpected?
+      - Should the plan be adjusted?
+  [ ] Implement error pattern detection
+      - Track repeated failures on same operation
+      - Auto-suggest alternative approaches after N failures
+      - Learn from user corrections
+  [ ] Implement approach memory
+      - Store successful strategies for recurring patterns
+      - "Last time I solved X, I used approach Y"
+      - Decay old strategies that no longer work
+  [ ] Add reflection_depth config option (none, basic, deep)
+  [ ] Tests for reflection logic
+
+  Estimated impact: Agent improves over time, fewer repeated mistakes
+
+5.4  Context Window Optimization
+----------------------------------------------------------------------
+  Files: internal/agent/agent.go, internal/llm/provider.go
+
+  Tasks:
+  [ ] Implement intelligent context pruning
+      - Priority-based message retention
+      - Tool output summarization when approaching limits
+      - Automatic compression of old conversation turns
+  [ ] Implement sliding window for long conversations
+      - Keep system prompt + recent N turns
+      - Summarize middle turns into condensed context
+      - Preserve key decisions and file states
+  [ ] Add token budget forecasting
+      - Estimate tokens needed for planned actions
+      - Warn user if plan exceeds available context
+      - Suggest context-saving strategies
+  [ ] Implement tool output streaming with truncation
+      - Stream first N tokens, summarize rest
+      - Configurable per-tool output budgets
+
+  Estimated impact: Handle conversations 10x longer without degradation
+
+
+================================================================================
+6. PHASE 4 — AUTONOMY & SELF-IMPROVEMENT (Weeks 10-12)
+================================================================================
+
+6.1  Containerized Execution Sandbox
+----------------------------------------------------------------------
+  Files: internal/sandbox/ (new package)
+
+  Tasks:
+  [ ] Implement Docker sandbox (internal/sandbox/docker.go)
+      - Spin up ephemeral containers per task
+      - Mount workspace as volume (read-write)
+      - Network isolation (configurable)
+      - Resource limits (CPU, memory, disk)
+      - Timeout enforcement
+  [ ] Implement sandbox manager
+      - Container pooling for fast startup
+      - Health monitoring and cleanup
+      - Snapshot/restore for rollback
+  [ ] Add sandbox tool to agent
+      - Execute shell commands in isolated environment
+      - Capture stdout/stderr with streaming
+      - File system diff after execution
+  [ ] Configure sandbox images per language/framework
+  [ ] Integration tests with real containers
+
+  Estimated impact: Safe execution of untrusted code, reproducible environments
+
+6.2  Autonomous Task Execution
+----------------------------------------------------------------------
+  Files: internal/agent/agent.go
+
+  Tasks:
+  [ ] Implement long-running task support
+      - Background execution with progress tracking
+      - Checkpoint/save state periodically
+      - Resume from checkpoint on restart
+      - Cancellation support
+  [ ] Implement task queue
+      - Priority queue for multiple pending tasks
+      - Dependency resolution between tasks
+      - Resource-aware scheduling
+  [ ] Implement autonomous mode (config: agent_autonomous: true)
+      - No approval prompts for read operations
+      - Auto-approve writes within workspace
+      - Auto-run tests after changes
+      - Auto-commit with descriptive messages
+  [ ] Add task timeout and circuit breaker
+      - Maximum wall-clock time per task
+      - Maximum tool calls per task
+      - Maximum token spend per task
+  [ ] Tests for autonomous mode safety
+
+  Estimated impact: Agent can work independently on well-defined tasks
+
+6.3  Code Quality Analysis Tools
+----------------------------------------------------------------------
+  Files: internal/tools/analysis.go (new)
+
+  Tasks:
+  [ ] Implement lint tool (language-agnostic via external linters)
+  [ ] Implement type_check tool (language-specific)
+  [ ] Implement security_scan tool (dependency vulnerabilities)
+  [ ] Implement complexity_analysis tool (cyclomatic complexity)
+  [ ] Implement dead_code_detection tool
+  [ ] Implement test_coverage tool (coverage report generation)
+  [ ] Integrate results into agent's decision-making
+
+  Estimated impact: Agent produces production-quality code
+
+6.4  User Preference Learning
+----------------------------------------------------------------------
+  Files: internal/agent/preferences.go (new)
+
+  Tasks:
+  [ ] Implement preference tracker
+      - Record user accept/reject/modify patterns
+      - Infer coding style preferences
+      - Learn project-specific conventions
+  [ ] Implement preference storage
+      - .ephemera/preferences.json
+      - Per-project overrides
+      - Privacy controls (what to remember/forget)
+  [ ] Apply preferences to future decisions
+      - Code style matching
+      - Tool selection preferences
+      - Approval threshold adjustment
+
+  Estimated impact: Agent adapts to individual developer style
+
+
+================================================================================
+7. PHASE 5 — DISTRIBUTED & MULTI-AGENT (Weeks 13-16)
+================================================================================
+
+7.1  Multi-Agent Orchestration
+----------------------------------------------------------------------
+  Files: internal/agents/ (new package)
+
+  Tasks:
+  [ ] Implement agent registry (internal/agents/registry.go)
+      - Named specialist agents with defined capabilities
+      - Agent profiles: backend, frontend, devops, security, test
+      - Dynamic agent spawning based on task requirements
+  [ ] Implement orchestrator (internal/agents/orchestrator.go)
+      - Task decomposition across agents
+      - Inter-agent communication protocol
+      - Result aggregation and conflict resolution
+      - Load balancing across agents
+  [ ] Implement agent state sharing
+      - Shared workspace access (read-only base, per-agent writes)
+      - Conflict detection and merge for concurrent edits
+      - Agent-to-agent tool calls
+  [ ] Upgrade delegate tool to support specialist agents
+  [ ] Tests for multi-agent coordination
+
+  Estimated impact: Complex projects tackled by specialized team of agents
+
+7.2  Agent-to-Agent Communication
+----------------------------------------------------------------------
+  Files: internal/agents/comms.go (new)
+
+  Tasks:
+  [ ] Implement message bus (internal/agents/bus.go)
+      - Pub/sub pattern for agent coordination
+      - Request/response for direct agent queries
+      - Broadcast for workspace-wide events
+  [ ] Implement shared context
+      - Read-only shared state between agents
+      - File lock coordination
+      - Change notification system
+  [ ] Implement agent handoff
+      - Smooth transfer of task context between agents
+      - State serialization and deserialization
+      - Continuation from handoff point
+
+  Estimated impact: Agents collaborate like a development team
+
+7.3  External Tool Integration Layer
+----------------------------------------------------------------------
+  Files: internal/integrations/ (new package)
+
+  Tasks:
+  [ ] Implement GitHub integration
+      - PR creation and management
+      - Issue tracking and updates
+      - Code review automation
+      - CI/CD pipeline interaction
+  [ ] Implement Slack/Discord integration
+      - Team notifications
+      - Approval workflows
+      - Status reporting
+  [ ] Implement Jira/Linear integration
+      - Ticket state management
+      - Sprint planning assistance
+      - Progress tracking
+  [ ] Implement monitoring integration
+      - Read dashboards and alerts
+      - Correlate errors with code changes
+      - Suggest fixes based on metrics
+
+  Estimated impact: Agent integrates into team workflows
+
+
+================================================================================
+8. PHASE 6 — PRODUCTION HARDENING (Weeks 17-20)
+================================================================================
+
+8.1  Comprehensive Observability
+----------------------------------------------------------------------
+  Files: internal/telemetry/ (new package)
+
+  Tasks:
+  [ ] Implement structured logging (internal/telemetry/logger.go)
+      - JSON-formatted logs with correlation IDs
+      - Log levels: debug, info, warn, error
+      - Sensitive data redaction
+      - Log rotation and retention
+  [ ] Implement metrics collection (internal/telemetry/metrics.go)
+      - Tool call counts and latencies
+      - LLM request/response metrics
+      - Token usage tracking
+      - Error rates by category
+      - Agent loop iteration counts
+  [ ] Implement tracing (internal/telemetry/tracing.go)
+      - OpenTelemetry integration
+      - Span creation for tool calls and LLM requests
+      - Distributed trace context propagation
+  [ ] Add /metrics command to TUI
+  [ ] Export to common observability backends
+
+  Estimated impact: Production-ready monitoring and debugging
+
+8.2  Advanced Error Recovery
+----------------------------------------------------------------------
+  Files: internal/agent/recovery.go (new)
+
+  Tasks:
+  [ ] Implement error taxonomy
+      - Classify errors: transient, permanent, user, system
+      - Match recovery strategy to error class
+  [ ] Implement adaptive retry
+      - Exponential backoff with jitter
+      - Circuit breaker for repeated failures
+      - Fallback strategies (different tool, different approach)
+  [ ] Implement graceful degradation
+      - Reduce capabilities under resource pressure
+      - Fallback to simpler tools when complex ones fail
+      - Partial results are better than no results
+  [ ] Implement user notification
+      - Clear error messages with suggested actions
+      - "Would you like me to try X instead?" prompts
+      - Error history for debugging
+
+  Estimated impact: Agent recovers from failures gracefully
+
+8.3  Security Hardening
+----------------------------------------------------------------------
+  Files: internal/security/ (new package)
+
+  Tasks:
+  [ ] Implement tool sandboxing
+      - Capability-based permissions per tool
+      - File system access control lists
+      - Network access restrictions
+      - Process execution allowlists
+  [ ] Implement secret management
+      - API key rotation support
+      - Secret injection into tool environments
+      - Never log or display secrets
+  [ ] Implement audit logging
+      - Record all tool executions with full arguments
+      - Tamper-evident log chain
+      - Compliance reporting
+  [ ] Implement input validation
+      - Sanitize all external inputs
+      - Path traversal prevention
+      - Command injection prevention
+  [ ] Security-focused test suite
+
+  Estimated impact: Production-ready security posture
+
+8.4  Performance Optimization
+----------------------------------------------------------------------
+  Files: Various
+
+  Tasks:
+  [ ] Profile and optimize agent loop hot path
+  [ ] Implement tool call caching
+      - Cache results for identical read-only calls
+      - TTL-based cache invalidation
+      - File-change-aware invalidation
+  [ ] Optimize token usage
+      - Compress tool output intelligently
+      - Deduplicate context messages
+      - Smart summarization of long outputs
+  [ ] Implement lazy tool loading
+      - Only load tools that are likely needed
+      - Dynamic tool set based on task type
+  [ ] Benchmark against frontier systems
+
+  Estimated impact: Faster, cheaper agent operations
+
+
+================================================================================
+9. KEY METRICS & BENCHMARKS
+================================================================================
+
+PERFORMANCE TARGETS:
+  - Tool call latency (local):     < 50ms (p95)
+  - Tool call latency (web):       < 2s (p95)
+  - LLM first token:               < 500ms (p95)
+  - Agent loop iteration:          < 3s (p95)
+  - Memory search:                 < 100ms (p95)
+  - Context pruning:               < 200ms (p95)
+  - Container spin-up:             < 5s (p95)
+
+QUALITY TARGETS:
+  - Tool call parse success rate:  > 95%
+  - Tool execution success rate:   > 90%
+  - Task completion rate:          > 80% (on standard benchmark)
+  - User satisfaction (acceptance): > 85%
+  - False positive writes:         < 5%
+  - Doom-loop escape rate:         > 95%
+
+CAPACITY TARGETS:
+  - Max concurrent tool calls:     8
+  - Max simultaneous agents:       4
+  - Max context window usage:      90% (with safety margin)
+  - Max session duration:          4+ hours
+  - Max files tracked:             10,000+
+  - Max memory entries:            50,000+
+
+
+================================================================================
+10. RISK MITIGATION
+================================================================================
+
+RISK: Increased complexity makes debugging harder
+  MITIGATION: Comprehensive observability from Phase 6, structured logging,
+              distributed tracing, and detailed error messages.
+
+RISK: Container sandbox adds Docker dependency
+  MITIGATION: Make sandboxing optional, fall back to current shell execution
+              when Docker is unavailable. Provide clear setup instructions.
+
+RISK: Parallel tool execution introduces race conditions
+  MITIGATION: Extensive concurrency testing, proper mutex usage, immutable
+              shared state where possible, and thorough code review.
+
+RISK: MCP integration increases startup time
+  MITIGATION: Lazy MCP server connection, tool schema caching, and async
+              discovery. Don't block startup on slow MCP servers.
+
+RISK: Vector memory increases storage and cost
+  MITIGATION: Local embedding option via Ollama, configurable memory limits,
+              and cost tracking for cloud embeddings.
+
+RISK: Plugin system creates security surface
+  MITIGATION: Sandboxed plugin execution, capability-based permissions,
+              and mandatory code signing for marketplace plugins.
+
+RISK: Multi-agent coordination overhead
+  MITIGATION: Start with simple delegation, add complexity gradually, and
+              always allow single-agent fallback mode.
+
+RISK: Context window optimization loses important information
+  MITIGATION: User-configurable retention policies, always preserve recent
+              turns and file states, and provide context inspection tools.
+
+
+================================================================================
+11. IMPLEMENTATION PRIORITY MATRIX
+================================================================================
+
+HIGH IMPACT + LOW EFFORT (Do First):
+  [x] Parallel tool execution
+  [x] Structured output validation
+  [x] Web fetch tool
+  [x] Context window optimization
+  [x] Tool call caching
+
+HIGH IMPACT + HIGH EFFORT (Do Second):
+  [ ] MCP integration
+  [ ] Vector semantic memory
+  [ ] Advanced planning engine
+  [ ] Containerized sandbox
+  [ ] Self-reflection
+
+MEDIUM IMPACT + LOW EFFORT (Fill Gaps):
+  [ ] Streaming tool results
+  [ ] Advanced git tools
+  [ ] Image/multi-modal tools
+  [ ] Code quality analysis tools
+  [ ] User preference learning
+
+MEDIUM IMPACT + HIGH EFFORT (Strategic):
+  [ ] Plugin architecture
+  [ ] Multi-agent orchestration
+  [ ] External integrations
+  [ ] Comprehensive observability
+  [ ] Autonomous task execution
+
+LOWER PRIORITY (Future Consideration):
+  [ ] Agent-to-agent communication
+  [ ] Marketplace/plugin ecosystem
+  [ ] Advanced security hardening
+  [ ] Distributed agent clusters
+
+
+================================================================================
+  END OF PLAN
+================================================================================
+
+  This plan is designed to be executed iteratively. Each phase builds on
+  the previous one, but individual items within a phase can be parallelized.
+
+  Start with Phase 1 items to get immediate wins, then use the priority
+  matrix to decide what to tackle next based on user feedback and usage
+  patterns.
+
+  The key insight: frontier-level agents aren't defined by a single
+  breakthrough feature, but by the compounding effect of many small
+  improvements working together. Each item in this plan contributes to
+  that compound effect.
+
+================================================================================

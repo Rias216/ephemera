@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ephemera-ai/ephemera/internal/agent"
 	"github.com/ephemera-ai/ephemera/internal/config"
@@ -104,5 +105,70 @@ func TestFinishAgentStreamKeepsApprovalPromptOutOfConversation(t *testing.T) {
 	}
 	if m.pendingApproval == nil || m.notice == "" {
 		t.Fatalf("stream approval state missing: pending=%#v notice=%q", m.pendingApproval, m.notice)
+	}
+}
+
+func TestActivityDeltaUpdatesThinkingDisplayImmediately(t *testing.T) {
+	cfg := config.Default()
+	cfg.ShowThinking = true
+	m := New(cfg, nil, "stream-activity")
+	m.liveAgent.Active = true
+	m.applyAgentStream(agent.StreamUpdate{
+		Kind:      agent.StreamActivity,
+		Phase:     "preparing action",
+		Iteration: 1,
+		Delta:     "Preparing read_file · 42 argument chars",
+	})
+
+	if got := m.liveThoughtPreview(); got != "Preparing read_file · 42 argument chars" {
+		t.Fatalf("thinking display = %q", got)
+	}
+	if m.liveAgent.ReasoningChars != 0 {
+		t.Fatalf("safe activity was counted as reasoning: %d", m.liveAgent.ReasoningChars)
+	}
+}
+
+func TestPhaseActivityProvidesImmediateThinkingFallback(t *testing.T) {
+	cfg := config.Default()
+	cfg.ShowThinking = true
+	m := New(cfg, nil, "phase-activity")
+	m.liveAgent = liveAgentState{Active: true, Phase: "deliberating"}
+
+	if got := m.liveThoughtPreview(); got != "Analyzing the request…" {
+		t.Fatalf("thinking fallback = %q", got)
+	}
+}
+
+func TestNewestActivityReplacesStaleThoughtInDisplay(t *testing.T) {
+	cfg := config.Default()
+	cfg.ShowThinking = true
+	m := New(cfg, nil, "newest-thinking-signal")
+	m.liveAgent = liveAgentState{
+		Active:            true,
+		Thought:           "Old reasoning summary",
+		ThoughtUpdatedAt:  time.Now().Add(-time.Second),
+		Activity:          "Preparing read_file…",
+		ActivityUpdatedAt: time.Now(),
+	}
+
+	if got := m.liveThoughtPreview(); got != "Preparing read_file…" {
+		t.Fatalf("thinking display = %q, want newest activity", got)
+	}
+}
+
+func TestPlainTextDeltaAdvancesThinkingDisplay(t *testing.T) {
+	cfg := config.Default()
+	cfg.ShowThinking = true
+	m := New(cfg, nil, "plain-text-progress")
+	m.liveAgent.Active = true
+	m.applyAgentStream(agent.StreamUpdate{
+		Kind:      agent.StreamDelta,
+		Phase:     "receiving decision",
+		Iteration: 1,
+		Delta:     "Hello there",
+	})
+
+	if got := m.liveThoughtPreview(); !strings.Contains(got, "11 chars") {
+		t.Fatalf("thinking display = %q, want incremental response progress", got)
 	}
 }

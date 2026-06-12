@@ -8,10 +8,14 @@ import (
 	"github.com/ephemera-ai/ephemera/internal/config"
 )
 
-// Message is a provider-neutral chat message.
+// Message is a provider-neutral conversation item. Besides normal text turns,
+// it can preserve native assistant tool calls and their corresponding tool
+// results across stateless provider requests.
 type Message struct {
-	Role    string
-	Content string
+	Role       string
+	Content    string
+	ToolCalls  []ToolCall
+	ToolResult *ToolResult
 }
 
 // Request contains a complete stateless conversation.
@@ -85,13 +89,14 @@ type ToolResult struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// DeltaKind distinguishes final response text from provider-supported,
-// user-visible reasoning summaries.
+// DeltaKind distinguishes final response text, provider-supported reasoning
+// summaries, and safe transport activity such as an in-progress tool call.
 type DeltaKind string
 
 const (
 	DeltaText      DeltaKind = "text"
 	DeltaReasoning DeltaKind = "reasoning"
+	DeltaActivity  DeltaKind = "activity"
 )
 
 // Delta is one incremental provider stream part.
@@ -102,6 +107,16 @@ type Delta struct {
 
 // DeltaFunc receives incremental provider output.
 type DeltaFunc func(Delta) error
+
+func toolActivityText(name string, argumentChars int) string {
+	if name == "" {
+		name = "tool call"
+	}
+	if argumentChars > 0 {
+		return fmt.Sprintf("Preparing %s · %d argument chars", name, argumentChars)
+	}
+	return "Preparing " + name + "…"
+}
 
 // ToolDecision is the assistant's visible text plus any native tool calls.
 type ToolDecision struct {

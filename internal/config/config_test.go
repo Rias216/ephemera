@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -166,5 +168,136 @@ func TestParseApprovalPolicyAliases(t *testing.T) {
 		if !ok || got != want {
 			t.Fatalf("ParseApprovalPolicy(%q) = %q, %t; want %q, true", input, got, ok, want)
 		}
+	}
+}
+
+func TestConnectionRegistryKeepsModelsAndCredentialsPerRoute(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	openRouterID := cfg.RememberConnection(SavedConnection{
+		Provider: "compatible",
+		Name:     "openrouter",
+		BaseURL:  OpenRouterBaseURL,
+		Model:    "openai/gpt-test",
+	}, "router-secret")
+	openAIID := cfg.RememberConnection(SavedConnection{
+		Provider: "openai",
+		Model:    "gpt-test",
+	}, "openai-secret")
+
+	if len(cfg.ConnectedConnections()) != 3 { // default Ollama + two connected routes
+		t.Fatalf("connected routes = %d, want 3", len(cfg.ConnectedConnections()))
+	}
+	if !cfg.ActivateConnection(openRouterID) {
+		t.Fatal("failed to reactivate OpenRouter")
+	}
+	if cfg.Provider != "compatible" || cfg.CompatibleName != "openrouter" || cfg.Model() != "openai/gpt-test" {
+		t.Fatalf("unexpected OpenRouter activation: provider=%q name=%q model=%q", cfg.Provider, cfg.CompatibleName, cfg.Model())
+	}
+	if cfg.CompatibleKey != "router-secret" {
+		t.Fatalf("compatible key = %q, want remembered credential", cfg.CompatibleKey)
+	}
+	if !cfg.ActivateConnection(openAIID) || cfg.OpenAIKey != "openai-secret" || cfg.Model() != "gpt-test" {
+		t.Fatalf("unexpected OpenAI activation: key=%q model=%q", cfg.OpenAIKey, cfg.Model())
+	}
+}
+
+func TestSetModelIsRememberedPerConnection(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	openAIID := cfg.RememberConnection(SavedConnection{Provider: "openai", Model: "gpt-old"}, "secret")
+	cfg.SetModel("gpt-new")
+	cfg.ActivateConnection("ollama")
+	cfg.SetModel("qwen-new")
+
+	cfg.ActivateConnection(openAIID)
+	if got := cfg.Model(); got != "gpt-new" {
+		t.Fatalf("OpenAI model = %q, want gpt-new", got)
+	}
+	cfg.ActivateConnection("ollama")
+	if got := cfg.Model(); got != "qwen-new" {
+		t.Fatalf("Ollama model = %q, want qwen-new", got)
+	}
+}
+
+func TestSaveLoadPersistsConnectionCredentialOutsideConfigJSON(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+
+	cfg := Default()
+	id := cfg.RememberConnection(SavedConnection{
+		Provider: "compatible",
+		Name:     "openrouter",
+		BaseURL:  OpenRouterBaseURL,
+		Model:    "openai/gpt-test",
+	}, "remember-me")
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configData, err := os.ReadFile(filepath.Join(dir, fileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configData), "remember-me") {
+		t.Fatal("config.json leaked the remembered credential")
+	}
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ActiveConnection != id || loaded.CredentialForConnection(id) != "remember-me" {
+		t.Fatalf("credential or active route not restored: active=%q credential=%q", loaded.ActiveConnection, loaded.CredentialForConnection(id))
+	}
+	if loaded.CompatibleKey != "remember-me" || loaded.Model() != "openai/gpt-test" {
+		t.Fatalf("active route was not hydrated: key=%q model=%q", loaded.CompatibleKey, loaded.Model())
+	}
+}
+
+func TestNormalizeMigratesLegacyProviderToConnection(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Provider:       "compatible",
+		Models:         map[string]string{"compatible": "legacy-model"},
+		CompatibleName: "legacy-host",
+		CompatibleURL:  "https://legacy.example/v1",
+	}
+	cfg.normalize()
+
+	id := ConnectionID("compatible", "legacy-host")
+	connection, ok := cfg.Connections[id]
+	if !ok {
+		t.Fatalf("legacy route %q was not migrated", id)
+	}
+	if cfg.ActiveConnection != id || connection.Model != "legacy-model" || connection.BaseURL != "https://legacy.example/v1" {
+		t.Fatalf("unexpected migrated route: active=%q route=%+v", cfg.ActiveConnection, connection)
+	}
+}
+
+func TestConfigForConnectionDoesNotMutateActiveModelMap(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.RememberConnection(SavedConnection{Provider: "compatible", Name: "first", BaseURL: "https://first.example/v1", Model: "first-model"}, "")
+	cfg.RememberConnection(SavedConnection{Provider: "compatible", Name: "second", BaseURL: "https://second.example/v1", Model: "second-model"}, "")
+	cfg.ActivateConnection("compatible:first")
+
+	candidate, ok := cfg.ConfigForConnection("compatible:second")
+	if !ok || candidate.Model() != "second-model" {
+		t.Fatalf("unexpected candidate: ok=%t model=%q", ok, candidate.Model())
+	}
+	if got := cfg.Model(); got != "first-model" {
+		t.Fatalf("active config mutated while inspecting another route: %q", got)
+	}
+	if got := cfg.Models["compatible"]; got != "first-model" {
+		t.Fatalf("active model map mutated to %q", got)
 	}
 }

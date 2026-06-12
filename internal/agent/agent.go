@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -27,6 +28,7 @@ type PendingApproval struct {
 	RunID           string
 	Purpose         string
 	Fingerprint     string
+	ProviderCallID  string
 	CallEventID     string
 	ApprovalEventID string
 }
@@ -38,6 +40,7 @@ const (
 	StreamStatus    StreamKind = "status"
 	StreamDelta     StreamKind = "delta"
 	StreamReasoning StreamKind = "reasoning_delta"
+	StreamActivity  StreamKind = "activity_delta"
 	StreamEvent     StreamKind = "event"
 	StreamDone      StreamKind = "done"
 )
@@ -93,16 +96,17 @@ func NewRunner(cfg config.Config, provider llm.Provider) Runner {
 	}
 }
 
-func (r Runner) toolSpecs() []llm.ToolSpec {
+func (r Runner) toolSpecs(state *runState) []llm.ToolSpec {
 	specs := tools.ToolSpecs()
-	if r.delegationDepth == 0 {
-		return specs
-	}
-	filtered := specs[:0]
+	filtered := make([]llm.ToolSpec, 0, len(specs))
 	for _, spec := range specs {
-		if spec.Name != "delegate" {
-			filtered = append(filtered, spec)
+		if r.delegationDepth > 0 && spec.Name == "delegate" {
+			continue
 		}
+		if state != nil && state.suppressedTools[spec.Name] {
+			continue
+		}
+		filtered = append(filtered, spec)
 	}
 	return filtered
 }
@@ -121,8 +125,12 @@ func (r Runner) RunStream(ctx context.Context, session history.Session, emit Str
 type runState struct {
 	runID                 string
 	observations          []string
+	nativeTurns           []llm.Message
 	callCounts            map[string]int
+	decisionCounts        map[string]int
 	completedCalls        map[string]int
+	resultCache           map[string]cachedToolResult
+	suppressedTools       map[string]bool
 	rejectedCalls         map[string]bool
 	failedApprovedCalls   map[string]bool
 	workspaceRevision     int
@@ -133,9 +141,15 @@ type runState struct {
 	verificationAttempted bool
 	verificationDeferrals int
 	parseFailures         int
+	noProgressRounds      int
 	reviewed              bool
 	lastReasoning         string
 	lastPlan              string
+}
+
+type cachedToolResult struct {
+	Revision int
+	Result   tools.Result
 }
 
 var trailingJSONComma = regexp.MustCompile(`,\s*([}\]])`)
@@ -175,7 +189,22 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 		}
 
 		systemPrompt := r.systemPrompt(session, state)
-		messages, selection := selectAgentMessages(session.Messages, systemPrompt, r.Config.ContextTokens)
+		contextBudget := r.Config.ContextTokens
+		if contextBudget <= 0 {
+			contextBudget = 16_000
+		}
+		messages, selection := selectAgentMessages(session.Messages, systemPrompt, contextBudget)
+		if len(state.nativeTurns) > 0 {
+			used := estimateVisibleTokens(systemPrompt) + 4
+			for _, message := range messages {
+				used += estimateLLMMessageTokens(message)
+			}
+			native := selectNativeTurns(state.nativeTurns, maxInt(0, contextBudget-used))
+			messages = append(messages, native...)
+			selection.Sent += len(native)
+			selection.Total += len(state.nativeTurns)
+			selection.Dropped += len(state.nativeTurns) - len(native)
+		}
 		request := llm.Request{
 			Model:            r.Config.Model(),
 			System:           systemPrompt,
@@ -198,16 +227,20 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 		})
 
 		outputRunes := 0
-		decision, err := llm.GenerateToolDecision(ctx, r.Provider, request, r.toolSpecs(), func(delta llm.Delta) error {
+		decision, err := llm.GenerateToolDecision(ctx, r.Provider, request, r.toolSpecs(state), func(delta llm.Delta) error {
 			if delta.Text == "" {
 				return ctx.Err()
 			}
 			kind := StreamDelta
 			phase := "receiving decision"
-			if delta.Kind == llm.DeltaReasoning {
+			switch delta.Kind {
+			case llm.DeltaReasoning:
 				kind = StreamReasoning
 				phase = "reasoning"
-			} else {
+			case llm.DeltaActivity:
+				kind = StreamActivity
+				phase = "preparing action"
+			default:
 				outputRunes += len([]rune(delta.Text))
 			}
 			emitUpdate(StreamUpdate{
@@ -242,6 +275,13 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 			emitEvent(event, iteration)
 		}
 		if !ok {
+			// A provider that can use native tools is allowed to answer directly
+			// when no tool is needed. Text-only providers also commonly return a
+			// perfectly valid direct answer instead of the optional JSON envelope.
+			// Do not burn another model round merely to repackage that answer.
+			if text != "" && !looksLikeAgentDecision(text) && !looksLikeUnfinishedActionNarration(text) {
+				return r.finish(text, state, iteration, contextTokens, text, events, emitUpdate, emitEvent)
+			}
 			if state.parseFailures < 1 && iteration < maxSteps {
 				state.parseFailures++
 				detail := firstNonEmpty(parseErr, "provider output did not match the agent decision contract")
@@ -272,6 +312,11 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 			}
 		}
 
+		decisionKey := modelActionFingerprint(action)
+		if decisionKey != "" {
+			state.decisionCounts[decisionKey]++
+		}
+
 		if strings.TrimSpace(action.Final) != "" && len(action.Actions) == 0 {
 			if r.shouldDeferFinalForVerification(state) {
 				pending, verificationEvents := r.verifyWorkspace(ctx, state, iteration, emitUpdate, emitEvent)
@@ -300,12 +345,18 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 			return r.finish(finalText, state, iteration, contextTokens, text, events, emitUpdate, emitEvent)
 		}
 
+		batchMadeProgress := false
 		for _, item := range action.Actions {
 			call := tools.Call{Name: item.Name, Arguments: item.Arguments}
 			purpose := firstNonEmpty(item.Purpose, item.ExpectedResult, action.Summary, "Advance the current plan.")
 			fingerprint := toolFingerprint(call)
 			callEvent := runEvent(state.runID, iteration, "tool_call", call.Name, formatToolCall(item), call.Name, "running")
 			callEvent.Metadata["call_fingerprint"] = fingerprint
+			if item.ProviderCallID != "" {
+				callEvent.Metadata["provider_call_id"] = item.ProviderCallID
+				callEvent.Metadata["tool_arguments"] = cloneArguments(call.Arguments)
+				state.recordNativeToolCall(item)
+			}
 			callIndex := len(events)
 			events = append(events, callEvent)
 			emitUpdate(StreamUpdate{Kind: StreamStatus, Phase: "running tool", Iteration: iteration, Tool: call.Name, ContextTokens: contextTokens, OutputTokens: estimateVisibleTokens(text), Verified: state.verified})
@@ -319,7 +370,11 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 				approval := runEvent(state.runID, iteration, "approval_request", "Approval required: "+call.Name, pending.Reason, call.Name, "pending")
 				approval.Metadata["call_fingerprint"] = fingerprint
 				approval.Metadata["call_event_id"] = callEvent.ID
+				if item.ProviderCallID != "" {
+					approval.Metadata["provider_call_id"] = item.ProviderCallID
+				}
 				pending.Fingerprint = fingerprint
+				pending.ProviderCallID = item.ProviderCallID
 				pending.CallEventID = callEvent.ID
 				pending.ApprovalEventID = approval.ID
 				events = append(events, approval)
@@ -330,6 +385,9 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 			}
 
 			attachCallMetadata(&result, fingerprint)
+			if item.ProviderCallID != "" {
+				result.Metadata["provider_call_id"] = item.ProviderCallID
+			}
 			callEvent.Status = "done"
 			if !result.OK {
 				callEvent.Status = "error"
@@ -340,10 +398,33 @@ func (r Runner) run(ctx context.Context, session history.Session, emit StreamFun
 			events = append(events, resultEvent)
 			emitEvent(resultEvent, iteration)
 			state.observe(call, result)
+			if item.ProviderCallID != "" {
+				state.recordNativeToolResult(item.ProviderCallID, call.Name, result)
+			}
+			if result.OK && !metadataBool(result.Metadata, "deduplicated") {
+				batchMadeProgress = true
+			}
 			if !result.OK {
 				state.observations = append(state.observations, "[batch halted]\nA tool failed, so later actions from the same decision were not executed. Re-plan from the observed error before continuing.")
 				break
 			}
+		}
+		if batchMadeProgress {
+			state.noProgressRounds = 0
+		} else {
+			state.noProgressRounds++
+		}
+		stalledDecision := decisionKey != "" && state.decisionCounts[decisionKey] > maxInt(1, r.Config.AgentLoopLimit)
+		stalledRun := state.noProgressRounds > maxInt(2, r.Config.AgentLoopLimit)
+		if !batchMadeProgress && (stalledDecision || stalledRun) {
+			finalText := firstNonEmpty(
+				action.Summary,
+				"I stopped because the same unsuccessful action plan repeated without producing new evidence.",
+			)
+			if !strings.Contains(strings.ToLower(finalText), "stopped") {
+				finalText += "\n\nStopped because the same unsuccessful action plan repeated without producing new evidence."
+			}
+			return r.finish(finalText, state, iteration, contextTokens, text, events, emitUpdate, emitEvent)
 		}
 		emitUpdate(StreamUpdate{Kind: StreamStatus, Phase: "reviewing results", Iteration: iteration, ContextTokens: contextTokens, OutputTokens: estimateVisibleTokens(text), Verified: state.verified})
 	}
@@ -363,8 +444,12 @@ func (r Runner) initialState(session history.Session, started time.Time) *runSta
 	state := &runState{
 		runID:               fmt.Sprintf("run-%d", started.UnixNano()),
 		observations:        recentToolObservations(events),
+		nativeTurns:         reconstructNativeToolTurns(events),
 		callCounts:          map[string]int{},
+		decisionCounts:      map[string]int{},
 		completedCalls:      map[string]int{},
+		resultCache:         map[string]cachedToolResult{},
+		suppressedTools:     map[string]bool{},
 		rejectedCalls:       map[string]bool{},
 		failedApprovedCalls: map[string]bool{},
 		inspectedPaths:      map[string]bool{},
@@ -450,6 +535,148 @@ func eventsSinceLatestUser(session history.Session) []history.Event {
 	return session.Events[start:]
 }
 
+func reconstructNativeToolTurns(events []history.Event) []llm.Message {
+	var turns []llm.Message
+	knownCalls := map[string]llm.ToolCall{}
+	completed := map[string]bool{}
+	rejected := map[string]bool{}
+	for _, event := range events {
+		callID := metadataString(event.Metadata, "provider_call_id")
+		if callID == "" {
+			continue
+		}
+		if event.Type == history.EventToolResult {
+			completed[callID] = true
+		}
+		if event.Type == history.EventApprovalRequest && event.Status == "rejected" {
+			rejected[callID] = true
+		}
+	}
+	for _, event := range events {
+		callID := metadataString(event.Metadata, "provider_call_id")
+		if callID == "" {
+			continue
+		}
+		switch event.Type {
+		case history.EventToolCall:
+			if !completed[callID] && !rejected[callID] {
+				// Do not send an unresolved native tool call back to a provider. A
+				// pending approval is control state, not a completed conversation turn.
+				continue
+			}
+			call := llm.ToolCall{
+				ID:        callID,
+				Name:      event.Tool,
+				Arguments: metadataArguments(event.Metadata, "tool_arguments"),
+			}
+			knownCalls[callID] = call
+			turns = append(turns, llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{call}})
+		case history.EventToolResult:
+			call, ok := knownCalls[callID]
+			if !ok {
+				call = llm.ToolCall{ID: callID, Name: event.Tool, Arguments: map[string]any{}}
+				turns = append(turns, llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{call}})
+				knownCalls[callID] = call
+			}
+			result := llm.ToolResult{
+				ID:       callID,
+				Name:     firstNonEmpty(event.Tool, call.Name),
+				OK:       event.Status != "error",
+				Metadata: cloneMetadata(event.Metadata),
+			}
+			if result.OK {
+				result.Output = event.Content
+			} else {
+				result.Error = event.Content
+			}
+			turns = append(turns, llm.Message{Role: "tool", ToolResult: &result})
+		case history.EventApprovalRequest:
+			if event.Status != "rejected" || completed[callID] {
+				continue
+			}
+			call, ok := knownCalls[callID]
+			if !ok {
+				continue
+			}
+			result := llm.ToolResult{
+				ID:    callID,
+				Name:  call.Name,
+				OK:    false,
+				Error: "User rejected this tool call. Choose another approach or explain the limitation.",
+			}
+			turns = append(turns, llm.Message{Role: "tool", ToolResult: &result})
+		}
+	}
+	return turns
+}
+
+func (s *runState) recordNativeToolCall(action modelToolAction) {
+	if strings.TrimSpace(action.ProviderCallID) == "" {
+		return
+	}
+	call := llm.ToolCall{
+		ID:        action.ProviderCallID,
+		Name:      firstNonEmpty(action.Name, action.Tool),
+		Arguments: cloneArguments(action.Arguments),
+	}
+	s.nativeTurns = append(s.nativeTurns, llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{call}})
+}
+
+func (s *runState) recordNativeToolResult(callID, name string, result tools.Result) {
+	if strings.TrimSpace(callID) == "" {
+		return
+	}
+	providerResult := llm.ToolResult{
+		ID:       callID,
+		Name:     name,
+		OK:       result.OK,
+		Output:   result.Output,
+		Error:    result.Error,
+		Metadata: cloneMetadata(result.Metadata),
+	}
+	s.nativeTurns = append(s.nativeTurns, llm.Message{Role: "tool", ToolResult: &providerResult})
+}
+
+func cloneArguments(arguments map[string]any) map[string]any {
+	if len(arguments) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(arguments))
+	for key, value := range arguments {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneMetadata(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		out[key] = value
+	}
+	return out
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, _ := metadata[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func metadataArguments(metadata map[string]any, key string) map[string]any {
+	if metadata == nil {
+		return map[string]any{}
+	}
+	if values, ok := metadata[key].(map[string]any); ok {
+		return cloneArguments(values)
+	}
+	return map[string]any{}
+}
+
 func (r Runner) executeAction(ctx context.Context, state *runState, call tools.Call, purpose string, iteration int, emit func(StreamUpdate)) (tools.Result, *PendingApproval) {
 	fingerprint := toolFingerprint(call)
 	state.callCounts[fingerprint]++
@@ -481,6 +708,26 @@ func (r Runner) executeAction(ctx context.Context, state *runState, call tools.C
 				"workspace_revision":   state.workspaceRevision,
 			},
 		}, nil
+	}
+	if cached, ok := state.cachedReadResult(call); ok {
+		if state.callCounts[fingerprint] > loopLimit {
+			return tools.Result{
+				Tool:  call.Name,
+				OK:    false,
+				Error: "duplicate read suppressed: this exact call already succeeded and its result was returned again; use that evidence, choose a narrower/different tool, or finalize",
+			}, nil
+		}
+		if shouldSuppressRepeatedTool(call.Name) {
+			state.suppressedTools[call.Name] = true
+		}
+		if cached.Metadata == nil {
+			cached.Metadata = map[string]any{}
+		}
+		cached.Metadata["call_fingerprint"] = fingerprint
+		cached.Metadata["deduplicated"] = true
+		cached.Metadata["cache_hit"] = true
+		cached.Metadata["workspace_revision"] = state.workspaceRevision
+		return cached, nil
 	}
 	if state.callCounts[fingerprint] > loopLimit {
 		return tools.Result{Tool: call.Name, OK: false, Error: "doom-loop guard: identical tool call repeated without enough new evidence; change the query, arguments, or approach"}, nil
@@ -559,9 +806,18 @@ func (s *runState) observe(call tools.Call, result tools.Result) {
 	if metadataBool(result.Metadata, "deduplicated") {
 		return
 	}
+	if result.OK && isCacheableReadTool(call.Name) {
+		s.resultCache[toolFingerprint(call)] = cachedToolResult{
+			Revision: s.workspaceRevision,
+			Result:   cloneToolResult(result),
+		}
+	}
 	if result.OK {
 		if isWorkspaceMutation(call.Name) {
 			s.workspaceRevision++
+			for name := range s.suppressedTools {
+				delete(s.suppressedTools, name)
+			}
 		}
 		if isRiskyTool(call.Name) {
 			s.completedCalls[toolFingerprint(call)] = s.workspaceRevision
@@ -608,6 +864,40 @@ func (s *runState) completedAtCurrentRevision(call tools.Call) bool {
 		return revision == s.workspaceRevision
 	}
 	return true
+}
+
+func (s *runState) cachedReadResult(call tools.Call) (tools.Result, bool) {
+	if !isCacheableReadTool(call.Name) {
+		return tools.Result{}, false
+	}
+	cached, ok := s.resultCache[toolFingerprint(call)]
+	if !ok || cached.Revision != s.workspaceRevision {
+		return tools.Result{}, false
+	}
+	return cloneToolResult(cached.Result), true
+}
+
+func cloneToolResult(result tools.Result) tools.Result {
+	result.Metadata = cloneMetadata(result.Metadata)
+	return result
+}
+
+func isCacheableReadTool(name string) bool {
+	switch name {
+	case "list_files", "tree", "read_file", "search", "git_status", "git_diff":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldSuppressRepeatedTool(name string) bool {
+	switch name {
+	case "list_files", "tree":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r Runner) shouldDeferFinalForVerification(state *runState) bool {
@@ -805,9 +1095,60 @@ func selectAgentMessages(messages []history.Message, system string, budget int) 
 func estimateRequestTokens(req llm.Request) int {
 	total := estimateVisibleTokens(req.System) + 4
 	for _, message := range req.Messages {
-		total += estimateVisibleTokens(message.Role) + estimateVisibleTokens(message.Content) + 4
+		total += estimateLLMMessageTokens(message)
 	}
 	return total
+}
+
+func estimateLLMMessageTokens(message llm.Message) int {
+	total := estimateVisibleTokens(message.Role) + estimateVisibleTokens(message.Content) + 4
+	for _, call := range message.ToolCalls {
+		total += estimateVisibleTokens(call.ID) + estimateVisibleTokens(call.Name) + estimateVisibleTokens(marshalArgs(call.Arguments)) + 6
+	}
+	if message.ToolResult != nil {
+		result := message.ToolResult
+		total += estimateVisibleTokens(result.ID) + estimateVisibleTokens(result.Name) + estimateVisibleTokens(result.Output) + estimateVisibleTokens(result.Error) + 8
+	}
+	return total
+}
+
+func selectNativeTurns(turns []llm.Message, budget int) []llm.Message {
+	if len(turns) == 0 || budget <= 0 {
+		return nil
+	}
+	type group struct {
+		messages []llm.Message
+		cost     int
+	}
+	var groups []group
+	for _, message := range turns {
+		if message.Role == "assistant" || len(groups) == 0 {
+			groups = append(groups, group{})
+		}
+		last := len(groups) - 1
+		groups[last].messages = append(groups[last].messages, message)
+		groups[last].cost += estimateLLMMessageTokens(message)
+	}
+	used := 0
+	start := len(groups)
+	for index := len(groups) - 1; index >= 0; index-- {
+		if used+groups[index].cost > budget && start < len(groups) {
+			break
+		}
+		if used+groups[index].cost > budget {
+			continue
+		}
+		used += groups[index].cost
+		start = index
+	}
+	if start == len(groups) {
+		return nil
+	}
+	var selected []llm.Message
+	for _, item := range groups[start:] {
+		selected = append(selected, item.messages...)
+	}
+	return selected
 }
 
 func estimateVisibleTokens(text string) int {
@@ -844,6 +1185,9 @@ func (r Runner) ExecuteApproved(ctx context.Context, pending PendingApproval) hi
 	result.Metadata["approved"] = true
 	result.Metadata["call_event_id"] = pending.CallEventID
 	result.Metadata["approval_event_id"] = pending.ApprovalEventID
+	if pending.ProviderCallID != "" {
+		result.Metadata["provider_call_id"] = pending.ProviderCallID
+	}
 	return toolResultEvent(pending.RunID, 0, result)
 }
 
@@ -855,19 +1199,36 @@ func (r Runner) systemPrompt(session history.Session, state *runState) string {
 	if r.delegateRole != "" {
 		fmt.Fprintf(&b, "You are an isolated %s specialist. Stay read-only, investigate the delegated task, and return a dense evidence-backed summary.\n", r.delegateRole)
 	}
-	b.WriteString("\nRESPONSE CONTRACT — return exactly one JSON object:\n")
-	b.WriteString(`{"reasoning":{"goal":"precise success condition","current_state":"what is known now","assumptions":["material assumption"],"approach":["next concrete step"],"evidence":["fact from tools"],"risks":["remaining risk"],"tool_rationale":"why the selected tools are the smallest useful set","verification":"specific check before completion","next_step":"single immediate next action"},"summary":"brief decision summary","plan":["ordered step"],"actions":[{"tool":"read_file","arguments":{"path":"go.mod","start_line":1,"end_line":120},"purpose":"why this call is needed","expected_result":"what evidence it should produce"}],"completion":{"verified":false,"evidence":[],"remaining_risks":[]},"final":""}`)
+	if llm.Capabilities(r.Provider).NativeTools {
+		b.WriteString("\nRESPONSE CONTRACT:\n")
+		b.WriteString("- If the request needs no local tool, answer the user directly in normal text and stop.\n")
+		b.WriteString("- If evidence or workspace changes are needed, call the smallest useful native tool set.\n")
+		b.WriteString("- After tool results arrive, either call a materially different next tool or answer directly. Never emit placeholder JSON.\n")
+	} else {
+		b.WriteString("\nRESPONSE CONTRACT — use one JSON object when requesting tools or reporting structured completion:\n")
+		b.WriteString(`{"reasoning":{"goal":"precise success condition","current_state":"what is known now","assumptions":["material assumption"],"approach":["next concrete step"],"evidence":["fact from tools"],"risks":["remaining risk"],"tool_rationale":"why the selected tools are the smallest useful set","verification":"specific check before completion","next_step":"single immediate next action"},"summary":"brief decision summary","plan":["ordered step"],"actions":[{"tool":"read_file","arguments":{"path":"go.mod","start_line":1,"end_line":120},"purpose":"why this call is needed","expected_result":"what evidence it should produce"}],"completion":{"verified":false,"evidence":[],"remaining_risks":[]},"final":""}`)
+		b.WriteString("\nA complete direct answer in normal text is also valid when no local tool is needed.\n")
+	}
 	b.WriteString("\n\nAVAILABLE TOOLS:\n")
 	for _, tool := range tools.Builtins() {
 		if r.delegationDepth > 0 && tool.Name == "delegate" {
 			continue
 		}
+		if state.suppressedTools[tool.Name] {
+			continue
+		}
 		fmt.Fprintf(&b, "- %s [%s]: %s\n", tool.Name, tool.Risk, tool.Description)
+	}
+	if names := sortedTrueKeys(state.suppressedTools); len(names) > 0 {
+		fmt.Fprintf(&b, "Temporarily unavailable after an exact duplicate discovery call: %s. Use existing evidence, a narrower tool, a write action, or finalize.\n", strings.Join(names, ", "))
 	}
 	b.WriteString("\nOPERATING RULES:\n")
 	b.WriteString("- Inspect before editing. Existing files must be read before apply_patch or replace_in_file.\n")
 	b.WriteString("- Prefer targeted read ranges and replace_in_file for small changes; use apply_patch only for complete-file writes or new files.\n")
-	b.WriteString("- Do not repeat an identical failed or unhelpful tool call. Change the query, scope, or approach.\n")
+	b.WriteString("- Tool results are authoritative and are delivered again as native tool-result messages when supported. Read the latest result before choosing the next action.\n")
+	b.WriteString("- Do not repeat an identical successful, failed, or unhelpful tool call. Repeating list_files, tree, read_file, search, git_status, or git_diff with identical arguments is never progress.\n")
+	b.WriteString("- An explicit empty-directory, no-match, clean-status, or no-diff result is conclusive evidence, not a reason to retry the same tool. Move to a narrower/different tool, create the requested files, or finalize.\n")
+	b.WriteString("- After list_files succeeds, use a specific read_file/search/tree call, perform the requested write, or answer. Never issue the same list_files call again.\n")
 	b.WriteString("- An approved/completed tool result is authoritative. Never request approval for the same exact action again; reuse the result and continue.\n")
 	b.WriteString("- A rejected action is denied for the current user request. Do not ask for it again unless the user changes the instruction.\n")
 	b.WriteString("- If an approved action failed, do not request the identical action again. Diagnose the failure and change the arguments or approach.\n")
@@ -878,7 +1239,7 @@ func (r Runner) systemPrompt(session history.Session, state *runState) string {
 	b.WriteString("- For non-trivial changes, use an independent review specialist or perform an explicit regression review before finalizing.\n")
 	b.WriteString("- Never say a change works unless tool evidence supports it. Report failures and remaining risks explicitly.\n")
 	b.WriteString("- If blocked, gather the missing evidence or ask one precise question in final.\n")
-	b.WriteString("- If complete, set actions to [] and final to the concise user-facing answer.\n")
+	b.WriteString("- If complete, answer concisely and stop. Do not start another planning round.\n")
 	fmt.Fprintf(&b, "\nWorkspace root: %s\n", r.Tools.WorkspaceRoot)
 	fmt.Fprintf(&b, "Approval policy: %s\n", r.Config.ApprovalPolicy)
 	fmt.Fprintf(&b, "Run id: %s\n", state.runID)
@@ -990,6 +1351,7 @@ type modelToolAction struct {
 	Arguments      map[string]any `json:"arguments"`
 	Purpose        string         `json:"purpose"`
 	ExpectedResult string         `json:"expected_result"`
+	ProviderCallID string         `json:"-"`
 }
 
 func (r Runner) actionFromDecision(decision llm.ToolDecision) (modelAction, bool, bool, string) {
@@ -1014,10 +1376,14 @@ func actionFromNativeToolCalls(decision llm.ToolDecision) modelAction {
 		Plan:    []string{"Run provider-native tool call(s)", "Observe results", "Continue or finalize with evidence"},
 		Actions: make([]modelToolAction, 0, len(decision.ToolCalls)),
 	}
-	for _, call := range decision.ToolCalls {
+	for index, call := range decision.ToolCalls {
 		args := call.Arguments
 		if args == nil {
 			args = map[string]any{}
+		}
+		callID := strings.TrimSpace(call.ID)
+		if callID == "" {
+			callID = fmt.Sprintf("ephemera_call_%d_%s", index+1, strings.ReplaceAll(call.Name, "-", "_"))
 		}
 		action.Actions = append(action.Actions, modelToolAction{
 			Tool:           call.Name,
@@ -1025,6 +1391,7 @@ func actionFromNativeToolCalls(decision llm.ToolDecision) modelAction {
 			Arguments:      args,
 			Purpose:        "Provider-native tool call",
 			ExpectedResult: "Normalized local tool result",
+			ProviderCallID: callID,
 		})
 	}
 	return action
@@ -1087,6 +1454,29 @@ func looksLikeAgentDecision(text string) bool {
 		strings.Contains(raw, `"actions"`) ||
 		strings.Contains(raw, `"reasoning"`) ||
 		strings.Contains(raw, `"final"`)
+}
+
+var unfinishedActionLeadPattern = regexp.MustCompile(`(?i)\b(?:i(?:'ll| will| am going to| need to| should)|let me|first,?\s+i(?:'ll| will)|next,?\s+i(?:'ll| will))\b`)
+var unfinishedActionVerbPattern = regexp.MustCompile(`(?i)\b(?:inspect|read|open|check|search|find|run|execute|edit|modify|patch|create|write|delete|remove|test|build|compile|browse|look\s+at)\b`)
+
+func looksLikeUnfinishedActionNarration(text string) bool {
+	raw := strings.TrimSpace(text)
+	if raw == "" {
+		return false
+	}
+	return unfinishedActionLeadPattern.MatchString(raw) && unfinishedActionVerbPattern.MatchString(raw)
+}
+
+func modelActionFingerprint(action modelAction) string {
+	if len(action.Actions) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(action.Actions)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:12])
 }
 
 func actionEvents(runID string, iteration int, action modelAction) []history.Event {
@@ -1468,6 +1858,17 @@ func isWorkspaceMutation(name string) bool {
 func normalizePath(value string) string {
 	value = filepath.ToSlash(filepath.Clean(strings.TrimSpace(value)))
 	return strings.ToLower(strings.TrimPrefix(value, "./"))
+}
+
+func sortedTrueKeys(values map[string]bool) []string {
+	keys := make([]string, 0, len(values))
+	for key, enabled := range values {
+		if enabled {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func sortedKeys(values map[string]bool) []string {

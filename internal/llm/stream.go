@@ -135,6 +135,11 @@ func (p *Codex) GenerateStream(ctx context.Context, req Request, onDelta DeltaFu
 				continue
 			}
 			kind = DeltaReasoning
+		case "command_execution", "file_change", "mcp_tool_call", "web_search":
+			kind = DeltaActivity
+			if event.Item.Text == "" {
+				event.Item.Text = "Working on " + strings.ReplaceAll(event.Item.Type, "_", " ") + "…"
+			}
 		default:
 			continue
 		}

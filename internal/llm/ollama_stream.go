@@ -29,13 +29,7 @@ func (p *Ollama) generateChatStream(ctx context.Context, req Request, specs []To
 		}
 		return ToolDecision{}, fmt.Errorf("invalid Ollama URL %q: %w", p.baseURL, err)
 	}
-	messages := make([]map[string]string, 0, len(req.Messages)+1)
-	messages = append(messages, map[string]string{"role": "system", "content": req.System})
-	for _, message := range req.Messages {
-		if message.Role == "user" || message.Role == "assistant" {
-			messages = append(messages, map[string]string{"role": message.Role, "content": message.Content})
-		}
-	}
+	messages := ollamaWireMessages(req)
 	payload := map[string]any{
 		"model":    req.Model,
 		"messages": messages,
@@ -141,6 +135,9 @@ func (p *Ollama) generateChatStream(ctx context.Context, req Request, specs []To
 				}
 				call.Arguments = args
 			}
+			if err := emitDelta(onDelta, DeltaActivity, toolActivityText(call.Name, len(incoming.Function.Arguments))); err != nil {
+				return ToolDecision{}, err
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -172,6 +169,44 @@ func (p *Ollama) generateChatStream(ctx context.Context, req Request, specs []To
 		return ToolDecision{}, fmt.Errorf("Ollama returned an empty streaming response")
 	}
 	return ToolDecision{Text: visible, ToolCalls: toolCalls}, nil
+}
+
+func ollamaWireMessages(req Request) []map[string]any {
+	messages := make([]map[string]any, 0, len(req.Messages)+1)
+	messages = append(messages, map[string]any{"role": "system", "content": req.System})
+	for _, message := range req.Messages {
+		switch message.Role {
+		case "user":
+			messages = append(messages, map[string]any{"role": "user", "content": message.Content})
+		case "assistant":
+			wire := map[string]any{"role": "assistant", "content": message.Content}
+			if len(message.ToolCalls) > 0 {
+				calls := make([]map[string]any, 0, len(message.ToolCalls))
+				for index, call := range message.ToolCalls {
+					calls = append(calls, map[string]any{
+						"id": stableToolCallID(call, index),
+						"function": map[string]any{
+							"name":      call.Name,
+							"arguments": call.Arguments,
+						},
+					})
+				}
+				wire["tool_calls"] = calls
+			}
+			messages = append(messages, wire)
+		case "tool":
+			if message.ToolResult == nil {
+				continue
+			}
+			result := *message.ToolResult
+			messages = append(messages, map[string]any{
+				"role":      "tool",
+				"content":   toolResultContent(result),
+				"tool_name": result.Name,
+			})
+		}
+	}
+	return messages
 }
 
 func ollamaJSONTools(specs []ToolSpec) []map[string]any {

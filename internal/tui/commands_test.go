@@ -25,11 +25,15 @@ func TestModelCommandPullsCatalogFromActiveProvider(t *testing.T) {
 	server := modelListServer(t, []string{"provider-live-a", "provider-live-b", "provider-live-c", "provider-live-d", "provider-live-e", "provider-live-f", "provider-live-g", "provider-live-h"})
 
 	m := Model{cfg: config.Default()}
-	m.cfg.Provider = "compatible"
-	m.cfg.CompatibleURL = server.URL
+	m.cfg.RememberConnection(config.SavedConnection{
+		Provider: "compatible",
+		Name:     "test-provider",
+		BaseURL:  server.URL,
+		Model:    "provider-live-a",
+	}, "")
 
 	got := m.commandSuggestions("/model ")
-	if !hasSuggestion(got, "/model provider-live-a") || !hasSuggestion(got, "/model provider-live-h") {
+	if !hasSuggestion(got, "provider-live-a") || !hasSuggestion(got, "provider-live-h") {
 		t.Fatalf("/model suggestions missing provider models: %#v", got)
 	}
 }
@@ -50,13 +54,15 @@ func TestConnectModelStepPullsCatalogFromChosenProvider(t *testing.T) {
 func TestModelSuggestionsExcludeUnavailableSavedSelection(t *testing.T) {
 	server := modelListServer(t, []string{"live-model"})
 	m := Model{cfg: config.Default()}
-	m.cfg.Provider = "compatible"
-	m.cfg.CompatibleName = "test-provider"
-	m.cfg.CompatibleURL = server.URL
-	m.cfg.SetModel("stale-model")
+	m.cfg.RememberConnection(config.SavedConnection{
+		Provider: "compatible",
+		Name:     "test-provider",
+		BaseURL:  server.URL,
+		Model:    "stale-model",
+	}, "")
 
 	got := m.commandSuggestions("/model ")
-	if hasSuggestion(got, "/model stale-model") {
+	if hasSuggestion(got, "stale-model") {
 		t.Fatalf("model suggestions included unavailable saved model: %#v", got)
 	}
 	if !hasSuggestion(got, "/model live-model") {
@@ -461,9 +467,7 @@ func TestEvalCommandRunsAgentCapabilityEval(t *testing.T) {
 func TestModelsCommandOpensInteractiveChooser(t *testing.T) {
 	server := modelListServer(t, []string{"live-model"})
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
-	m.cfg.Provider = "compatible"
-	m.cfg.CompatibleName = "test-provider"
-	m.cfg.CompatibleURL = server.URL
+	m.cfg.RememberConnection(config.SavedConnection{Provider: "compatible", Name: "test-provider", BaseURL: server.URL, Model: "live-model"}, "")
 	_, _ = m.handleCommand("/models")
 
 	if m.input.Value() != "/model " {
@@ -477,10 +481,7 @@ func TestModelsCommandOpensInteractiveChooser(t *testing.T) {
 func TestModelCommandAcceptsUnavailableTypedID(t *testing.T) {
 	server := modelListServer(t, []string{"live-model"})
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
-	m.cfg.Provider = "compatible"
-	m.cfg.CompatibleName = "test-provider"
-	m.cfg.CompatibleURL = server.URL
-	m.cfg.SetModel("live-model")
+	m.cfg.RememberConnection(config.SavedConnection{Provider: "compatible", Name: "test-provider", BaseURL: server.URL, Model: "live-model"}, "")
 
 	_, _ = m.handleCommand("/model missing-model")
 
@@ -495,10 +496,7 @@ func TestModelCommandAcceptsUnavailableTypedID(t *testing.T) {
 func TestModelCommandAcceptsTypedIDWhenCatalogFails(t *testing.T) {
 	server := failingModelListServer(t, http.StatusBadGateway, `{"error":{"message":"catalog down"}}`)
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
-	m.cfg.Provider = "compatible"
-	m.cfg.CompatibleName = "test-provider"
-	m.cfg.CompatibleURL = server.URL
-	m.cfg.SetModel("old-model")
+	m.cfg.RememberConnection(config.SavedConnection{Provider: "compatible", Name: "test-provider", BaseURL: server.URL, Model: "old-model"}, "")
 
 	_, _ = m.handleCommand("/model typed-model")
 
@@ -513,8 +511,7 @@ func TestModelCommandAcceptsTypedIDWhenCatalogFails(t *testing.T) {
 func TestCodexModelCommandRejectsUnavailableTypedID(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
 	m := Model{cfg: config.Default(), styles: theme.New("rose")}
-	m.cfg.Provider = "codex"
-	m.cfg.SetModel("gpt-5.5")
+	m.cfg.RememberConnection(config.SavedConnection{Provider: "codex", Model: "gpt-5.5"}, "")
 
 	_, _ = m.handleCommand("/model random-api-model")
 
@@ -965,5 +962,68 @@ func TestModelCacheKeyDoesNotRetainCredentialValue(t *testing.T) {
 	}
 	if strings.Contains(modelCacheKey(first), "secret-one") || strings.Contains(modelCacheKey(second), "secret-two") {
 		t.Fatal("model cache key retained raw credential material")
+	}
+}
+
+func TestUnifiedModelSelectionSwitchesRememberedRouteAutomatically(t *testing.T) {
+	openRouter := modelListServer(t, []string{"router-model"})
+	groq := modelListServer(t, []string{"groq-model"})
+
+	cfg := config.Default()
+	cfg.Connections = map[string]config.SavedConnection{}
+	cfg.ActiveConnection = ""
+	cfg.Credentials = map[string]string{}
+	cfg.RememberConnection(config.SavedConnection{Provider: "compatible", Name: "openrouter", BaseURL: openRouter.URL, Model: "router-model"}, "")
+	cfg.RememberConnection(config.SavedConnection{Provider: "compatible", Name: "groq", BaseURL: groq.URL, Model: "groq-model"}, "")
+	m := Model{cfg: cfg, styles: theme.New("rose")}
+
+	_, _ = m.handleCommand("/model compatible:openrouter::router-model")
+
+	if m.cfg.ActiveConnection != "compatible:openrouter" || m.cfg.CompatibleName != "openrouter" {
+		t.Fatalf("route not switched automatically: active=%q name=%q", m.cfg.ActiveConnection, m.cfg.CompatibleName)
+	}
+	if got := m.cfg.Model(); got != "router-model" {
+		t.Fatalf("model = %q, want router-model", got)
+	}
+}
+
+func TestUnifiedModelSuggestionsIncludeAllRememberedProviders(t *testing.T) {
+	first := modelListServer(t, []string{"first-model"})
+	second := modelListServer(t, []string{"second-model"})
+
+	cfg := config.Default()
+	cfg.Connections = map[string]config.SavedConnection{}
+	cfg.ActiveConnection = ""
+	cfg.Credentials = map[string]string{}
+	cfg.RememberConnection(config.SavedConnection{Provider: "compatible", Name: "first", BaseURL: first.URL, Model: "first-model"}, "")
+	cfg.RememberConnection(config.SavedConnection{Provider: "compatible", Name: "second", BaseURL: second.URL, Model: "second-model"}, "")
+	m := Model{cfg: cfg}
+
+	got := m.commandSuggestions("/model ")
+	if !hasSuggestion(got, "first-model") || !hasSuggestion(got, "second-model") {
+		t.Fatalf("unified model suggestions missing remembered routes: %#v", got)
+	}
+	if !hasSuggestion(got, "/model compatible:first::first-model") || !hasSuggestion(got, "/model compatible:second::second-model") {
+		t.Fatalf("suggestions do not retain route identity: %#v", got)
+	}
+}
+
+func TestReconnectUsesRememberedCredentialWithoutReentry(t *testing.T) {
+	cfg := config.Default()
+	cfg.RememberConnection(config.SavedConnection{Provider: "openai", Model: "gpt-test"}, "remembered-secret")
+	m := Model{
+		cfg:     cfg,
+		styles:  theme.New("rose"),
+		connect: &connectFlow{Provider: "openai", Step: connectAPIKey},
+	}
+	m.input = textInputForTest("")
+
+	m.submitConnectStep()
+
+	if m.connect == nil || m.connect.Step != connectModel {
+		t.Fatalf("remembered credential did not advance to model selection: %#v", m.connect)
+	}
+	if got := m.connectModelListConfig().OpenAIKey; got != "remembered-secret" {
+		t.Fatalf("model catalog config key = %q, want remembered credential", got)
 	}
 }

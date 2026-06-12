@@ -30,12 +30,7 @@ func (p *Anthropic) generateMessageStream(ctx context.Context, req Request, spec
 		return ToolDecision{}, fmt.Errorf("ANTHROPIC_API_KEY is not set; run /connect anthropic")
 	}
 
-	messages := make([]map[string]string, 0, len(req.Messages))
-	for _, message := range req.Messages {
-		if message.Role == "user" || message.Role == "assistant" {
-			messages = append(messages, map[string]string{"role": message.Role, "content": message.Content})
-		}
-	}
+	messages := anthropicWireMessages(req.Messages)
 	payload := map[string]any{
 		"model":      req.Model,
 		"max_tokens": req.MaxTokens,
@@ -46,7 +41,7 @@ func (p *Anthropic) generateMessageStream(ctx context.Context, req Request, spec
 	if len(specs) > 0 {
 		payload["tools"] = anthropicStreamTools(specs)
 	}
-	if req.ReasoningSummary && supportsAdaptiveClaude(req.Model) {
+	if req.ReasoningSummary && supportsAdaptiveClaude(req.Model) && !hasNativeToolHistory(req.Messages) {
 		payload["thinking"] = map[string]any{"type": "adaptive", "display": "summarized"}
 		if effort := normalizeReasoningEffort(req.ReasoningEffort); effort != "" {
 			payload["output_config"] = map[string]any{"effort": effort}
@@ -106,6 +101,11 @@ func (p *Anthropic) generateMessageStream(ctx context.Context, req Request, spec
 				ID:    event.ContentBlock.ID,
 				Name:  event.ContentBlock.Name,
 			}
+			if event.ContentBlock.Type == "tool_use" {
+				if err := emitDelta(onDelta, DeltaActivity, toolActivityText(event.ContentBlock.Name, 0)); err != nil {
+					return err
+				}
+			}
 		case "content_block_delta":
 			switch event.Delta.Type {
 			case "text_delta":
@@ -124,6 +124,7 @@ func (p *Anthropic) generateMessageStream(ctx context.Context, req Request, spec
 					blocks[event.Index] = block
 				}
 				block.Input.WriteString(event.Delta.PartialJSON)
+				return emitDelta(onDelta, DeltaActivity, toolActivityText(block.Name, block.Input.Len()))
 			}
 		case "error":
 			if event.Error != nil && event.Error.Message != "" {
@@ -162,6 +163,60 @@ func (p *Anthropic) generateMessageStream(ctx context.Context, req Request, spec
 		return ToolDecision{}, fmt.Errorf("Anthropic returned an empty streamed response")
 	}
 	return ToolDecision{Text: visible, ToolCalls: calls}, nil
+}
+
+func anthropicWireMessages(messages []Message) []map[string]any {
+	out := make([]map[string]any, 0, len(messages))
+	var pendingResults []map[string]any
+	flushResults := func() {
+		if len(pendingResults) == 0 {
+			return
+		}
+		content := make([]map[string]any, len(pendingResults))
+		copy(content, pendingResults)
+		out = append(out, map[string]any{"role": "user", "content": content})
+		pendingResults = nil
+	}
+	for _, message := range messages {
+		if message.Role == "tool" {
+			if message.ToolResult == nil {
+				continue
+			}
+			result := *message.ToolResult
+			pendingResults = append(pendingResults, map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": result.ID,
+				"content":     toolResultContent(result),
+				"is_error":    !result.OK,
+			})
+			continue
+		}
+		flushResults()
+		switch message.Role {
+		case "user":
+			out = append(out, map[string]any{"role": "user", "content": message.Content})
+		case "assistant":
+			if len(message.ToolCalls) == 0 {
+				out = append(out, map[string]any{"role": "assistant", "content": message.Content})
+				continue
+			}
+			content := make([]map[string]any, 0, len(message.ToolCalls)+1)
+			if strings.TrimSpace(message.Content) != "" {
+				content = append(content, map[string]any{"type": "text", "text": message.Content})
+			}
+			for index, call := range message.ToolCalls {
+				content = append(content, map[string]any{
+					"type":  "tool_use",
+					"id":    stableToolCallID(call, index),
+					"name":  call.Name,
+					"input": call.Arguments,
+				})
+			}
+			out = append(out, map[string]any{"role": "assistant", "content": content})
+		}
+	}
+	flushResults()
+	return out
 }
 
 func anthropicStreamTools(specs []ToolSpec) []map[string]any {
