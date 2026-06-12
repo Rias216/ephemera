@@ -264,16 +264,25 @@ func (m *Model) applyAgentStream(update agent.StreamUpdate) tea.Cmd {
 		m.liveAgent.ActivityUpdatedAt = now
 	}
 
-	atBottom := m.viewport.AtBottom()
+	atBottom := m.activeViewportAtBottom()
 	switch update.Kind {
 	case agent.StreamStatus:
 		m.status = m.liveStatusText()
 		m.refreshViewport(atBottom)
 	case agent.StreamDelta, agent.StreamReasoning, agent.StreamActivity, agent.StreamToolProgress:
 		m.status = m.liveStatusText()
-		// Rebuilding the full transcript for every token is expensive. Repaint at
-		// a terminal-friendly cadence while the footer still updates every event.
-		if now.Sub(m.liveAgent.LastPaint) >= 40*time.Millisecond {
+		cadence := 40 * time.Millisecond
+		switch update.Kind {
+		case agent.StreamDelta:
+			cadence = 16 * time.Millisecond
+		case agent.StreamReasoning:
+			cadence = 50 * time.Millisecond
+		case agent.StreamActivity, agent.StreamToolProgress:
+			cadence = 100 * time.Millisecond
+		}
+		// Match repaint frequency to the kind of stream: final text feels fluid,
+		// reasoning remains readable, and tool-heavy runs avoid needless CPU work.
+		if now.Sub(m.liveAgent.LastPaint) >= cadence {
 			m.liveAgent.LastPaint = now
 			m.refreshViewport(atBottom)
 		}

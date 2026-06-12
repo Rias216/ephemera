@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ephemera-ai/ephemera/internal/agent"
 	"github.com/ephemera-ai/ephemera/internal/config"
+	evalsuite "github.com/ephemera-ai/ephemera/internal/eval"
 	"github.com/ephemera-ai/ephemera/internal/history"
 	"github.com/ephemera-ai/ephemera/internal/reasoning"
+	workruntime "github.com/ephemera-ai/ephemera/internal/runtime"
 	"github.com/ephemera-ai/ephemera/internal/tui"
 )
 
@@ -25,6 +28,8 @@ func main() {
 		model       = flag.String("model", "", "override model for the selected provider")
 		mode        = flag.String("mode", "", "override mode: normal, deep-reason, concise, creative")
 		agentEval   = flag.Bool("agent-eval", false, "run deterministic local agent capability eval and exit")
+		gradeEval   = flag.String("grade-eval", "", "grade the current workspace using an eval task JSON file")
+		initProject = flag.Bool("init-project", false, "write .ephemera/project.json from conservative project discovery")
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -71,6 +76,34 @@ func main() {
 	}
 	if err := config.Save(cfg); err != nil {
 		fatal("save config", err)
+	}
+	workspaceRoot := strings.TrimSpace(cfg.WorkspaceRoot)
+	if workspaceRoot == "" {
+		workspaceRoot, err = os.Getwd()
+		if err != nil {
+			fatal("resolve workspace", err)
+		}
+	}
+	if *initProject {
+		manifest := workruntime.DiscoverProjectManifest(workspaceRoot, cfg.AutoTestCommand)
+		if err := workruntime.WriteProjectManifest(workspaceRoot, manifest); err != nil {
+			fatal("initialize project manifest", err)
+		}
+		fmt.Println("Wrote", workruntime.ManifestPath(workspaceRoot))
+		fmt.Println(manifest.Summary())
+		return
+	}
+	if strings.TrimSpace(*gradeEval) != "" {
+		task, err := evalsuite.LoadTask(*gradeEval)
+		if err != nil {
+			fatal("load eval task", err)
+		}
+		report := evalsuite.Grade(context.Background(), workspaceRoot, task, 5*time.Minute)
+		fmt.Println(evalsuite.FormatReport(report))
+		if !report.Passed() {
+			os.Exit(1)
+		}
+		return
 	}
 
 	store, err := history.NewStore()

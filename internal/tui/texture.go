@@ -26,25 +26,29 @@ func (m Model) textureLine(width, row, seed int, background color.Color) string 
 }
 
 func (m Model) texturedViewport() string {
-	targetHeight := max(1, m.viewport.Height())
-	targetWidth := max(1, m.viewport.Width())
+	active := m.viewport
+	if m.inspectorTab == inspectorThinking && m.thinkingViewport.Width() > 0 {
+		active = m.thinkingViewport
+	}
+	targetHeight := max(1, active.Height())
+	targetWidth := max(1, active.Width())
 
 	// Do not call viewport.View here. Bubbles pads short rows using an unstyled
 	// internal Lip Gloss block; after nested ANSI resets that padding can inherit
 	// the terminal's default black background. The transcript renderer already
 	// produces wrapped rows, so select the visible content directly and paint its
 	// final width ourselves.
-	content := m.viewport.GetContent()
+	content := active.GetContent()
 	allLines := []string{}
 	if content != "" {
 		allLines = strings.Split(content, "\n")
 	}
-	start := clampInt(m.viewport.YOffset(), 0, len(allLines))
+	start := clampInt(active.YOffset(), 0, len(allLines))
 	end := min(len(allLines), start+targetHeight)
 	lines := append([]string(nil), allLines[start:end]...)
 
 	fill := lipgloss.NewStyle().Foreground(m.styles.Text).Background(m.styles.Panel).ColorWhitespace(true)
-	xOffset := m.viewport.XOffset()
+	xOffset := active.XOffset()
 	for index, line := range lines {
 		if xOffset > 0 || lipgloss.Width(line) > targetWidth {
 			line = ansi.Cut(line, xOffset, xOffset+targetWidth)

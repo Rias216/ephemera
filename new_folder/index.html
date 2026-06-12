@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>3D Pong</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const light = new THREE.PointLight(0xffffff, 1, 100);
+        light.position.set(0, 10, 10);
+        scene.add(light);
+        scene.add(new THREE.AmbientLight(0x404040));
+
+        // Court
+        const courtGeo = new THREE.BoxGeometry(20, 0.5, 40);
+        const courtMat = new THREE.MeshPhongMaterial({ color: 0x4444ff, transparent: true, opacity: 0.5 });
+        const court = new THREE.Mesh(courtGeo, courtMat);
+        scene.add(court);
+
+        // Paddles
+        const paddleGeo = new THREE.BoxGeometry(1, 5, 1);
+        const playerMat = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
+        const player = new THREE.Mesh(paddleGeo, playerMat);
+        player.position.set(-9, 2.5, 15);
+        scene.add(player);
+
+        const aiMat = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+        const ai = new THREE.Mesh(paddleGeo, aiMat);
+        ai.position.set(9, 2.5, 15);
+        scene.add(ai);
+
+        // Ball
+        const ballGeo = new THREE.SphereGeometry(0.5, 32, 32);
+        const ballMat = new THREE.MeshPhongMaterial({ color: 0xffffffff });
+        const ball = new THREE.Mesh(ballGeo, ballMat);
+        scene.add(ball);
+
+        camera.position.set(0, 15, 30);
+        camera.lookAt(0, 0, 0);
+
+        let ballVel = new THREE.Vector3(0.1, 0.1, -0.2);
+        const keys = {};
+
+        window.addEventListener('keydown', (e) => keys[e.code] = true);
+        window.addEventListener('keyup', (e) => keys[e.code] = false);
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Player movement
+            if (keys['ArrowUp'] && player.position.y < 7) player.position.y += 0.2;
+            if (keys['ArrowDown'] && player.position.y > 2) player.position.y -= 0.2;
+
+            // AI movement
+            ai.position.y += (ball.position.y - ai.position.y) * 0.1;
+
+            // Ball movement
+            ball.position.add(ballVel);
+
+            // Wall collisions
+            if (Math.abs(ball.position.x) > 9.5) ballVel.x *= -1;
+            if (ball.position.y > 7 || ball.position.y < 1) ballVel.y *= -1;
+            if (ball.position.z < -19) ballVel.z *= -1;
+
+            // Paddle collisions
+            if (ball.intersectsObject(player) || ball.intersectsObject(ai)) {
+                ballVel.z *= -1.05; // Speed up slightly
+            }
+
+            // Goal reset
+            if (ball.position.z > 20) {
+                ball.position.set(0, 5, 0);
+                ballVel.z = -0.2;
+            }
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

@@ -129,9 +129,9 @@ func (p *Ollama) generateChatStream(ctx context.Context, req Request, specs []To
 			call.ID = firstNonEmpty(incoming.ID, call.ID)
 			call.Name = firstNonEmpty(incoming.Function.Name, call.Name)
 			if len(incoming.Function.Arguments) > 0 {
-				args, err := decodeToolArguments(incoming.Function.Arguments)
-				if err != nil {
-					return ToolDecision{}, fmt.Errorf("Ollama returned invalid arguments for tool %q: %w", call.Name, err)
+				args, _, decodeErr := decodeRawToolArguments(incoming.Function.Arguments)
+				if decodeErr != nil {
+					return ToolDecision{}, newToolProtocolError("Ollama", call.Name, string(incoming.Function.Arguments), decodeErr)
 				}
 				call.Arguments = args
 			}
@@ -168,7 +168,7 @@ func (p *Ollama) generateChatStream(ctx context.Context, req Request, specs []To
 	if visible == "" && len(toolCalls) == 0 {
 		return ToolDecision{}, fmt.Errorf("Ollama returned an empty streaming response")
 	}
-	return ToolDecision{Text: visible, ToolCalls: toolCalls}, nil
+	return ToolDecision{Text: visible, ToolCalls: toolCalls, Transport: ToolTransportNative}, nil
 }
 
 func ollamaWireMessages(req Request) []map[string]any {
@@ -222,28 +222,6 @@ func ollamaJSONTools(specs []ToolSpec) []map[string]any {
 		})
 	}
 	return out
-}
-
-func decodeToolArguments(raw json.RawMessage) (map[string]any, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return map[string]any{}, nil
-	}
-	var object map[string]any
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if err := dec.Decode(&object); err == nil {
-		return object, nil
-	}
-	var encoded string
-	if err := json.Unmarshal(raw, &encoded); err != nil {
-		return nil, err
-	}
-	dec = json.NewDecoder(strings.NewReader(encoded))
-	dec.UseNumber()
-	if err := dec.Decode(&object); err != nil {
-		return nil, err
-	}
-	return object, nil
 }
 
 type thinkTagSplitter struct {

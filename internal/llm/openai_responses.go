@@ -177,13 +177,9 @@ func (p *OpenAI) generateResponsesStream(ctx context.Context, req Request, specs
 		if strings.TrimSpace(call.Name) == "" {
 			continue
 		}
-		args := map[string]any{}
-		if strings.TrimSpace(call.Arguments) != "" {
-			dec := json.NewDecoder(strings.NewReader(call.Arguments))
-			dec.UseNumber()
-			if err := dec.Decode(&args); err != nil {
-				return ToolDecision{}, fmt.Errorf("OpenAI returned invalid arguments for tool %q: %w", call.Name, err)
-			}
+		args, _, decodeErr := decodeToolArgumentsString(call.Arguments)
+		if decodeErr != nil {
+			return ToolDecision{}, newToolProtocolError("OpenAI", call.Name, call.Arguments, decodeErr)
 		}
 		toolCalls = append(toolCalls, ToolCall{ID: firstNonEmpty(call.CallID, call.ID), Name: call.Name, Arguments: args})
 	}
@@ -191,7 +187,7 @@ func (p *OpenAI) generateResponsesStream(ctx context.Context, req Request, specs
 	if visible == "" && len(toolCalls) == 0 {
 		return ToolDecision{}, fmt.Errorf("OpenAI returned an empty response")
 	}
-	return ToolDecision{Text: visible, ToolCalls: toolCalls}, nil
+	return ToolDecision{Text: visible, ToolCalls: toolCalls, Transport: ToolTransportNative}, nil
 }
 
 func openAIResponsesInput(messages []Message) []map[string]any {

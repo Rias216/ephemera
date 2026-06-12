@@ -1,9 +1,7 @@
 package llm
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -109,13 +107,9 @@ func anthropicToolDecision(content []anthropic.ContentBlockUnion, onDelta DeltaF
 		case anthropic.TextBlock:
 			text.WriteString(value.Text)
 		case anthropic.ToolUseBlock:
-			args := map[string]any{}
-			if len(value.Input) > 0 {
-				dec := json.NewDecoder(bytes.NewReader(value.Input))
-				dec.UseNumber()
-				if err := dec.Decode(&args); err != nil {
-					return ToolDecision{}, fmt.Errorf("Anthropic returned invalid arguments for tool %q: %w", value.Name, err)
-				}
+			args, _, decodeErr := decodeRawToolArguments(value.Input)
+			if decodeErr != nil {
+				return ToolDecision{}, newToolProtocolError("Anthropic", value.Name, string(value.Input), decodeErr)
 			}
 			calls = append(calls, ToolCall{ID: value.ID, Name: value.Name, Arguments: args})
 		}
@@ -129,5 +123,5 @@ func anthropicToolDecision(content []anthropic.ContentBlockUnion, onDelta DeltaF
 	if visible == "" && len(calls) == 0 {
 		return ToolDecision{}, fmt.Errorf("Anthropic returned an empty tool decision")
 	}
-	return ToolDecision{Text: visible, ToolCalls: calls}, nil
+	return ToolDecision{Text: visible, ToolCalls: calls, Transport: ToolTransportNative}, nil
 }

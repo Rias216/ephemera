@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/ephemera-ai/ephemera/internal/llm"
@@ -16,10 +19,30 @@ type ContextWindow struct {
 	Budget         int
 	SummaryTokens  int
 	RecallMessages int
+	Provider       string
+	Iteration      int
+	MaxIterations  int
 	Query          string
 	WorkingMemory  string
 	Messages       []llm.Message
 	NativeTurns    []llm.Message
+	Cache          *ContextFitCache
+}
+
+// ContextFitCache is shared across iterations of one agent run. It caches both
+// complete fits and deterministic history summaries. The cache key includes
+// every input that can affect selection, so message edits and working-memory
+// changes cannot serve stale context.
+type ContextFitCache struct {
+	mu        sync.Mutex
+	fitKey    [32]byte
+	messages  []llm.Message
+	selection messageSelection
+	summaries map[[32]byte]string
+}
+
+func NewContextFitCache() *ContextFitCache {
+	return &ContextFitCache{summaries: make(map[[32]byte]string)}
 }
 
 // Fit returns the provider-ready context and selection statistics.
@@ -28,9 +51,13 @@ func (w ContextWindow) Fit() ([]llm.Message, messageSelection) {
 	if budget <= 0 {
 		budget = 16_000
 	}
+	summaryTokens := w.adaptiveSummaryTokens(budget)
+	if cached, stats, ok := w.cachedFit(budget, summaryTokens); ok {
+		return cached, stats
+	}
 	valid := append([]llm.Message(nil), w.Messages...)
 	stats := messageSelection{Total: len(valid)}
-	available := budget - estimateVisibleTokens(w.System) - 4
+	available := budget - estimateVisibleTokensForProvider(w.System, w.Provider) - 4
 	if available <= 0 || len(valid) == 0 {
 		return nil, stats
 	}
@@ -39,14 +66,14 @@ func (w ContextWindow) Fit() ([]llm.Message, messageSelection) {
 	if memory := strings.TrimSpace(w.WorkingMemory); memory != "" {
 		prefix = append(prefix, llm.Message{Role: "user", Content: "[Working memory — current run facts, decisions, and evidence]\n" + compact(memory, maxInt(240, available*2))})
 	}
-	prefixCost := messageSliceTokens(prefix)
+	prefixCost := messageSliceTokensForProvider(prefix, w.Provider)
 	if prefixCost >= available {
 		prefix = nil
 		prefixCost = 0
 	}
 
 	explicitBudget := available - prefixCost
-	reserveSummary := minInt(maxInt(0, w.SummaryTokens), explicitBudget/3)
+	reserveSummary := minInt(maxInt(0, summaryTokens), explicitBudget/2)
 	recentBudget := explicitBudget - reserveSummary
 	selected := map[int]bool{}
 	used := 0
@@ -54,7 +81,7 @@ func (w ContextWindow) Fit() ([]llm.Message, messageSelection) {
 	// Retain a coherent recent suffix first. Never split solely because the
 	// newest message is larger than the nominal budget.
 	for index := len(valid) - 1; index >= 0; index-- {
-		cost := estimateLLMMessageTokens(valid[index])
+		cost := estimateLLMMessageTokensForProvider(valid[index], w.Provider)
 		if used+cost > recentBudget && len(selected) > 0 {
 			break
 		}
@@ -82,26 +109,104 @@ func (w ContextWindow) Fit() ([]llm.Message, messageSelection) {
 
 	if stats.Dropped > 0 && reserveSummary > 0 {
 		omitted := omittedMessages(valid, selected)
-		summary := w.Compact(omitted, reserveSummary)
+		summary := w.compactCached(omitted, reserveSummary)
 		if summary != "" {
 			condensed := llm.Message{Role: "user", Content: "[Condensed earlier conversation context — preserve these facts and decisions]\n" + summary}
-			for len(chronological) > 1 && prefixCost+messageSliceTokens(chronological)+estimateLLMMessageTokens(condensed) > available {
+			for len(chronological) > 1 && prefixCost+messageSliceTokensForProvider(chronological, w.Provider)+estimateLLMMessageTokensForProvider(condensed, w.Provider) > available {
 				chronological = chronological[1:]
 				stats.Sent--
 				stats.Dropped++
 			}
-			if prefixCost+messageSliceTokens(chronological)+estimateLLMMessageTokens(condensed) <= available {
+			if prefixCost+messageSliceTokensForProvider(chronological, w.Provider)+estimateLLMMessageTokensForProvider(condensed, w.Provider) <= available {
 				prefix = append(prefix, condensed)
 			}
 		}
 	}
 
 	out := append(prefix, chronological...)
-	remaining := available - messageSliceTokens(out)
+	remaining := available - messageSliceTokensForProvider(out, w.Provider)
 	if remaining > 0 && len(w.NativeTurns) > 0 {
-		out = append(out, selectNativeTurnsDeduplicated(w.NativeTurns, remaining)...)
+		out = append(out, selectNativeTurnsDeduplicatedForProvider(w.NativeTurns, remaining, w.Provider)...)
 	}
+	w.storeFit(budget, summaryTokens, out, stats)
 	return out, stats
+}
+
+func (w ContextWindow) adaptiveSummaryTokens(budget int) int {
+	configured := maxInt(0, w.SummaryTokens)
+	if configured == 0 || budget <= 0 {
+		return 0
+	}
+	ratio := 0.0
+	if w.MaxIterations > 1 && w.Iteration > 0 {
+		ratio = float64(minInt(w.Iteration-1, w.MaxIterations-1)) / float64(w.MaxIterations-1)
+	}
+	// Grow the summary reserve as the run progresses, while treating the user's
+	// configured summary budget as a hard cap. This avoids starving early tool
+	// rounds and preserves more accumulated evidence near completion.
+	dynamicCap := int(float64(budget) * (0.10 + 0.30*ratio))
+	return minInt(configured, maxInt(64, dynamicCap))
+}
+
+func (w ContextWindow) cachedFit(budget, summaryTokens int) ([]llm.Message, messageSelection, bool) {
+	if w.Cache == nil {
+		return nil, messageSelection{}, false
+	}
+	key := w.fitKey(budget, summaryTokens)
+	w.Cache.mu.Lock()
+	defer w.Cache.mu.Unlock()
+	if w.Cache.fitKey != key || w.Cache.messages == nil {
+		return nil, messageSelection{}, false
+	}
+	return cloneLLMMessages(w.Cache.messages), w.Cache.selection, true
+}
+
+func (w ContextWindow) storeFit(budget, summaryTokens int, messages []llm.Message, selection messageSelection) {
+	if w.Cache == nil {
+		return
+	}
+	key := w.fitKey(budget, summaryTokens)
+	w.Cache.mu.Lock()
+	w.Cache.fitKey = key
+	w.Cache.messages = cloneLLMMessages(messages)
+	w.Cache.selection = selection
+	w.Cache.mu.Unlock()
+}
+
+func (w ContextWindow) fitKey(budget, summaryTokens int) [32]byte {
+	payload := struct {
+		System, Provider, Query, WorkingMemory string
+		Budget, SummaryTokens, RecallMessages  int
+		Messages, NativeTurns                  []llm.Message
+	}{w.System, w.Provider, w.Query, w.WorkingMemory, budget, summaryTokens, w.RecallMessages, w.Messages, w.NativeTurns}
+	data, _ := json.Marshal(payload)
+	return sha256.Sum256(data)
+}
+
+func (w ContextWindow) compactCached(messages []llm.Message, maxTokens int) string {
+	if w.Cache == nil {
+		return w.Compact(messages, maxTokens)
+	}
+	data, _ := json.Marshal(struct {
+		Provider  string
+		MaxTokens int
+		Messages  []llm.Message
+	}{w.Provider, maxTokens, messages})
+	key := sha256.Sum256(data)
+	w.Cache.mu.Lock()
+	if summary, ok := w.Cache.summaries[key]; ok {
+		w.Cache.mu.Unlock()
+		return summary
+	}
+	w.Cache.mu.Unlock()
+	summary := w.Compact(messages, maxTokens)
+	w.Cache.mu.Lock()
+	if w.Cache.summaries == nil {
+		w.Cache.summaries = make(map[[32]byte]string)
+	}
+	w.Cache.summaries[key] = summary
+	w.Cache.mu.Unlock()
+	return summary
 }
 
 type recalledMessage struct {
@@ -128,7 +233,7 @@ func (w ContextWindow) Recall(messages []llm.Message, selected map[int]bool, bud
 		if score == 0 {
 			continue
 		}
-		candidates = append(candidates, recalledMessage{Index: index, Cost: estimateLLMMessageTokens(message), Score: score})
+		candidates = append(candidates, recalledMessage{Index: index, Cost: estimateLLMMessageTokensForProvider(message, w.Provider), Score: score})
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].Score != candidates[j].Score {
@@ -175,7 +280,7 @@ func (w ContextWindow) Compact(messages []llm.Message, maxTokens int) string {
 			chunks = append(chunks, strings.Join(lines, "\n"))
 		}
 	}
-	for len(chunks) > 1 && estimateVisibleTokens(strings.Join(chunks, "\n---\n")) > maxTokens {
+	for len(chunks) > 1 && estimateVisibleTokensForProvider(strings.Join(chunks, "\n---\n"), w.Provider) > maxTokens {
 		next := make([]string, 0, (len(chunks)+1)/2)
 		for index := 0; index < len(chunks); index += 2 {
 			end := minInt(len(chunks), index+2)
@@ -253,6 +358,10 @@ func commonContextTerm(value string) bool {
 }
 
 func selectNativeTurnsDeduplicated(turns []llm.Message, budget int) []llm.Message {
+	return selectNativeTurnsDeduplicatedForProvider(turns, budget, "")
+}
+
+func selectNativeTurnsDeduplicatedForProvider(turns []llm.Message, budget int, provider string) []llm.Message {
 	seenResults := map[string]bool{}
 	filtered := make([]llm.Message, 0, len(turns))
 	for _, message := range turns {
@@ -265,5 +374,22 @@ func selectNativeTurnsDeduplicated(turns []llm.Message, budget int) []llm.Messag
 		}
 		filtered = append(filtered, message)
 	}
-	return selectNativeTurns(filtered, budget)
+	return selectNativeTurnsForProvider(filtered, budget, provider)
+}
+
+func cloneLLMMessages(messages []llm.Message) []llm.Message {
+	cloned := make([]llm.Message, len(messages))
+	for index, message := range messages {
+		cloned[index] = message
+		cloned[index].ToolCalls = append([]llm.ToolCall(nil), message.ToolCalls...)
+		for callIndex := range cloned[index].ToolCalls {
+			cloned[index].ToolCalls[callIndex].Arguments = cloneArguments(cloned[index].ToolCalls[callIndex].Arguments)
+		}
+		if message.ToolResult != nil {
+			result := *message.ToolResult
+			result.Metadata = cloneMetadata(result.Metadata)
+			cloned[index].ToolResult = &result
+		}
+	}
+	return cloned
 }

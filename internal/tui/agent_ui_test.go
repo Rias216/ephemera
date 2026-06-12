@@ -85,6 +85,101 @@ func TestSurfaceNoticePrefersStructuredTrace(t *testing.T) {
 	}
 }
 
+func TestStructuredReasoningRendererExposesTraceFields(t *testing.T) {
+	m := Model{styles: theme.New("rose")}
+	renderer := newCLIRenderer(m.styles, 90)
+	rows := m.renderStructuredReasoning(history.AgentTrace{
+		Goal:          "make context interactive",
+		CurrentState:  "flat transcript",
+		Assumptions:   []string{"events have timestamps"},
+		Approach:      []string{"merge messages and events", "add controls"},
+		Evidence:      []string{"timeline already tracks expansion"},
+		Risks:         []string{"stale selection"},
+		ToolRationale: "reuse the existing renderer",
+		Verification:  "verified by tests",
+		NextStep:      "ship",
+	}, renderer)
+	got := strings.Join(rows, "\n")
+	for _, want := range []string{"Goal", "make context interactive", "Approach", "Evidence", "Verification", "Next step"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("structured reasoning missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestCompactEventRendererKeepsToolResultOnOneCard(t *testing.T) {
+	cfg := config.Default()
+	m := Model{cfg: cfg, styles: theme.New("rose"), compactView: true}
+	event := history.Event{Type: history.EventToolResult, Tool: "read_file", Status: "done", Content: "one\ntwo\nthree", Metadata: map[string]any{"path": "main.go"}}
+	rows := m.renderAgentEvent(event, newCLIRenderer(m.styles, 100), false, false, 0)
+	got := strings.Join(rows, "\n")
+	if len(rows) != 1 {
+		t.Fatalf("compact event rendered %d rows, want 1:\n%s", len(rows), got)
+	}
+	if !strings.Contains(got, "main.go") || !strings.Contains(got, "3 lines") {
+		t.Fatalf("compact result lacks useful summary:\n%s", got)
+	}
+}
+
+func TestExtractFencedCodeCombinesBlocks(t *testing.T) {
+	got := extractFencedCode("before\n```go\npackage main\n```\nmiddle\n```text\nok\n```")
+	if got != "package main\n\nok" {
+		t.Fatalf("extracted code = %q", got)
+	}
+}
+
+func TestThinkingViewportRendersStructuredSurfaceIndependently(t *testing.T) {
+	cfg := config.Default()
+	m := Model{cfg: cfg, styles: theme.New("rose"), session: history.New("surface", cfg.Provider, cfg.Model(), reasoning.ModeNormal), width: 90, height: 24}
+	m.session.Append("user", "keep the transcript here")
+	m.session.Agent = history.AgentSnapshot{Trace: history.AgentTrace{
+		Goal:         "show the full safe reasoning surface",
+		Approach:     []string{"render structured trace", "preserve transcript scroll"},
+		Evidence:     []string{"viewport state is separate"},
+		Verification: "verified",
+		NextStep:     "continue",
+	}, Verified: true}
+	m.resize()
+	m.refreshViewport(false)
+	transcriptContent := m.viewport.GetContent()
+	m.inspectorTab = inspectorThinking
+	m.refreshThinkingViewport(false)
+	surfaceContent := m.thinkingViewport.GetContent()
+
+	if !strings.Contains(transcriptContent, "keep the transcript here") {
+		t.Fatalf("transcript viewport lost content:\n%s", transcriptContent)
+	}
+	for _, want := range []string{"show the full safe reasoning surface", "render structured trace", "viewport state is separate", "Verification"} {
+		if !strings.Contains(surfaceContent, want) {
+			t.Fatalf("thinking viewport missing %q:\n%s", want, surfaceContent)
+		}
+	}
+	if transcriptContent == surfaceContent {
+		t.Fatal("thinking viewport reused transcript content instead of independent surface")
+	}
+}
+
+func TestTranscriptSectionRendererReusesStableCards(t *testing.T) {
+	cfg := config.Default()
+	m := Model{cfg: cfg, styles: theme.New("rose"), session: history.New("cache", cfg.Provider, cfg.Model(), reasoning.ModeNormal), width: 90, height: 24, expandedEvents: map[string]bool{}, sectionRenderCache: map[string][]string{}}
+	m.session.Append("user", "stable message")
+	m.resize()
+	first := m.renderTranscript()
+	firstCacheSize := len(m.sectionRenderCache)
+	second := m.renderTranscript()
+	if first != second {
+		t.Fatal("stable transcript changed between renders")
+	}
+	if len(m.sectionRenderCache) != firstCacheSize || firstCacheSize == 0 {
+		t.Fatalf("stable sections were not reused: before=%d after=%d", firstCacheSize, len(m.sectionRenderCache))
+	}
+	m.session.AppendEvent(history.Event{ID: "new", Type: history.EventToolResult, Tool: "read_file", Content: "result", Status: "done", CreatedAt: time.Now()})
+	_ = m.renderTranscript()
+	if len(m.sectionRenderCache) <= firstCacheSize {
+		t.Fatalf("new event did not add a section cache entry: before=%d after=%d", firstCacheSize, len(m.sectionRenderCache))
+	}
+}
+
 func TestMemoryNoticeReportsSources(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".ephemera"), 0o700); err != nil {

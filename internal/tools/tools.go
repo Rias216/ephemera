@@ -220,6 +220,9 @@ func Builtins() []Tool {
 			arg("path", "string", "Workspace-relative file path to create or replace.", true),
 			arg("content", "string", "Complete UTF-8 file content.", true),
 		}},
+		{Name: "apply_multi_patch", Description: "Atomically write multiple complete files. Args: patches array of {path, content}. If any write fails, every target is rolled back.", Risk: RiskWrite, Arguments: []ArgumentSpec{
+			arg("patches", "array", "Two or more objects with workspace-relative path and complete UTF-8 content fields.", true),
+		}},
 		{Name: "replace_in_file", Description: "Replace one exact text occurrence. Args: path, old, new, optional all.", Risk: RiskWrite, Arguments: []ArgumentSpec{
 			arg("path", "string", "Workspace-relative file path.", true),
 			arg("old", "string", "Exact existing text to replace.", true),
@@ -264,7 +267,19 @@ func (tool Tool) ParameterSchema() llm.ToolSchema {
 	properties := make(map[string]llm.ToolProperty, len(tool.Arguments))
 	var required []string
 	for _, argument := range tool.Arguments {
-		properties[argument.Name] = llm.ToolProperty{Type: argument.Type, Description: argument.Description}
+		property := llm.ToolProperty{Type: argument.Type, Description: argument.Description}
+		if tool.Name == "apply_multi_patch" && argument.Name == "patches" {
+			property.Items = &llm.ToolSchema{
+				Type: "object",
+				Properties: map[string]llm.ToolProperty{
+					"path":    {Type: "string", Description: "Workspace-relative file path."},
+					"content": {Type: "string", Description: "Complete UTF-8 file content."},
+				},
+				Required:             []string{"path", "content"},
+				AdditionalProperties: false,
+			}
+		}
+		properties[argument.Name] = property
 		if argument.Required {
 			required = append(required, argument.Name)
 		}
@@ -338,6 +353,7 @@ func (r Registry) Normalize(call Call) (Call, error) {
 		"git_commit":        {"msg": "message", "files": "paths"},
 		"git_merge":         {"name": "branch"},
 		"apply_patch":       {"file": "path", "filename": "path", "text": "content"},
+		"apply_multi_patch": {"files": "patches", "changes": "patches"},
 		"replace_in_file":   {"file": "path", "filename": "path", "old_text": "old", "new_text": "new", "replace_all": "all"},
 		"shell":             {"cmd": "command"},
 		"delegate":          {"prompt": "task", "specialist": "role"},
@@ -358,6 +374,15 @@ func (r Registry) Normalize(call Call) (Call, error) {
 	tool, ok := Lookup(call.Name)
 	if !ok {
 		return call, fmt.Errorf("unknown tool %q", call.Name)
+	}
+	if call.Name == "apply_multi_patch" {
+		if value, exists := call.Arguments["patches"]; exists {
+			normalized, err := normalizeMultiPatchArgument(value)
+			if err != nil {
+				return call, err
+			}
+			call.Arguments["patches"] = normalized
+		}
 	}
 	for _, argument := range tool.Arguments {
 		value, exists := call.Arguments[argument.Name]
@@ -520,6 +545,8 @@ func (r Registry) ExecuteStream(ctx context.Context, call Call, emit func(string
 		result = r.gitMerge(ctx, call, emit)
 	case "apply_patch":
 		result = r.applyPatch(call)
+	case "apply_multi_patch":
+		result = r.applyMultiPatch(call)
 	case "replace_in_file":
 		result = r.replaceInFile(call)
 	case "shell":
@@ -577,6 +604,8 @@ func (r Registry) preview(call Call) Result {
 		rel, _ := filepath.Rel(r.WorkspaceRoot, path)
 		result.Output = renderDryRunDiff(filepath.ToSlash(rel), string(before), content)
 		result.Metadata["path"] = filepath.ToSlash(rel)
+	case "apply_multi_patch":
+		result = r.previewMultiPatch(call)
 	case "github_issue", "github_pr":
 		if err := validateGitHubPreview(call); err != nil {
 			return fail(call.Name, err.Error())
@@ -757,7 +786,14 @@ func (r Registry) readFile(call Call) Result {
 	}
 	result := ok(call.Name, out.String())
 	rel, _ := filepath.Rel(r.WorkspaceRoot, path)
-	result.Metadata = map[string]any{"path": filepath.ToSlash(rel), "start_line": startLine, "end_line": endLine}
+	hash := sha256.Sum256(data)
+	result.Metadata = map[string]any{
+		"path":           filepath.ToSlash(rel),
+		"start_line":     startLine,
+		"end_line":       endLine,
+		"content_sha256": fmt.Sprintf("%x", hash[:]),
+		"file_bytes":     len(data),
+	}
 	return result
 }
 
@@ -1085,6 +1121,13 @@ func validateArgumentType(call Call, argument ArgumentSpec) error {
 		default:
 		}
 		return fmt.Errorf("%s argument %q must be a boolean", call.Name, argument.Name)
+	case "array":
+		switch value.(type) {
+		case []any, []map[string]any:
+			return nil
+		default:
+			return fmt.Errorf("%s argument %q must be an array", call.Name, argument.Name)
+		}
 	}
 	return nil
 }

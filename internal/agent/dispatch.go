@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,8 +20,9 @@ type dispatchedAction struct {
 }
 
 // canParallelActions accepts either an independent read batch or an explicit
-// batch of approval-free writes to disjoint files. Mixed read/write batches are
-// kept sequential because an undeclared dependency is too easy to miss.
+// batch of approval-free writes to disjoint files. Write batches are executed
+// atomically: every target is snapshotted and the complete batch is rolled back
+// if any member fails.
 func (r Runner) canParallelActions(actions []modelToolAction) bool {
 	if len(actions) < 2 {
 		return false
@@ -84,6 +86,22 @@ func pathsOverlap(left, right string) bool {
 
 func (r Runner) executeParallelActions(ctx context.Context, state *runState, action modelAction, iteration int, emit func(StreamUpdate)) []dispatchedAction {
 	out := make([]dispatchedAction, len(action.Actions))
+	writeBatch := r.parallelActionRisk(action.Actions) == tools.RiskWrite && !r.Config.AgentDryRun
+	var snapshots []atomicFileSnapshot
+	if writeBatch {
+		var err error
+		snapshots, err = r.snapshotAtomicWriteTargets(action.Actions)
+		if err != nil {
+			for index, item := range action.Actions {
+				name := firstNonEmpty(item.Name, item.Tool, "write")
+				out[index] = dispatchedAction{
+					Call:   tools.Call{Name: name, Arguments: cloneArguments(item.Arguments)},
+					Result: tools.Result{Tool: name, OK: false, Error: "atomic write batch was not started: " + err.Error(), Metadata: map[string]any{"atomic_batch": true, "snapshot_failed": true}},
+				}
+			}
+			return out
+		}
+	}
 	limit := r.Config.AgentMaxParallelTools
 	if limit < 1 {
 		limit = 4
@@ -125,11 +143,136 @@ func (r Runner) executeParallelActions(ctx context.Context, state *runState, act
 		}()
 	}
 	wg.Wait()
+	failure := ""
 	for index := range out {
 		if out[index].Pending != nil {
 			out[index].Result = tools.Result{Tool: out[index].Call.Name, OK: false, Error: fmt.Sprintf("parallel dispatcher unexpectedly received approval requirement for %s", out[index].Call.Name)}
 			out[index].Pending = nil
 		}
+		if !out[index].Result.OK && failure == "" {
+			failure = firstNonEmpty(out[index].Result.Error, out[index].Result.Output, out[index].Call.Name+" failed")
+		}
+	}
+	if writeBatch && failure != "" {
+		rollbackErr := restoreAtomicWriteTargets(r.Tools.WorkspaceRoot, snapshots)
+		for index := range out {
+			if out[index].Result.Metadata == nil {
+				out[index].Result.Metadata = map[string]any{}
+			}
+			out[index].Result.Metadata["atomic_batch"] = true
+			out[index].Result.Metadata["rolled_back"] = rollbackErr == nil
+			if out[index].Result.OK {
+				out[index].Result.OK = false
+				out[index].Result.Output = ""
+				out[index].Result.Error = "atomic write batch rolled back because another write failed: " + failure
+			}
+			if rollbackErr != nil {
+				out[index].Result.Error = firstNonEmpty(out[index].Result.Error, failure) + "; rollback error: " + rollbackErr.Error()
+			}
+		}
+	} else if writeBatch {
+		for index := range out {
+			if out[index].Result.Metadata == nil {
+				out[index].Result.Metadata = map[string]any{}
+			}
+			out[index].Result.Metadata["atomic_batch"] = true
+		}
 	}
 	return out
+}
+
+func (r Runner) parallelActionRisk(actions []modelToolAction) tools.Risk {
+	var risk tools.Risk
+	for _, item := range actions {
+		call, err := r.normalizeToolCall(tools.Call{Name: firstNonEmpty(item.Name, item.Tool), Arguments: cloneArguments(item.Arguments)})
+		if err != nil {
+			return ""
+		}
+		current := r.toolRisk(call.Name)
+		if risk == "" {
+			risk = current
+		} else if risk != current {
+			return ""
+		}
+	}
+	return risk
+}
+
+type atomicFileSnapshot struct {
+	Path    string
+	Existed bool
+	Mode    os.FileMode
+	Data    []byte
+}
+
+func (r Runner) snapshotAtomicWriteTargets(actions []modelToolAction) ([]atomicFileSnapshot, error) {
+	snapshots := make([]atomicFileSnapshot, 0, len(actions))
+	for _, item := range actions {
+		call, err := r.normalizeToolCall(tools.Call{Name: firstNonEmpty(item.Name, item.Tool), Arguments: cloneArguments(item.Arguments)})
+		if err != nil {
+			return nil, err
+		}
+		path, err := r.Tools.ResolvePath(strings.TrimSpace(fmt.Sprint(call.Arguments["path"])))
+		if err != nil {
+			return nil, err
+		}
+		snapshot := atomicFileSnapshot{Path: path}
+		info, statErr := os.Stat(path)
+		switch {
+		case statErr == nil:
+			if info.IsDir() {
+				return nil, fmt.Errorf("atomic write target is a directory: %s", path)
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil, readErr
+			}
+			snapshot.Existed = true
+			snapshot.Mode = info.Mode()
+			snapshot.Data = data
+		case os.IsNotExist(statErr):
+			// New files are removed during rollback.
+		default:
+			return nil, statErr
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, nil
+}
+
+func restoreAtomicWriteTargets(root string, snapshots []atomicFileSnapshot) error {
+	var failures []string
+	for _, snapshot := range snapshots {
+		if !snapshot.Existed {
+			if err := os.Remove(snapshot.Path); err != nil && !os.IsNotExist(err) {
+				failures = append(failures, err.Error())
+			}
+			removeEmptyParents(filepath.Dir(snapshot.Path), root)
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(snapshot.Path), 0o700); err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		if err := os.WriteFile(snapshot.Path, snapshot.Data, snapshot.Mode.Perm()); err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		if err := os.Chmod(snapshot.Path, snapshot.Mode.Perm()); err != nil {
+			failures = append(failures, err.Error())
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func removeEmptyParents(directory, root string) {
+	root = filepath.Clean(root)
+	for directory = filepath.Clean(directory); directory != root && strings.HasPrefix(directory, root+string(os.PathSeparator)); directory = filepath.Dir(directory) {
+		if err := os.Remove(directory); err != nil {
+			return
+		}
+	}
 }

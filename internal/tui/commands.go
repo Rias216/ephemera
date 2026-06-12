@@ -119,8 +119,8 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/plan", "inspect the current agent plan"}},
 	},
 	{
-		Name: "/surface", Description: "open the persisted Beneath the Surface trace", Category: "AGENT", Introduced: "v0.6.0", Permission: "local",
-		Examples: []commandExample{{"/surface", "review the latest goal, evidence, plan, and verification after completion"}},
+		Name: "/surface", Usage: "[copy|export [path]]", Description: "open, copy, or export the persisted reasoning surface", Category: "AGENT", Introduced: "v0.6.0", Permission: "local", Choices: []string{"copy", "export"},
+		Examples: []commandExample{{"/surface", "review the latest goal, evidence, plan, and verification"}, {"/surface copy", "copy the full reasoning surface"}, {"/surface export trace.md", "export it as Markdown"}},
 	},
 	{
 		Name: "/tools", Description: "list local agent tools", Category: "AGENT", Introduced: "v0.4.0", Permission: "local",
@@ -179,6 +179,10 @@ var commandSpecs = []commandSpec{
 		Examples: []commandExample{{"/compact", "trim older agent events"}},
 	},
 	{
+		Name: "/compact-view", Usage: "[on|off|toggle]", Description: "collapse tool and reasoning sections to one-line summaries", Category: "VIEW", Introduced: "v0.8.0", Permission: "local", Choices: []string{"on", "off", "toggle"},
+		Examples: []commandExample{{"/compact-view", "toggle compact context rendering"}, {"/compact-view on", "keep the transcript dense"}},
+	},
+	{
 		Name: "/config", Description: "show saved runtime configuration", Category: "SYSTEM", Introduced: "v0.4.0", Permission: "local",
 		Examples: []commandExample{{"/config", "inspect agent and token settings"}},
 	},
@@ -197,6 +201,10 @@ var commandSpecs = []commandSpec{
 	{
 		Name: "/undo", Description: "remove the latest message", Category: "SESSION", Introduced: "v0.3.0", Permission: "filesystem",
 		Examples: []commandExample{{"/undo", "remove the latest message"}},
+	},
+	{
+		Name: "/redo", Description: "restore the most recently undone transcript state", Category: "SESSION", Introduced: "v0.8.0", Permission: "filesystem",
+		Examples: []commandExample{{"/redo", "restore the last undo"}},
 	},
 	{
 		Name: "/export", Usage: "[path]", Description: "export the transcript as Markdown", Category: "OUTPUT", Introduced: "v0.3.0", Permission: "filesystem",

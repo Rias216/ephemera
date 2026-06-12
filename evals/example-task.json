@@ -1,0 +1,20 @@
+{
+  "name": "example-readme-contract",
+  "prompt": "Update README.md with the requested feature documentation.",
+  "checks": [
+    {
+      "name": "README exists",
+      "path": "README.md",
+      "required": true
+    },
+    {
+      "name": "Documentation mentions verification",
+      "path": "README.md",
+      "contains": "verification",
+      "required": true
+    }
+  ],
+  "forbidden_changes": [
+    ".env"
+  ]
+}

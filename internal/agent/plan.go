@@ -24,14 +24,29 @@ const (
 type Plan struct {
 	Goal      string           `json:"goal"`
 	Steps     []PlanStep       `json:"steps"`
+	Tree      []TaskNode       `json:"tree,omitempty"`
 	Completed map[int]bool     `json:"completed,omitempty"`
 	Evidence  map[int][]string `json:"evidence,omitempty"`
 	RevisedAt time.Time        `json:"revised_at"`
 }
 
+// TaskNode is the provider-neutral hierarchical plan surface. Phase nodes own
+// task children; task dependencies use stable string IDs so the tree can later
+// grow beyond two levels without changing the persisted format.
+type TaskNode struct {
+	ID          string         `json:"id"`
+	Description string         `json:"description"`
+	Status      PlanStepStatus `json:"status"`
+	Children    []TaskNode     `json:"children,omitempty"`
+	DependsOn   []string       `json:"depends_on,omitempty"`
+	ToolsUsed   []string       `json:"tools_used,omitempty"`
+	Evidence    []string       `json:"evidence,omitempty"`
+}
+
 type PlanStep struct {
 	ID          int            `json:"id"`
 	Description string         `json:"description"`
+	Phase       string         `json:"phase,omitempty"`
 	DependsOn   []int          `json:"depends_on,omitempty"`
 	Status      PlanStepStatus `json:"status"`
 	ToolsUsed   []string       `json:"tools_used,omitempty"`
@@ -81,7 +96,7 @@ func newPlan(goal string, descriptions []string) *Plan {
 		if description == "" {
 			continue
 		}
-		plan.Steps = append(plan.Steps, PlanStep{ID: len(plan.Steps) + 1, Description: description, Status: PlanPending})
+		plan.Steps = append(plan.Steps, PlanStep{ID: len(plan.Steps) + 1, Description: description, Phase: inferPlanPhase(description, ""), Status: PlanPending})
 	}
 	return plan
 }
@@ -113,6 +128,9 @@ func (p *Plan) sync(goal string, descriptions []string) bool {
 		}
 		step.ID = len(p.Steps) + 1
 		step.Description = description
+		if step.Phase == "" {
+			step.Phase = inferPlanPhase(description, "")
+		}
 		p.Steps = append(p.Steps, step)
 	}
 	p.rebuildMaps()
@@ -143,6 +161,72 @@ func (p *Plan) rebuildMaps() {
 			p.Evidence[step.ID] = append([]string(nil), step.Evidence...)
 		}
 	}
+	p.rebuildTree()
+}
+
+func (p *Plan) rebuildTree() {
+	if p == nil {
+		return
+	}
+	type phaseGroup struct {
+		index int
+		name  string
+	}
+	groups := map[string]phaseGroup{}
+	var tree []TaskNode
+	for _, step := range p.Steps {
+		phase := firstNonEmpty(step.Phase, "Execution")
+		key := strings.ToLower(strings.ReplaceAll(phase, " ", "-"))
+		group, ok := groups[key]
+		if !ok {
+			group = phaseGroup{index: len(tree), name: phase}
+			groups[key] = group
+			tree = append(tree, TaskNode{ID: "phase-" + key, Description: phase, Status: PlanPending})
+		}
+		dependencies := make([]string, 0, len(step.DependsOn))
+		for _, dependency := range step.DependsOn {
+			dependencies = append(dependencies, fmt.Sprintf("task-%d", dependency))
+		}
+		tree[group.index].Children = append(tree[group.index].Children, TaskNode{
+			ID:          fmt.Sprintf("task-%d", step.ID),
+			Description: step.Description,
+			Status:      step.Status,
+			DependsOn:   dependencies,
+			ToolsUsed:   append([]string(nil), step.ToolsUsed...),
+			Evidence:    append([]string(nil), step.Evidence...),
+		})
+	}
+	for index := range tree {
+		tree[index].Status = aggregateTaskStatus(tree[index].Children)
+	}
+	p.Tree = tree
+}
+
+func aggregateTaskStatus(children []TaskNode) PlanStepStatus {
+	if len(children) == 0 {
+		return PlanPending
+	}
+	allComplete := true
+	hasRunning := false
+	for _, child := range children {
+		switch child.Status {
+		case PlanFailed:
+			return PlanFailed
+		case PlanRunning:
+			hasRunning = true
+			allComplete = false
+		case PlanDone, PlanSkipped:
+		default:
+			allComplete = false
+		}
+	}
+	if hasRunning {
+		return PlanRunning
+	}
+	if allComplete {
+		return PlanDone
+	}
+	return PlanPending
 }
 
 func (p *Plan) applyDependencies(actions []modelToolAction) {
@@ -163,6 +247,7 @@ func (p *Plan) applyDependencies(actions []modelToolAction) {
 				p.Steps[index].DependsOn = append(p.Steps[index].DependsOn, id)
 			}
 		}
+		p.Steps[index].Phase = inferPlanPhase(p.Steps[index].Description, firstNonEmpty(actions[index].Name, actions[index].Tool))
 	}
 	p.RevisedAt = time.Now()
 }
@@ -230,25 +315,56 @@ func (p *Plan) render() string {
 	if p.Goal != "" {
 		lines = append(lines, "Goal: "+p.Goal)
 	}
-	for _, step := range p.Steps {
-		mark := " "
-		switch step.Status {
-		case PlanDone:
-			mark = "x"
-		case PlanRunning:
-			mark = ">"
-		case PlanFailed:
-			mark = "!"
-		case PlanSkipped:
-			mark = "-"
+	if len(p.Tree) == 0 && len(p.Steps) > 0 {
+		p.rebuildTree()
+	}
+	for _, phase := range p.Tree {
+		lines = append(lines, fmt.Sprintf("  [%s] %s", planStatusMark(phase.Status), phase.Description))
+		for childIndex, task := range phase.Children {
+			branch := "├─"
+			if childIndex == len(phase.Children)-1 {
+				branch = "└─"
+			}
+			line := fmt.Sprintf("  %s [%s] %s. %s", branch, planStatusMark(task.Status), strings.TrimPrefix(task.ID, "task-"), task.Description)
+			if len(task.DependsOn) > 0 {
+				line += " ← " + strings.Join(task.DependsOn, ", ")
+			}
+			if len(task.ToolsUsed) > 0 {
+				line += " (" + strings.Join(task.ToolsUsed, ", ") + ")"
+			}
+			lines = append(lines, line)
 		}
-		line := fmt.Sprintf("- [%s] %d. %s", mark, step.ID, step.Description)
-		if len(step.ToolsUsed) > 0 {
-			line += " (" + strings.Join(step.ToolsUsed, ", ") + ")"
-		}
-		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func planStatusMark(status PlanStepStatus) string {
+	switch status {
+	case PlanDone:
+		return "x"
+	case PlanRunning:
+		return ">"
+	case PlanFailed:
+		return "!"
+	case PlanSkipped:
+		return "-"
+	default:
+		return " "
+	}
+}
+
+func inferPlanPhase(description, tool string) string {
+	text := strings.ToLower(strings.TrimSpace(description + " " + tool))
+	switch {
+	case strings.Contains(text, "verify"), strings.Contains(text, "test"), strings.Contains(text, "lint"), strings.Contains(text, "audit"), strings.Contains(text, "diff"):
+		return "Verification"
+	case strings.Contains(text, "write"), strings.Contains(text, "patch"), strings.Contains(text, "replace"), strings.Contains(text, "implement"), strings.Contains(text, "fix"), strings.Contains(text, "format"):
+		return "Implementation"
+	case strings.Contains(text, "review"), strings.Contains(text, "summar"), strings.Contains(text, "report"), strings.Contains(text, "deliver"):
+		return "Review"
+	default:
+		return "Investigation"
+	}
 }
 
 func (p *Plan) event(runID string, iteration int, status string) history.Event {

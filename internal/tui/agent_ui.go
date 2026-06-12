@@ -247,6 +247,11 @@ func (m Model) renderAgentEvent(event history.Event, renderer cliRenderer, selec
 		titleColor = m.styles.AccentBright
 	}
 	title := m.eventDisplayTitle(event)
+	if m.compactView && !expanded {
+		if detail := m.eventCompactDetail(event, max(12, renderer.width/2)); detail != "" {
+			title += " — " + detail
+		}
+	}
 	status := fallbackStatus(event.Status)
 	iteration := eventMetadataInt(event, "iteration")
 	meta := status
@@ -273,7 +278,7 @@ func (m Model) renderAgentEvent(event history.Event, renderer cliRenderer, selec
 	})
 	rows := []string{header}
 
-	if compact := m.eventCompactDetail(event, renderer.width-4); compact != "" && !expanded {
+	if compact := m.eventCompactDetail(event, renderer.width-4); compact != "" && !expanded && !m.compactView {
 		rows = append(rows, renderer.paintRow(cliLine{
 			{text: "    ", style: cliStyle{foreground: m.styles.Faint}},
 			{text: compact, style: cliStyle{foreground: m.styles.Muted}},
@@ -281,15 +286,15 @@ func (m Model) renderAgentEvent(event history.Event, renderer cliRenderer, selec
 	}
 
 	showBody := strings.TrimSpace(event.Content) != "" && !m.agentBodyAlreadyShown(event.Content) &&
-		(expanded || (m.cfg.ToolDetails && eventIsToolish(event)) || eventShowsBodyByDefault(event))
+		(expanded || (!m.compactView && m.cfg.ToolDetails && eventIsToolish(event)) || (!m.compactView && eventShowsBodyByDefault(event)))
 	if showBody {
 		bodyRenderer := renderer
 		bodyRenderer.body = cliStyle{foreground: m.styles.Muted}
 		bodyRenderer.strong = cliStyle{foreground: m.styles.Text, bold: true}
 		rows = append(rows, m.renderEventBody(event, bodyRenderer)...)
 	}
-	if selected && !expanded && eventHasExpandableBody(event) {
-		rows = append(rows, renderer.paintRow(cliLine{{text: "    Enter/Space expands · y copies latest answer · Ctrl+T returns focus", style: cliStyle{foreground: m.styles.Faint}}}))
+	if selected && eventHasExpandableBody(event) {
+		rows = append(rows, renderer.paintRow(cliLine{{text: "    Enter/Space expand · y copy event · c copy code · Ctrl+Shift+C copy surface · Ctrl+T return", style: cliStyle{foreground: m.styles.Faint}}}))
 	}
 	_ = index
 	return rows
@@ -370,6 +375,20 @@ func (m Model) eventCompactDetail(event history.Event, width int) string {
 		if ms := eventMetadataInt(event, "duration_ms"); ms > 0 {
 			prefix = fmt.Sprintf("%dms · ", ms)
 		}
+		if event.Type == "tool_result" || event.Type == "test_result" {
+			path := eventMetadataString(event, "path")
+			lines := 0
+			if strings.TrimSpace(event.Content) != "" {
+				lines = strings.Count(strings.TrimRight(event.Content, "\n"), "\n") + 1
+			}
+			size := len([]rune(event.Content))
+			summary := prefix
+			if path != "" {
+				summary += path + " · "
+			}
+			summary += fmt.Sprintf("%d lines, %s chars", lines, formatTokenCount(size))
+			return firstLineCompact(summary, width)
+		}
 		return firstLineCompact(prefix+event.Content, width)
 	case "final":
 		return firstLineCompact(event.Content, width)
@@ -383,10 +402,61 @@ func (m Model) renderEventBody(event history.Event, renderer cliRenderer) []stri
 	if content == "" {
 		return nil
 	}
+	if event.Type == history.EventReasoningTrace || event.Type == history.EventReasoningSummary {
+		trace := eventAgentTrace(event)
+		if !trace.Empty() {
+			return m.renderStructuredReasoning(trace, renderer)
+		}
+	}
 	if event.Type == "tool_call" || event.Type == "tool_result" || event.Type == "test_result" || event.Type == "approval_request" {
 		content = "```text\n" + content + "\n```"
 	}
 	return strings.Split(renderer.Render(content), "\n")
+}
+
+func (m Model) renderStructuredReasoning(trace history.AgentTrace, renderer cliRenderer) []string {
+	var sections []string
+	appendText := func(glyph, label, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		sections = append(sections, fmt.Sprintf("**%s %s**\n%s", glyph, label, value))
+	}
+	appendList := func(glyph, label string, values []string, numbered bool) {
+		var clean []string
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				clean = append(clean, value)
+			}
+		}
+		if len(clean) == 0 {
+			return
+		}
+		var lines []string
+		for index, value := range clean {
+			if numbered {
+				lines = append(lines, fmt.Sprintf("%d. %s", index+1, value))
+			} else {
+				lines = append(lines, "- "+value)
+			}
+		}
+		sections = append(sections, fmt.Sprintf("**%s %s**\n%s", glyph, label, strings.Join(lines, "\n")))
+	}
+	appendText("◆", "Goal", trace.Goal)
+	appendText("▸", "Current state", trace.CurrentState)
+	appendList("▸", "Assumptions", trace.Assumptions, false)
+	appendList("▾", "Approach", trace.Approach, true)
+	appendList("▾", "Evidence", trace.Evidence, false)
+	appendList("▸", "Risks", trace.Risks, false)
+	appendText("▸", "Tool rationale", trace.ToolRationale)
+	verificationGlyph := "✓"
+	if strings.Contains(strings.ToLower(trace.Verification), "fail") || strings.Contains(strings.ToLower(trace.Verification), "unverified") {
+		verificationGlyph = "!"
+	}
+	appendText(verificationGlyph, "Verification", trace.Verification)
+	appendText("→", "Next step", trace.NextStep)
+	return strings.Split(renderer.Render(strings.Join(sections, "\n\n")), "\n")
 }
 
 func eventMetadataInt(event history.Event, key string) int {
@@ -406,6 +476,14 @@ func eventMetadataInt(event history.Event, key string) int {
 	default:
 		return 0
 	}
+}
+
+func eventMetadataString(event history.Event, key string) string {
+	if event.Metadata == nil {
+		return ""
+	}
+	value, _ := event.Metadata[key].(string)
+	return strings.TrimSpace(value)
 }
 
 func (m Model) agentBodyAlreadyShown(content string) bool {

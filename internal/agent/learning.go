@@ -18,6 +18,7 @@ type memoryEpisode struct {
 	Goal         string    `json:"goal"`
 	Summary      string    `json:"summary"`
 	ChangedPaths []string  `json:"changed_paths,omitempty"`
+	ToolSequence []string  `json:"tool_sequence,omitempty"`
 	Evidence     []string  `json:"evidence,omitempty"`
 	Verified     bool      `json:"verified"`
 }
@@ -48,6 +49,7 @@ func (r Runner) learnFromRun(finalText string, state *runState) {
 		Goal:         compact(goal, 500),
 		Summary:      compact(finalText, 900),
 		ChangedPaths: sortedKeys(state.changedPaths),
+		ToolSequence: compactToolSequence(state.toolSequence, 12),
 		Evidence:     evidence,
 		Verified:     state.verified,
 	})
@@ -63,4 +65,22 @@ func (r Runner) learnFromRun(finalText string, state *runState) {
 	if os.WriteFile(tmp, data, 0o600) == nil {
 		_ = os.Rename(tmp, path)
 	}
+}
+
+func compactToolSequence(sequence []string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	out := make([]string, 0, minInt(limit, len(sequence)))
+	for _, name := range sequence {
+		name = strings.TrimSpace(name)
+		if name == "" || (len(out) > 0 && out[len(out)-1] == name) {
+			continue
+		}
+		out = append(out, name)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }

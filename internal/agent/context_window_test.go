@@ -58,3 +58,64 @@ func TestContextWindowDeduplicatesNativeToolResults(t *testing.T) {
 		t.Fatalf("native tool results = %d, want 1", results)
 	}
 }
+
+func TestContextWindowCacheInvalidatesOnWorkingMemoryMutation(t *testing.T) {
+	cache := NewContextFitCache()
+	window := ContextWindow{
+		System:         "system",
+		Budget:         1200,
+		SummaryTokens:  120,
+		RecallMessages: 2,
+		Provider:       "openai",
+		Query:          "fix auth",
+		WorkingMemory:  "decision: inspect auth.go",
+		Messages:       []llm.Message{{Role: "user", Content: "fix auth"}},
+		Cache:          cache,
+	}
+	first, _ := window.Fit()
+	window.WorkingMemory = "decision: inspect session.go"
+	second, _ := window.Fit()
+
+	if len(first) == 0 || len(second) == 0 {
+		t.Fatalf("unexpected empty fits: first=%#v second=%#v", first, second)
+	}
+	if first[0].Content == second[0].Content {
+		t.Fatalf("cache served stale working memory: %q", second[0].Content)
+	}
+}
+
+func TestContextWindowCacheReturnsDefensiveCopy(t *testing.T) {
+	cache := NewContextFitCache()
+	window := ContextWindow{
+		System:   "system",
+		Budget:   1200,
+		Messages: []llm.Message{{Role: "user", Content: "original"}},
+		Cache:    cache,
+	}
+	first, _ := window.Fit()
+	first[0].Content = "mutated by caller"
+	second, _ := window.Fit()
+	if second[0].Content != "original" {
+		t.Fatalf("cached fit was mutated through returned slice: %q", second[0].Content)
+	}
+}
+
+func TestAdaptiveSummaryBudgetGrowsAcrossRun(t *testing.T) {
+	early := ContextWindow{SummaryTokens: 10_000, Iteration: 1, MaxIterations: 10}.adaptiveSummaryTokens(10_000)
+	late := ContextWindow{SummaryTokens: 10_000, Iteration: 10, MaxIterations: 10}.adaptiveSummaryTokens(10_000)
+	if early >= late {
+		t.Fatalf("adaptive summary budget did not grow: early=%d late=%d", early, late)
+	}
+	if early != 1000 || late != 4000 {
+		t.Fatalf("adaptive summary budgets = %d/%d, want 1000/4000", early, late)
+	}
+}
+
+func TestProviderAwareEstimateProtectsCodeHeavyRequests(t *testing.T) {
+	text := `{"path":"internal/agent/context_window.go","start_line":1,"end_line":200}`
+	providerEstimate := estimateVisibleTokensForProvider(text, "openai")
+	runeEstimate := estimateVisibleTokens(text)
+	if providerEstimate < runeEstimate {
+		t.Fatalf("provider estimate %d undercut conservative rune estimate %d", providerEstimate, runeEstimate)
+	}
+}

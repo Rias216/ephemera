@@ -32,3 +32,25 @@ func TestPlanRenderShowsCurrentState(t *testing.T) {
 		t.Fatalf("rendered plan = %q", text)
 	}
 }
+
+func TestPlanBuildsHierarchicalPhaseTreeWithDependencies(t *testing.T) {
+	plan := newPlan("ship safely", []string{"inspect code", "patch implementation", "run tests"})
+	plan.applyDependencies([]modelToolAction{
+		{ID: "inspect", Name: "read_file"},
+		{ID: "patch", Name: "apply_patch", DependsOn: []string{"inspect"}},
+		{ID: "verify", Name: "go_test", DependsOn: []string{"patch"}},
+	})
+	plan.rebuildMaps()
+	if len(plan.Tree) != 3 {
+		t.Fatalf("phase tree has %d roots, want 3: %#v", len(plan.Tree), plan.Tree)
+	}
+	if got := plan.Tree[1].Children[0].DependsOn; len(got) != 1 || got[0] != "task-1" {
+		t.Fatalf("implementation dependency = %#v, want task-1", got)
+	}
+	rendered := plan.Render()
+	for _, want := range []string{"Investigation", "Implementation", "Verification", "← task-1", "← task-2"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered tree missing %q:\n%s", want, rendered)
+		}
+	}
+}

@@ -69,13 +69,14 @@ type approvalResultMsg struct {
 
 // Model is the complete Bubble Tea state machine.
 type Model struct {
-	cfg      config.Config
-	store    *history.Store
-	session  history.Session
-	styles   theme.Styles
-	viewport viewport.Model
-	input    textinput.Model
-	spinner  spinner.Model
+	cfg              config.Config
+	store            *history.Store
+	session          history.Session
+	styles           theme.Styles
+	viewport         viewport.Model
+	thinkingViewport viewport.Model
+	input            textinput.Model
+	spinner          spinner.Model
 
 	width               int
 	height              int
@@ -100,6 +101,11 @@ type Model struct {
 	expandedEvents      map[string]bool
 	timelineFilter      string
 	followLive          bool
+	compactView         bool
+	redoSession         *history.Session
+	renderedTranscript  string
+	renderedThinking    string
+	sectionRenderCache  map[string][]string
 	agentStream         <-chan agent.StreamUpdate
 	agentCancel         context.CancelFunc
 	liveAgent           liveAgentState
@@ -152,6 +158,7 @@ func New(cfg config.Config, store *history.Store, sessionName string) Model {
 		animationLastTick:   now,
 		inspectorTab:        0,
 		expandedEvents:      make(map[string]bool),
+		sectionRenderCache:  make(map[string][]string),
 		followLive:          true,
 	}
 }
@@ -301,6 +308,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		key := msg.String()
 		switch key {
+		case "ctrl+shift+c":
+			m.copyReasoningSurface()
+			return m, nil
 		case "alt+1":
 			m.inspectorTab = 0
 			return m, nil
@@ -309,6 +319,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "alt+3":
 			m.inspectorTab = 2
+			m.timelineFocus = false
+			m.refreshThinkingViewport(false)
 			return m, nil
 		case "alt+4":
 			m.inspectorTab = 3
@@ -391,28 +403,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshViewport(false)
 				return m, nil
 			}
+		case "y":
+			if m.timelineFocus && m.input.Value() == "" {
+				m.copySelectedEvent(false)
+				return m, nil
+			}
+		case "c":
+			if m.timelineFocus && m.input.Value() == "" {
+				m.copySelectedEvent(true)
+				return m, nil
+			}
+		case "u":
+			if m.timelineFocus && m.input.Value() == "" && !m.busy {
+				m.rewindLatestUserTurn()
+				m.refreshViewport(true)
+				return m, nil
+			}
 		case "pgup":
 			if len(m.suggestions) > 0 && m.suggestionPaletteActive() {
 				m.moveSuggestion(-max(1, m.suggestionCapacity()))
 			} else {
-				m.viewport.PageUp()
+				m.pageActiveViewport(-1)
 			}
 			return m, nil
 		case "pgdown":
 			if len(m.suggestions) > 0 && m.suggestionPaletteActive() {
 				m.moveSuggestion(max(1, m.suggestionCapacity()))
 			} else {
-				m.viewport.PageDown()
+				m.pageActiveViewport(1)
 			}
 			return m, nil
 		case "ctrl+u":
 			if m.input.Value() == "" && !m.suggestionPaletteActive() {
-				m.viewport.HalfPageUp()
+				m.halfPageActiveViewport(-1)
 				return m, nil
 			}
 		case "ctrl+d":
 			if m.input.Value() == "" && !m.suggestionPaletteActive() {
-				m.viewport.HalfPageDown()
+				m.halfPageActiveViewport(1)
 				return m, nil
 			}
 		}
@@ -547,8 +575,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if _, ok := msg.(tea.MouseMsg); ok && m.ready {
-		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
+		cmd := m.updateActiveViewport(msg)
 		cmds = append(cmds, cmd)
 	}
 	if !m.busy {
@@ -655,6 +682,13 @@ func (m *Model) resize() {
 		m.viewport.SetWidth(viewportWidth)
 		m.viewport.SetHeight(viewportHeight)
 	}
+	if m.thinkingViewport.Width() == 0 {
+		m.thinkingViewport = viewport.New(viewport.WithWidth(viewportWidth), viewport.WithHeight(viewportHeight))
+		m.thinkingViewport.MouseWheelEnabled = true
+	} else {
+		m.thinkingViewport.SetWidth(viewportWidth)
+		m.thinkingViewport.SetHeight(viewportHeight)
+	}
 	// Reserve stable space for the animated prompt and composer metadata so the
 	// input never pushes the right edge of its panel while typing.
 	composerReserve := 18
@@ -669,13 +703,110 @@ func (m *Model) refreshViewport(bottom bool) {
 	if !m.ready {
 		return
 	}
-	m.viewport.SetContent(m.renderTranscript())
+	content := m.renderTranscript()
+	if content != m.renderedTranscript {
+		m.viewport.SetContent(content)
+		m.renderedTranscript = content
+	}
 	if bottom {
 		m.viewport.GotoBottom()
 	}
+	m.refreshThinkingViewport(bottom && m.inspectorTab == inspectorThinking)
 }
 
-func (m Model) renderTranscript() string {
+func (m *Model) refreshThinkingViewport(bottom bool) {
+	if !m.ready || m.thinkingViewport.Width() == 0 {
+		return
+	}
+	content := m.renderThinkingPanel()
+	if content != m.renderedThinking {
+		wasBottom := m.thinkingViewport.AtBottom()
+		m.thinkingViewport.SetContent(content)
+		m.renderedThinking = content
+		if bottom || (m.liveAgent.Active && wasBottom) {
+			m.thinkingViewport.GotoBottom()
+		}
+	} else if bottom {
+		m.thinkingViewport.GotoBottom()
+	}
+}
+
+func (m Model) renderThinkingPanel() string {
+	renderer := newCLIRenderer(m.styles, max(20, m.thinkingViewport.Width()))
+	markdown := m.surfaceNotice()
+	if m.liveAgent.Active {
+		var live []string
+		live = append(live, "### Live reasoning summary")
+		if thought := strings.TrimSpace(m.liveAgent.Reasoning); thought != "" {
+			live = append(live, thought)
+		} else if thought := strings.TrimSpace(m.liveAgent.Thought); thought != "" {
+			live = append(live, thought)
+		}
+		if plan := strings.TrimSpace(m.liveAgent.Plan); plan != "" {
+			live = append(live, "### Live plan\n\n"+plan)
+		}
+		if activity := strings.TrimSpace(m.liveAgent.Activity); activity != "" {
+			live = append(live, "### Current activity\n\n"+activity)
+		}
+		if len(live) > 1 {
+			markdown = strings.Join(live, "\n\n") + "\n\n---\n\n" + markdown
+		}
+	}
+	rows := []string{m.transcriptLine(m.styles.NoticeLabel, "surface")}
+	rows = append(rows, strings.Split(renderer.Render(markdown), "\n")...)
+	return strings.Join(rows, "\n")
+}
+
+func (m Model) activeViewportAtBottom() bool {
+	if m.inspectorTab == inspectorThinking && m.thinkingViewport.Width() > 0 {
+		return m.thinkingViewport.AtBottom()
+	}
+	return m.viewport.AtBottom()
+}
+
+func (m *Model) pageActiveViewport(direction int) {
+	if m.inspectorTab == inspectorThinking {
+		if direction < 0 {
+			m.thinkingViewport.PageUp()
+		} else {
+			m.thinkingViewport.PageDown()
+		}
+		return
+	}
+	if direction < 0 {
+		m.viewport.PageUp()
+	} else {
+		m.viewport.PageDown()
+	}
+}
+
+func (m *Model) halfPageActiveViewport(direction int) {
+	if m.inspectorTab == inspectorThinking {
+		if direction < 0 {
+			m.thinkingViewport.HalfPageUp()
+		} else {
+			m.thinkingViewport.HalfPageDown()
+		}
+		return
+	}
+	if direction < 0 {
+		m.viewport.HalfPageUp()
+	} else {
+		m.viewport.HalfPageDown()
+	}
+}
+
+func (m *Model) updateActiveViewport(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	if m.inspectorTab == inspectorThinking {
+		m.thinkingViewport, cmd = m.thinkingViewport.Update(msg)
+	} else {
+		m.viewport, cmd = m.viewport.Update(msg)
+	}
+	return cmd
+}
+
+func (m *Model) renderTranscript() string {
 	renderer := newCLIRenderer(m.styles, m.transcriptWidth())
 	var rows []string
 	appendSectionGap := func() {
@@ -701,30 +832,18 @@ Route: **%s** · **%s** · **%s** token context.`,
 		)), "\n")...)
 	}
 
-	for _, message := range m.session.Messages {
-		var label string
-		var style lipgloss.Style
-		switch message.Role {
-		case "user":
-			label, style = "you", m.styles.UserLabel
-		case "assistant":
-			label, style = "ephemera", m.styles.AssistantLabel
-		default:
-			continue
+	sections := m.buildTranscriptSections()
+	selected := m.clampedSelectedEvent(len(m.visibleAgentEvents()))
+	previous := transcriptSectionKind(-1)
+	for _, section := range sections {
+		if sectionNeedsGap(previous, section.kind) {
+			appendSectionGap()
 		}
-		appendSectionGap()
-		rows = append(rows, m.transcriptLine(style, label))
-		rows = append(rows, strings.Split(renderer.Render(message.Content), "\n")...)
-	}
-
-	if m.notice != "" {
-		appendSectionGap()
-		rows = append(rows, m.transcriptLine(m.styles.NoticeLabel, "signal"))
-		rows = append(rows, strings.Split(renderer.Render(m.notice), "\n")...)
-	}
-	if len(m.session.Events) > 0 || m.liveAgent.Active {
-		appendSectionGap()
-		rows = append(rows, strings.Split(m.renderAgentTimeline(), "\n")...)
+		if section.kind == sectionAgentEvent && previous != sectionAgentEvent {
+			rows = append(rows, m.renderInlineAgentHeader())
+		}
+		rows = append(rows, m.renderTranscriptSection(section, renderer, selected)...)
+		previous = section.kind
 	}
 	return strings.Join(rows, "\n")
 }
@@ -1068,9 +1187,32 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 		m.status = "Plan opened."
 
 	case "/surface":
-		m.notice = m.surfaceNotice()
-		m.inspectorTab = inspectorThinking
-		m.status = "Beneath the Surface opened."
+		action := "open"
+		if len(args) > 0 {
+			action = strings.ToLower(args[0])
+		}
+		switch action {
+		case "open":
+			m.inspectorTab = inspectorThinking
+			m.timelineFocus = false
+			m.refreshThinkingViewport(true)
+			m.status = "Beneath the Surface opened."
+		case "copy":
+			m.copyReasoningSurface()
+		case "export":
+			target := ""
+			if len(args) > 1 {
+				target = strings.Join(args[1:], " ")
+			}
+			path, err := m.exportSurface(target)
+			if err != nil {
+				m.status = "Surface export failed: " + err.Error()
+			} else {
+				m.status = "Surface exported → " + path
+			}
+		default:
+			m.status = "Usage: /surface [copy|export [path]]"
+		}
 
 	case "/tools":
 		m.notice = m.toolsNotice()
@@ -1256,6 +1398,19 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 	case "/compact":
 		m.compactAgentEvents()
 
+	case "/compact-view":
+		value := "toggle"
+		if len(args) > 0 {
+			value = strings.ToLower(args[0])
+		}
+		enabled, valid := toggleSetting(m.compactView, value)
+		if !valid {
+			m.status = "Usage: /compact-view [on|off|toggle]"
+			break
+		}
+		m.compactView = enabled
+		m.status = fmt.Sprintf("Compact view → %t", enabled)
+
 	case "/config":
 		m.notice = m.configNotice()
 		m.status = "Config opened."
@@ -1283,6 +1438,9 @@ func (m *Model) handleCommand(raw string) (bool, tea.Cmd) {
 
 	case "/undo":
 		m.undoLastMessage()
+
+	case "/redo":
+		m.redoLastUndo()
 
 	case "/export":
 		target := ""

@@ -1,12 +1,15 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/atotto/clipboard"
 
 	"github.com/ephemera-ai/ephemera/internal/config"
 	"github.com/ephemera-ai/ephemera/internal/history"
@@ -44,12 +47,176 @@ func (m *Model) undoLastMessage() {
 		m.status = "Nothing to undo."
 		return
 	}
-	removed := m.session.Messages[len(m.session.Messages)-1].Role
-	m.session.Messages = m.session.Messages[:len(m.session.Messages)-1]
+	checkpoint := cloneHistorySession(m.session)
+	removedIndex := len(m.session.Messages) - 1
+	removedMessage := m.session.Messages[removedIndex]
+	cutoff := removedMessage.CreatedAt
+	if removedMessage.Role == "assistant" {
+		for index := removedIndex - 1; index >= 0; index-- {
+			if m.session.Messages[index].Role == "user" {
+				cutoff = m.session.Messages[index].CreatedAt
+				break
+			}
+		}
+	}
+	m.session.Messages = m.session.Messages[:removedIndex]
+	m.session.Events = eventsBefore(m.session.Events, cutoff)
 	m.lastAssistant = findLastAssistant(m.session.Messages)
 	m.notice = ""
+	m.redoSession = &checkpoint
+	m.selectedEvent = m.clampedSelectedEvent(len(m.visibleAgentEvents()))
 	_ = m.saveSession()
-	m.status = "Removed latest " + removed + " message."
+	m.status = "Removed latest " + removedMessage.Role + " message and its agent events. /redo restores it."
+}
+
+func (m *Model) rewindLatestUserTurn() {
+	lastUser := -1
+	for index := len(m.session.Messages) - 1; index >= 0; index-- {
+		if m.session.Messages[index].Role == "user" {
+			lastUser = index
+			break
+		}
+	}
+	if lastUser < 0 {
+		m.status = "Nothing to rewind."
+		return
+	}
+	checkpoint := cloneHistorySession(m.session)
+	prompt := m.session.Messages[lastUser]
+	m.session.Messages = m.session.Messages[:lastUser]
+	m.session.Events = eventsBefore(m.session.Events, prompt.CreatedAt)
+	m.session.Agent = history.AgentSnapshot{}
+	m.lastAssistant = findLastAssistant(m.session.Messages)
+	m.notice = ""
+	m.redoSession = &checkpoint
+	m.input.SetValue(prompt.Content)
+	m.input.CursorEnd()
+	m.timelineFocus = false
+	m.selectedEvent = m.clampedSelectedEvent(len(m.visibleAgentEvents()))
+	_ = m.saveSession()
+	m.status = "Latest user turn rewound into the composer. /redo restores the original run."
+}
+
+func (m *Model) redoLastUndo() {
+	if m.redoSession == nil {
+		m.status = "Nothing to redo."
+		return
+	}
+	m.session = cloneHistorySession(*m.redoSession)
+	m.redoSession = nil
+	m.lastAssistant = findLastAssistant(m.session.Messages)
+	m.notice = ""
+	m.selectedEvent = m.clampedSelectedEvent(len(m.visibleAgentEvents()))
+	_ = m.saveSession()
+	m.status = "Restored the most recently undone transcript state."
+}
+
+func cloneHistorySession(session history.Session) history.Session {
+	data, err := json.Marshal(session)
+	if err != nil {
+		return session
+	}
+	var cloned history.Session
+	if json.Unmarshal(data, &cloned) != nil {
+		return session
+	}
+	return cloned
+}
+
+func eventsBefore(events []history.Event, cutoff time.Time) []history.Event {
+	if cutoff.IsZero() {
+		return nil
+	}
+	kept := make([]history.Event, 0, len(events))
+	for _, event := range events {
+		if event.CreatedAt.Before(cutoff) {
+			kept = append(kept, event)
+		}
+	}
+	return kept
+}
+
+func (m *Model) copySelectedEvent(codeOnly bool) {
+	events := m.visibleAgentEvents()
+	if len(events) == 0 {
+		m.status = "No agent event selected."
+		return
+	}
+	event := events[m.clampedSelectedEvent(len(events))]
+	content := strings.TrimSpace(event.Content)
+	if codeOnly {
+		content = extractFencedCode(content)
+		if content == "" {
+			m.status = "The selected event has no fenced code block."
+			return
+		}
+	}
+	if content == "" {
+		m.status = "The selected event has no copyable content."
+		return
+	}
+	if err := clipboard.WriteAll(content); err != nil {
+		m.status = "Copy failed: " + err.Error()
+		return
+	}
+	if codeOnly {
+		m.status = "Copied code from " + m.eventDisplayTitle(event) + "."
+	} else {
+		m.status = "Copied " + m.eventDisplayTitle(event) + "."
+	}
+}
+
+func extractFencedCode(content string) string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	var blocks []string
+	var current []string
+	inFence := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if inFence {
+				blocks = append(blocks, strings.TrimSpace(strings.Join(current, "\n")))
+				current = nil
+			}
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			current = append(current, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(blocks, "\n\n"))
+}
+
+func (m *Model) copyReasoningSurface() {
+	content := strings.TrimSpace(m.surfaceMarkdown())
+	if content == "" {
+		m.status = "No reasoning surface is available yet."
+		return
+	}
+	if err := clipboard.WriteAll(content); err != nil {
+		m.status = "Surface copy failed: " + err.Error()
+		return
+	}
+	m.status = "Copied the full reasoning surface."
+}
+
+func (m Model) surfaceMarkdown() string {
+	return strings.TrimSpace(m.surfaceNotice())
+}
+
+func (m Model) exportSurface(target string) (string, error) {
+	path, err := exportTargetPath(target, m.session.Name+"-surface")
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(m.surfaceMarkdown()+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func (m Model) exportTranscript(target string) (string, error) {

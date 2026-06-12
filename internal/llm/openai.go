@@ -107,7 +107,7 @@ func (p *OpenAI) Generate(ctx context.Context, req Request) (string, error) {
 func (p *OpenAI) GenerateWithTools(ctx context.Context, req Request, specs []ToolSpec, onDelta DeltaFunc) (ToolDecision, error) {
 	if len(specs) == 0 {
 		text, err := p.GenerateStream(ctx, req, onDelta)
-		return ToolDecision{Text: text}, err
+		return ToolDecision{Text: text, Transport: ToolTransportText}, err
 	}
 	if p.baseURL == "" && !hasNativeToolHistory(req.Messages) {
 		// Responses provides the best first-round reasoning-summary stream. After

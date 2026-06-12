@@ -148,13 +148,10 @@ func (p *Anthropic) generateMessageStream(ctx context.Context, req Request, spec
 		if block.Type != "tool_use" || strings.TrimSpace(block.Name) == "" {
 			continue
 		}
-		args := map[string]any{}
-		if raw := strings.TrimSpace(block.Input.String()); raw != "" {
-			dec := json.NewDecoder(strings.NewReader(raw))
-			dec.UseNumber()
-			if err := dec.Decode(&args); err != nil {
-				return ToolDecision{}, fmt.Errorf("Anthropic returned invalid arguments for tool %q: %w", block.Name, err)
-			}
+		raw := strings.TrimSpace(block.Input.String())
+		args, _, decodeErr := decodeToolArgumentsString(raw)
+		if decodeErr != nil {
+			return ToolDecision{}, newToolProtocolError("Anthropic", block.Name, raw, decodeErr)
 		}
 		calls = append(calls, ToolCall{ID: block.ID, Name: block.Name, Arguments: args})
 	}
@@ -162,7 +159,7 @@ func (p *Anthropic) generateMessageStream(ctx context.Context, req Request, spec
 	if visible == "" && len(calls) == 0 {
 		return ToolDecision{}, fmt.Errorf("Anthropic returned an empty streamed response")
 	}
-	return ToolDecision{Text: visible, ToolCalls: calls}, nil
+	return ToolDecision{Text: visible, ToolCalls: calls, Transport: ToolTransportNative}, nil
 }
 
 func anthropicWireMessages(messages []Message) []map[string]any {

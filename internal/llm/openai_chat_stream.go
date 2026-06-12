@@ -153,13 +153,9 @@ func (p *OpenAI) generateChatCompletionsStream(ctx context.Context, req Request,
 		if strings.TrimSpace(call.Name) == "" {
 			continue
 		}
-		args := map[string]any{}
-		if strings.TrimSpace(call.Arguments) != "" {
-			dec := json.NewDecoder(strings.NewReader(call.Arguments))
-			dec.UseNumber()
-			if err := dec.Decode(&args); err != nil {
-				return ToolDecision{}, fmt.Errorf("%s returned invalid arguments for tool %q: %w", p.Name(), call.Name, err)
-			}
+		args, _, decodeErr := decodeToolArgumentsString(call.Arguments)
+		if decodeErr != nil {
+			return ToolDecision{}, newToolProtocolError(p.Name(), call.Name, call.Arguments, decodeErr)
 		}
 		toolCalls = append(toolCalls, ToolCall{ID: call.ID, Name: call.Name, Arguments: args})
 	}
@@ -167,7 +163,7 @@ func (p *OpenAI) generateChatCompletionsStream(ctx context.Context, req Request,
 	if visible == "" && len(toolCalls) == 0 {
 		return ToolDecision{}, fmt.Errorf("%s returned an empty streaming response", p.Name())
 	}
-	return ToolDecision{Text: visible, ToolCalls: toolCalls}, nil
+	return ToolDecision{Text: visible, ToolCalls: toolCalls, Transport: ToolTransportNative}, nil
 }
 
 func rawText(raw json.RawMessage) string {

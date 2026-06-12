@@ -59,8 +59,9 @@ type CapableProvider interface {
 // ToolProperty is a small JSON-schema-compatible property description used by
 // provider-native tool APIs and by local validation/help surfaces.
 type ToolProperty struct {
-	Type        string `json:"type"`
-	Description string `json:"description,omitempty"`
+	Type        string      `json:"type"`
+	Description string      `json:"description,omitempty"`
+	Items       *ToolSchema `json:"items,omitempty"`
 }
 
 // ToolSchema describes a JSON object accepted by a tool.
@@ -135,6 +136,7 @@ func toolActivityText(name string, argumentChars int) string {
 type ToolDecision struct {
 	Text      string
 	ToolCalls []ToolCall
+	Transport ToolTransport
 }
 
 // ToolCallingProvider can ask the model for native structured tool calls.
@@ -195,7 +197,7 @@ func GenerateToolDecision(ctx context.Context, provider Provider, req Request, s
 	if err != nil {
 		return ToolDecision{}, err
 	}
-	return ToolDecision{Text: text}, nil
+	return ToolDecision{Text: text, Transport: ToolTransportText}, nil
 }
 
 // New constructs the configured provider. Environment variables remain valid,
